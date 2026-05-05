@@ -10,6 +10,7 @@ import '../models/chat_message.dart';
 import '../models/server.dart';
 import '../services/ts_ffi.dart';
 import '../services/audio_service.dart';
+import '../services/foreground_service.dart';
 
 // ─── Immutable State ────────────────────────────────────────────────
 
@@ -235,12 +236,14 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         TsNative.setVadEnabled(true);
         TsNative.setVadThreshold(state.vadThreshold);
         _updateMicState();
+        ForegroundService.start(text: state.serverName);
         break;
 
       case 'disconnected':
         _pollTimer?.cancel();
         _audioService?.stop();
         _audioService = null;
+        ForegroundService.stop();
         state = const TsConnectionState();
         break;
 
@@ -329,6 +332,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     _audioService?.stop();
     _audioService = null;
     _micEnabled = false;
+    ForegroundService.stop();
     _pollTimer?.cancel();
     TsNative.disconnect();
     // Keep polling for ~3 seconds to capture Rust disconnect diag messages

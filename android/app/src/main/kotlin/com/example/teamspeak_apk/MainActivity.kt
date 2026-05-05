@@ -1,11 +1,15 @@
 package com.example.teamspeak_apk
 
+import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
+import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodChannel
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -13,12 +17,49 @@ class MainActivity : FlutterActivity() {
     private var audioRecord: AudioRecord? = null
     @Volatile var isRecording = false
 
+    override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        val cacheKey = "teamspeak_engine"
+        var engine = FlutterEngineCache.getInstance().get(cacheKey)
+        if (engine == null) {
+            engine = FlutterEngine(context)
+            engine.dartExecutor.executeDartEntrypoint(
+                DartExecutor.DartEntrypoint.createDefault()
+            )
+            FlutterEngineCache.getInstance().put(cacheKey, engine)
+        }
+        return engine
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         // Mic capture via EventChannel
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.teamspeak_apk/mic")
             .setStreamHandler(MicStreamHandler(this))
+
+        // Foreground service control via MethodChannel
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.teamspeak_apk/service")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> {
+                        val title = call.argument<String>("title") ?: "TeamSpeak"
+                        val text = call.argument<String>("text") ?: "Connected"
+                        KeepAliveService.start(this, title, text)
+                        result.success(true)
+                    }
+                    "stop" -> {
+                        KeepAliveService.stop(this)
+                        result.success(true)
+                    }
+                    "update" -> {
+                        val title = call.argument<String>("title") ?: "TeamSpeak"
+                        val text = call.argument<String>("text") ?: "Connected"
+                        KeepAliveService.update(this, title, text)
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
     }
 
     fun startMic(): Boolean {

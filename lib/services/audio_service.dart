@@ -69,6 +69,10 @@ class AudioService {
   Future<bool> enableMic() async {
     final status = await Permission.microphone.request();
     if (status.isGranted) {
+      // Also request notification permission for foreground service (Android 13+)
+      if (await Permission.notification.isDenied) {
+        await Permission.notification.request();
+      }
       _startMic();
       debugPrint('AudioService: mic enabled');
       return true;
