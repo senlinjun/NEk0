@@ -15,6 +15,8 @@ class ServerScreen extends ConsumerStatefulWidget {
 }
 
 class _ServerScreenState extends ConsumerState<ServerScreen> {
+  int _lastSeenMessageCount = 0;
+
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(tsConnectionProvider);
@@ -24,48 +26,31 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       backgroundColor: const Color(0xFF0F0F23),
       body: SafeArea(
         child: Column(
-        children: [
-          ConnectionBar(
-            serverName: conn.serverName,
-            connected: conn.connected,
-            onDisconnect: () async {
-              debugPrint('SERVER_SCREEN: disconnect tapped');
-              await connNotifier.disconnect();
-              // Keep polling for Rust diag messages (event loop needs time)
-              for (int i = 0; i < 15; i++) {
-                await Future.delayed(const Duration(milliseconds: 200));
-                connNotifier.pollForDisconnectDiag();
-              }
-              debugPrint('SERVER_SCREEN: disconnect done, mounted=$mounted');
-              if (mounted) Navigator.of(context).pop();
-            },
-          ),
-          Expanded(
-            child: conn.connecting
-                ? const Center(
-                    child: CircularProgressIndicator(color: Colors.blue))
-                : Row(
-                    children: [
-                      SizedBox(
-                        width: 260,
-                        child: _buildLeftPanel(conn, connNotifier),
-                      ),
-                      const VerticalDivider(
-                          width: 1, color: Color(0xFF2A2A4A)),
-                      Expanded(
-                        child: conn.selectedChannelId != null
-                            ? ChatPanel(channelId: conn.selectedChannelId!)
-                            : const Center(
-                                child: Text('Select a channel',
-                                    style: TextStyle(color: Colors.grey)),
-                              ),
-                      ),
-                    ],
-                  ),
-          ),
-          _buildControls(conn, connNotifier),
-        ],
-      ),
+          children: [
+            ConnectionBar(
+              serverName: conn.serverName,
+              connected: conn.connected,
+              onDisconnect: () async {
+                debugPrint('SERVER_SCREEN: disconnect tapped');
+                await connNotifier.disconnect();
+                for (int i = 0; i < 15; i++) {
+                  await Future.delayed(const Duration(milliseconds: 200));
+                  connNotifier.pollForDisconnectDiag();
+                }
+                debugPrint('SERVER_SCREEN: disconnect done, mounted=$mounted');
+                if (mounted) Navigator.of(context).pop();
+              },
+            ),
+            Expanded(
+              child: conn.connecting
+                  ? const Center(
+                      child: CircularProgressIndicator(color: Colors.blue))
+                  : _buildLeftPanel(conn, connNotifier),
+            ),
+            _buildChatBar(conn),
+            _buildControls(conn, connNotifier),
+          ],
+        ),
       ),
     );
   }
@@ -109,42 +94,95 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                   fontWeight: FontWeight.bold),
             ),
           ),
-          // Diagnostic log (always visible when connected)
-          if (conn.connected)
-            Container(
-              height: 48,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              color: const Color(0xFF0A0A1A),
-              child: Row(
-                children: [
-                  const Icon(Icons.bug_report, color: Colors.green, size: 12),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      conn.diagMessages.isNotEmpty
-                          ? conn.diagMessages.last
-                          : 'Dec:${conn.audioDecodedCount} Err:${conn.audioErrorCount} Buf:${conn.audioBufSamples} Mic:${conn.inputMuted ? "MUTED" : "ON"}',
-                      style: const TextStyle(color: Colors.grey, fontSize: 9, fontFamily: 'monospace'),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
+          if (conn.selectedChannelId == null)
+            Expanded(
+              flex: 2,
+              child: SizedBox.shrink(),
+            ),
+          if (conn.selectedChannelId != null)
+            Expanded(
+              flex: 2,
+              child: ClientList(
+                clients: conn.clients,
+                currentChannelId: conn.selectedChannelId!,
+                onClientTap: (clientId) {},
               ),
             ),
-          Expanded(
-            flex: 2,
-            child: conn.selectedChannelId != null
-                ? ClientList(
-                    clients: conn.clients,
-                    currentChannelId: conn.selectedChannelId!,
-                    onClientTap: (clientId) {
-                      // TODO: Open private chat
-                    },
-                  )
-                : const SizedBox.shrink(),
-          ),
         ],
+      ),
+    );
+  }
+
+  void _openChat() async {
+    final conn = ref.read(tsConnectionProvider);
+    if (conn.selectedChannelId == null) return;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF12122A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (ctx) => SizedBox(
+        height: MediaQuery.of(context).size.height * 0.75,
+        child: ChatPanel(channelId: conn.selectedChannelId!),
+      ),
+    );
+    // Reset badge after sheet closes (re-read for latest count)
+    if (mounted) {
+      final latest = ref.read(tsConnectionProvider);
+      setState(() => _lastSeenMessageCount = latest.messages.length);
+    }
+  }
+
+  Widget _buildChatBar(TsConnectionState conn) {
+    final lastMsg = conn.messages.isNotEmpty ? conn.messages.last : null;
+    final unread = conn.messages.length - _lastSeenMessageCount;
+
+    return GestureDetector(
+      onTap: _openChat,
+      child: Container(
+        height: 36,
+        color: const Color(0xFF16213E),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          children: [
+            const Icon(Icons.chat_bubble_outline,
+                color: Colors.grey, size: 16),
+            const SizedBox(width: 8),
+            const Text('Chat',
+                style: TextStyle(color: Colors.grey, fontSize: 12)),
+            const Spacer(),
+            if (lastMsg != null)
+              Flexible(
+                child: Text(
+                  '${lastMsg.fromClient}: ${lastMsg.message}',
+                  style: const TextStyle(
+                      color: Color(0xFF555577), fontSize: 11),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ),
+            if (unread > 0) ...[
+              const SizedBox(width: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Colors.blue,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text('$unread',
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 10)),
+              ),
+            ],
+            const SizedBox(width: 4),
+            const Icon(Icons.keyboard_arrow_up,
+                color: Colors.grey, size: 18),
+          ],
+        ),
       ),
     );
   }

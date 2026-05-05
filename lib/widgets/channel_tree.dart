@@ -49,7 +49,7 @@ class _ChannelTreeState extends State<ChannelTree> {
       children: [
         // Channel row
         Material(
-          color: isSelected ? Colors.blue.withOpacity(0.15) : Colors.transparent,
+          color: isSelected ? Colors.blue.withValues(alpha: 0.15) : Colors.transparent,
           child: InkWell(
             onTap: () {
               widget.onChannelTap(channel.id);
@@ -114,7 +114,7 @@ class _ChannelTreeState extends State<ChannelTree> {
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: Colors.grey.withOpacity(0.2),
+                        color: Colors.grey.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(

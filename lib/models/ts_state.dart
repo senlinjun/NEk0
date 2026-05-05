@@ -187,14 +187,19 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
             .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
             .toList();
 
+        final ownId = event['client_id'] as int? ?? state.ownClientId;
+        // Find the channel the user is actually in
+        final ownClient = clients.where((c) => c.id == ownId).firstOrNull;
+        final joinedChannelId = ownClient?.channelId;
+
         state = state.copyWith(
           connecting: false,
           connected: true,
           serverName: event['server_name'] as String? ?? state.serverName,
-          ownClientId: event['client_id'] as int? ?? state.ownClientId,
+          ownClientId: ownId,
           channels: channels,
           clients: clients,
-          selectedChannelId: channels.isNotEmpty ? channels.first.id : null,
+          selectedChannelId: joinedChannelId,
         );
 
         // Auto-start audio playback (listening is always on in Teamspeak)
@@ -300,16 +305,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     if (!state.connected || text.isEmpty) return;
     debugPrint('TS: sendChannelMessage(cid=${state.selectedChannelId}, len=${text.length})');
     TsNative.sendChannelMessage(state.selectedChannelId ?? 0, text);
-    // Optimistically add the message
-    final msg = ChatMessage(
-      id: state.messages.length,
-      fromClient: state.nickname,
-      fromClientId: state.ownClientId,
-      targetMode: 2,
-      message: text,
-      timestamp: DateTime.now(),
-    );
-    state = state.copyWith(messages: [...state.messages, msg]);
+    // Don't add optimistically — server echoes back as a text_message event
   }
 
   Future<void> sendPrivateMessage(int clientId, String text) async {
