@@ -1,0 +1,37 @@
+{
+	"folders": [
+		{
+			"path": "tsproto",
+			"name": "Protocol"
+		},
+		{
+			"path": "tsclientlib",
+			"name": "Clientlib"
+		},
+		{
+			"path": "utils/ts-bookkeeping",
+			"name": "Bookkeeping"
+		},
+		{
+			"path": "utils/tsproto-structs",
+			"name": "TSP Structs"
+		},
+		{
+			"path": "utils/tsproto-types",
+			"name": "TSP Types"
+		},
+		{
+			"path": "utils/tsproto-packets",
+			"name": "TSP Packets"
+		},
+		{
+			"path": "tsproto-util"
+			"name": "Utility"
+		},
+		{
+			"path": "target",
+			"name": "Build Target Dir"
+		}
+	],
+	"settings": {}
+}

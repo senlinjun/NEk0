@@ -1,0 +1,40 @@
+version: 0.1.{build}
+image: Visual Studio 2019
+platform: x64
+build: off
+clone_depth: 1
+clone_folder: C:\projects\tsclientlib
+branches:
+  only:
+  # Release tags
+  - /^v\d+\.\d+\.\d+.*$/
+  - master
+  - develop
+
+environment:
+  global:
+    # Needed for features in workspace: https://github.com/rust-lang/cargo/issues/5364
+    CHANNEL: nightly
+    TARGET: x86_64-pc-windows-msvc
+
+cache:
+- C:\Users\appveyor\.cargo\registry
+
+install:
+- ps: $Env:PATH += ';C:\msys64\usr\bin'
+- git submodule update --init --recursive
+- curl -sSf -o rustup-init.exe https://win.rustup.rs/
+- rustup-init.exe -y --default-host %TARGET% --default-toolchain %CHANNEL%
+- set PATH=%PATH%;C:\Users\appveyor\.cargo\bin
+- rustc -Vv
+- cargo -V
+
+build_script:
+- cargo -Zpackage-features check --features "tsclientlib/bundled tsclientlib/static-link"
+- |
+  cd tsclientlib
+  cargo check --no-default-features --features "unstable bundled static-link"
+  cd ..
+
+test_script:
+- cargo -Zpackage-features test --features "tsclientlib/bundled tsclientlib/static-link"

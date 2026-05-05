@@ -34,10 +34,25 @@ class ClientList extends StatelessWidget {
         final client = channelClients[index];
         return ListTile(
           dense: true,
-          leading: Icon(
-            _clientIcon(client),
-            size: 16,
-            color: _clientColor(client),
+          leading: SizedBox(
+            width: 22,
+            height: 22,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Icon(
+                  _clientIcon(client),
+                  size: 18,
+                  color: _clientColor(client),
+                ),
+                if (client.isTalking)
+                  const Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Icon(Icons.circle, size: 8, color: Colors.blue),
+                  ),
+              ],
+            ),
           ),
           title: Text(
             client.nickname,

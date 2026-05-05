@@ -2,8 +2,9 @@ mod api;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::time::Instant;
 use tokio::runtime::Runtime;
 
 pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
@@ -60,6 +61,8 @@ pub enum TsEvent {
     Diag { msg: String },
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "client_talking")]
+    ClientTalking { client_id: u32, is_talking: bool },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -81,6 +84,7 @@ pub struct TsClient {
     pub away: bool,
     pub input_muted: bool,
     pub output_muted: bool,
+    pub is_talking: bool,
 }
 
 // ─── Global State (no Connection — event loop owns it) ─────────────
@@ -102,7 +106,12 @@ pub struct TsConnection {
     pub audio_seq: u16,             // Outgoing packet counter
     pub audio_decoded_count: u32,   // Diagnostic: total packets decoded
     pub audio_error_count: u32,     // Diagnostic: total decode errors
+    pub vad_threshold: f32,          // RMS threshold for voice activation (0.0 = disabled)
+    pub vad_enabled: bool,
+    pub vad_hold: u32,               // Hangover frames remaining after VAD drops (prevents cutoff)
+    pub voice_active: bool,          // Set true when audio frame is sent (for UI indicator)
     pub disconnect_requested: bool,  // Flag: event loop should send quit and exit
+    pub talking_clients: HashMap<u16, Instant>,  // client_id -> last audio time
 }
 
 impl TsConnection {
@@ -123,7 +132,12 @@ impl TsConnection {
             audio_seq: 0,
             audio_decoded_count: 0,
             audio_error_count: 0,
+            vad_threshold: 0.0,
+            vad_enabled: false,
+            vad_hold: 0,
+            voice_active: false,
             disconnect_requested: false,
+            talking_clients: HashMap::new(),
         }
     }
 }

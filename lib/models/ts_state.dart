@@ -19,8 +19,6 @@ class TsConnectionState {
   final String serverName;
   final String nickname;
   final int ownClientId;
-  final bool inputMuted;
-  final bool outputMuted;
   final List<TsChannel> channels;
   final List<TsClient> clients;
   final List<ChatMessage> messages;
@@ -30,6 +28,13 @@ class TsConnectionState {
   final int audioErrorCount;
   final int audioBufSamples;
   final List<String> diagMessages;
+  final bool voiceActive;
+  final bool inputMuted;
+  final bool outputMuted;
+  final bool pttMode;
+  final bool pttPressed;
+  final bool vadEnabled;
+  final double vadThreshold;
 
   const TsConnectionState({
     this.connected = false,
@@ -37,8 +42,6 @@ class TsConnectionState {
     this.serverName = '',
     this.nickname = '',
     this.ownClientId = 0,
-    this.inputMuted = false,
-    this.outputMuted = false,
     this.channels = const [],
     this.clients = const [],
     this.messages = const [],
@@ -48,6 +51,13 @@ class TsConnectionState {
     this.audioErrorCount = 0,
     this.audioBufSamples = 0,
     this.diagMessages = const [],
+    this.voiceActive = false,
+    this.inputMuted = false,
+    this.outputMuted = false,
+    this.pttMode = false,
+    this.pttPressed = false,
+    this.vadEnabled = true,
+    this.vadThreshold = 0.005,
   });
 
   TsConnectionState copyWith({
@@ -56,8 +66,6 @@ class TsConnectionState {
     String? serverName,
     String? nickname,
     int? ownClientId,
-    bool? inputMuted,
-    bool? outputMuted,
     List<TsChannel>? channels,
     List<TsClient>? clients,
     List<ChatMessage>? messages,
@@ -67,6 +75,13 @@ class TsConnectionState {
     int? audioErrorCount,
     int? audioBufSamples,
     List<String>? diagMessages,
+    bool? voiceActive,
+    bool? inputMuted,
+    bool? outputMuted,
+    bool? pttMode,
+    bool? pttPressed,
+    bool? vadEnabled,
+    double? vadThreshold,
   }) =>
       TsConnectionState(
         connected: connected ?? this.connected,
@@ -74,8 +89,6 @@ class TsConnectionState {
         serverName: serverName ?? this.serverName,
         nickname: nickname ?? this.nickname,
         ownClientId: ownClientId ?? this.ownClientId,
-        inputMuted: inputMuted ?? this.inputMuted,
-        outputMuted: outputMuted ?? this.outputMuted,
         channels: channels ?? this.channels,
         clients: clients ?? this.clients,
         messages: messages ?? this.messages,
@@ -87,6 +100,13 @@ class TsConnectionState {
         audioErrorCount: audioErrorCount ?? this.audioErrorCount,
         audioBufSamples: audioBufSamples ?? this.audioBufSamples,
         diagMessages: diagMessages ?? this.diagMessages,
+        voiceActive: voiceActive ?? this.voiceActive,
+        inputMuted: inputMuted ?? this.inputMuted,
+        outputMuted: outputMuted ?? this.outputMuted,
+        pttMode: pttMode ?? this.pttMode,
+        pttPressed: pttPressed ?? this.pttPressed,
+        vadEnabled: vadEnabled ?? this.vadEnabled,
+        vadThreshold: vadThreshold ?? this.vadThreshold,
       );
 }
 
@@ -112,6 +132,7 @@ class ServerListState {
 class TsConnectionNotifier extends Notifier<TsConnectionState> {
   Timer? _pollTimer;
   AudioService? _audioService;
+  bool _micEnabled = false;
 
   @override
   TsConnectionState build() {
@@ -166,6 +187,11 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         final event = raw as Map<String, dynamic>;
         _handleEvent(event);
       }
+      // Poll voice activity for UI indicator
+      final va = TsNative.isVoiceActive();
+      if (va != state.voiceActive) {
+        state = state.copyWith(voiceActive: va);
+      }
     } catch (e) {
       debugPrint('FFI poll error: $e');
     }
@@ -205,8 +231,10 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         // Auto-start audio playback (listening is always on in Teamspeak)
         _audioService = AudioService();
         _audioService!.start();
-        // Request mic permission upfront so the dialog appears before user needs to speak
-        _audioService!.enableMic();
+        // Init VAD defaults and start mic via control flow
+        TsNative.setVadEnabled(true);
+        TsNative.setVadThreshold(state.vadThreshold);
+        _updateMicState();
         break;
 
       case 'disconnected':
@@ -270,6 +298,16 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         );
         break;
 
+      case 'client_talking':
+        final clientId = event['client_id'] as int;
+        final isTalking = event['is_talking'] as bool;
+        state = state.copyWith(
+          clients: state.clients
+              .map((c) => c.id == clientId ? c.copyWith(isTalking: isTalking) : c)
+              .toList(),
+        );
+        break;
+
       case 'channels_updated':
         // Re-fetch channels and clients from Rust cache
         final chJson = TsNative.getChannels();
@@ -290,6 +328,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     if (!state.connected && !state.connecting) return;
     _audioService?.stop();
     _audioService = null;
+    _micEnabled = false;
     _pollTimer?.cancel();
     TsNative.disconnect();
     // Keep polling for ~3 seconds to capture Rust disconnect diag messages
@@ -327,24 +366,64 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     TsNative.moveToChannel(channelId);
   }
 
-  void toggleInputMute() {
-    final muted = !state.inputMuted;
-    debugPrint('TS: toggleInputMute -> $muted');
-    state = state.copyWith(inputMuted: muted);
-    TsNative.setMuted(input: muted, output: state.outputMuted);
-    // Enable mic capture when unmuting, disable when muting
-    if (muted) {
-      _audioService?.disableMic();
-    } else {
-      _audioService?.enableMic();
+  // ─── Voice control flow ──────────────────────────────────────────
+
+  /// Diagram: Start -> PTT? -> pushed? -> send : mute? -> send : nothing
+  bool get _shouldMicBeActive {
+    if (state.pttMode) return state.pttPressed;
+    return !state.inputMuted;
+  }
+
+  void _updateMicState() {
+    if (_audioService == null) return;
+    final should = _shouldMicBeActive;
+    if (should && !_micEnabled) {
+      _audioService!.enableMic();
+      _micEnabled = true;
+    } else if (!should && _micEnabled) {
+      _audioService!.disableMic();
+      _micEnabled = false;
     }
   }
 
+  void togglePttMode() {
+    final newPtt = !state.pttMode;
+    state = state.copyWith(pttMode: newPtt);
+    if (newPtt) {
+      TsNative.setVadEnabled(false);
+    } else {
+      TsNative.setVadEnabled(state.vadEnabled);
+      TsNative.setVadThreshold(state.vadThreshold);
+    }
+    _updateMicState();
+  }
+
+  void setPttPressed(bool pressed) {
+    state = state.copyWith(pttPressed: pressed);
+    _updateMicState();
+  }
+
+  void toggleInputMute() {
+    final newMuted = !state.inputMuted;
+    state = state.copyWith(inputMuted: newMuted);
+    TsNative.setMuted(input: newMuted, output: state.outputMuted);
+    _updateMicState();
+  }
+
   void toggleOutputMute() {
-    final muted = !state.outputMuted;
-    debugPrint('TS: toggleOutputMute -> $muted');
-    state = state.copyWith(outputMuted: muted);
-    TsNative.setMuted(input: state.inputMuted, output: muted);
+    final newMuted = !state.outputMuted;
+    state = state.copyWith(outputMuted: newMuted);
+    TsNative.setMuted(input: state.inputMuted, output: newMuted);
+  }
+
+  void setVadThreshold(double threshold) {
+    state = state.copyWith(vadThreshold: threshold);
+    TsNative.setVadThreshold(threshold);
+  }
+
+  void setVadEnabled(bool enabled) {
+    state = state.copyWith(vadEnabled: enabled);
+    TsNative.setVadEnabled(enabled);
   }
 
 }

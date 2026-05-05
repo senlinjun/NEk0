@@ -62,6 +62,14 @@ typedef _SetMutedDart = int Function(int, int);
 typedef _IsConnectedNative = Uint8 Function();
 typedef _IsConnectedDart = int Function();
 
+// ts_set_vad_threshold(threshold: f32)
+typedef _SetVadThresholdNative = Void Function(Float);
+typedef _SetVadThresholdDart = void Function(double);
+
+// ts_set_vad_enabled(enabled: bool) -> bool
+typedef _SetVadEnabledNative = Uint8 Function(Uint8);
+typedef _SetVadEnabledDart = int Function(int);
+
 // ts_start_audio() -> bool
 typedef _StartAudioNative = Uint8 Function();
 typedef _StartAudioDart = int Function();
@@ -109,6 +117,18 @@ final _setMuted = _lib.lookupFunction<_SetMutedNative, _SetMutedDart>(
 final _isConnected = _lib.lookupFunction<_IsConnectedNative, _IsConnectedDart>(
   'ts_is_connected',
 );
+final _setVadThreshold = _lib
+    .lookupFunction<_SetVadThresholdNative, _SetVadThresholdDart>(
+      'ts_set_vad_threshold',
+    );
+final _setVadEnabled = _lib
+    .lookupFunction<_SetVadEnabledNative, _SetVadEnabledDart>(
+      'ts_set_vad_enabled',
+    );
+final _isVoiceActive = _lib
+    .lookupFunction<_IsConnectedNative, _IsConnectedDart>(
+      'ts_is_voice_active',
+    );
 final _startAudio = _lib.lookupFunction<_StartAudioNative, _StartAudioDart>(
   'ts_start_audio',
 );
@@ -210,6 +230,18 @@ class TsNative {
 
   static bool isConnected() {
     return _isConnected() != 0;
+  }
+
+  static void setVadThreshold(double threshold) {
+    _setVadThreshold(threshold);
+  }
+
+  static bool setVadEnabled(bool enabled) {
+    return _setVadEnabled(enabled ? 1 : 0) != 0;
+  }
+
+  static bool isVoiceActive() {
+    return _isVoiceActive() != 0;
   }
 
   static bool startAudio() {

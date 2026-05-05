@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:typed_data' show ByteData, Endian, Float32List, Int16List, Uint8List;
+import 'dart:typed_data'
+    show ByteData, Endian, Float32List, Int16List, Uint8List;
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -42,7 +43,7 @@ class AudioService {
       _playerSetup = true;
       FlutterPcmSound.setFeedThreshold(_feedThreshold);
       FlutterPcmSound.setFeedCallback((remainingFrames) {
-        debugPrint('AudioService: feedCallback remaining=$remainingFrames');
+        // debugPrint('AudioService: feedCallback remaining=$remainingFrames');
         _feedAudioFromRust();
       });
       // Kick-start the feed cycle
@@ -65,13 +66,15 @@ class AudioService {
   }
 
   /// Enable microphone capture. Call this separately when user wants to speak.
-  Future<void> enableMic() async {
+  Future<bool> enableMic() async {
     final status = await Permission.microphone.request();
     if (status.isGranted) {
       _startMic();
       debugPrint('AudioService: mic enabled');
+      return true;
     } else {
       debugPrint('AudioService: mic permission denied — listen-only mode');
+      return false;
     }
   }
 
@@ -112,7 +115,7 @@ class AudioService {
           pcm[i] = (s * 32767).round();
         }
         _totalFed += samples;
-        debugPrint('AudioService: feed $samples samp peak=${peak.toStringAsFixed(4)} total=$_totalFed');
+        // debugPrint('AudioService: feed $samples samp peak=${peak.toStringAsFixed(4)} total=$_totalFed');
         FlutterPcmSound.feed(PcmArrayInt16.fromList(pcm));
       }
     } catch (e) {

@@ -189,6 +189,18 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
 
   Widget _buildControls(
       TsConnectionState conn, TsConnectionNotifier notifier) {
+    // Mic color: red=disabled, green=ready, blue=speaking/PTT-pushing
+    final micDisabled = conn.inputMuted || (conn.pttMode && !conn.pttPressed);
+    final micActive = conn.voiceActive || conn.pttPressed;
+    Color micColor;
+    if (micDisabled) {
+      micColor = Colors.red;
+    } else if (micActive) {
+      micColor = Colors.blue;
+    } else {
+      micColor = Colors.green;
+    }
+
     return Container(
       height: 52,
       color: const Color(0xFF16213E),
@@ -196,24 +208,168 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          IconButton(
-            icon: Icon(
-              conn.inputMuted ? Icons.mic_off : Icons.mic,
-              color: conn.inputMuted ? Colors.red : Colors.green,
-              size: 28,
-            ),
-            onPressed: notifier.toggleInputMute,
-            tooltip: conn.inputMuted ? 'Unmute Mic' : 'Mute Mic',
+          // --- Mic icon (tap mute, long-press settings) ---
+          GestureDetector(
+            onTap: () => notifier.toggleInputMute(),
+            onLongPress: () => _showVoiceSettings(conn, notifier),
+            child: Icon(Icons.mic, color: micColor, size: 28),
           ),
-          const SizedBox(width: 24),
-          IconButton(
-            icon: Icon(
-              conn.outputMuted ? Icons.volume_off : Icons.volume_up,
-              color: conn.outputMuted ? Colors.red : Colors.green,
-              size: 28,
+          // --- PTT button (only in PTT mode) ---
+          if (conn.pttMode) ...[
+            const SizedBox(width: 24),
+            Listener(
+              onPointerDown: (_) => notifier.setPttPressed(true),
+              onPointerUp: (_) => notifier.setPttPressed(false),
+              onPointerCancel: (_) => notifier.setPttPressed(false),
+              child: Container(
+                width: 64,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: conn.pttPressed
+                      ? const Color(0xFF4444AA)
+                      : const Color(0xFF2A2A4A),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: conn.pttPressed
+                        ? Colors.lightGreenAccent
+                        : const Color(0xFF888888),
+                    width: 2,
+                  ),
+                ),
+                child: const Center(
+                  child: Text('PTT',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13)),
+                ),
+              ),
             ),
-            onPressed: notifier.toggleOutputMute,
-            tooltip: conn.outputMuted ? 'Unmute Speaker' : 'Mute Speaker',
+          ],
+          const SizedBox(width: 24),
+          // --- Speaker icon (toggle output mute) ---
+          GestureDetector(
+            onTap: () => notifier.toggleOutputMute(),
+            child: Icon(Icons.volume_up,
+                color: conn.outputMuted ? Colors.red : Colors.green,
+                size: 28),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showVoiceSettings(TsConnectionState conn, TsConnectionNotifier notifier) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF12122A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (ctx) {
+        return _VoiceSettingsSheet(conn: conn, notifier: notifier);
+      },
+    );
+  }
+}
+
+class _VoiceSettingsSheet extends StatefulWidget {
+  final TsConnectionState conn;
+  final TsConnectionNotifier notifier;
+
+  const _VoiceSettingsSheet({required this.conn, required this.notifier});
+
+  @override
+  State<_VoiceSettingsSheet> createState() => _VoiceSettingsSheetState();
+}
+
+class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
+  late bool _pttMode;
+  late bool _vadEnabled;
+  late double _vadThreshold;
+
+  @override
+  void initState() {
+    super.initState();
+    _pttMode = widget.conn.pttMode;
+    _vadEnabled = widget.conn.vadEnabled;
+    _vadThreshold = widget.conn.vadThreshold;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text('Voice Settings',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          // PTT / VA mode toggle
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('PTT Mode',
+                  style: TextStyle(color: Colors.white, fontSize: 14)),
+              Switch(
+                value: _pttMode,
+                activeTrackColor: Colors.blue,
+                onChanged: (v) {
+                  setState(() => _pttMode = v);
+                  widget.notifier.togglePttMode();
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // VAD enable/disable
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Voice Activation',
+                  style: TextStyle(
+                      color: _pttMode ? Colors.grey : Colors.white,
+                      fontSize: 14)),
+              Switch(
+                value: _vadEnabled,
+                activeTrackColor: Colors.blue,
+                onChanged: _pttMode
+                    ? null
+                    : (v) {
+                        setState(() => _vadEnabled = v);
+                        widget.notifier.setVadEnabled(v);
+                      },
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Threshold slider
+          Row(
+            children: [
+              const Text('Threshold',
+                  style: TextStyle(color: Colors.grey, fontSize: 12)),
+              Expanded(
+                child: Slider(
+                  value: _vadThreshold,
+                  min: 0.001,
+                  max: 0.1,
+                  activeColor:
+                      (_pttMode || !_vadEnabled) ? Colors.grey : Colors.blue,
+                  onChanged: (_pttMode || !_vadEnabled)
+                      ? null
+                      : (v) {
+                          setState(() => _vadThreshold = v);
+                          widget.notifier.setVadThreshold(v);
+                        },
+                ),
+              ),
+              Text(_vadThreshold.toStringAsFixed(3),
+                  style: const TextStyle(color: Colors.grey, fontSize: 11)),
+            ],
           ),
         ],
       ),
