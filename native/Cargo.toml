@@ -1,0 +1,25 @@
+[package]
+name = "tsclient"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tsclientlib = { git = "https://github.com/ReSpeak/tsclientlib.git", branch = "master", default-features = false, features = ["unstable"] }
+tsproto = { git = "https://github.com/ReSpeak/tsclientlib.git", branch = "master", default-features = false }
+tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib.git", branch = "master" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+once_cell = "1"
+parking_lot = "0.12"
+futures = "0.3"
+opus-rs = "0.1"
+
+[patch."https://github.com/ReSpeak/tsclientlib.git"]
+tsclientlib = { path = "local_tsclientlib/tsclientlib" }
+tsproto = { path = "local_tsclientlib/tsproto" }
+tsproto-packets = { path = "local_tsclientlib/utils/tsproto-packets" }
