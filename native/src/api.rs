@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tsclientlib::messages::c2s::*;
 use tsclientlib::{ChannelId, ClientId};
-use tsclientlib::{Connection, OutCommandExt, StreamItem};
+use tsclientlib::{Connection, DisconnectOptions, OutCommandExt, StreamItem};
 use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 
 fn to_c_str(s: String) -> *mut c_char {
@@ -306,46 +306,16 @@ async fn event_loop(
         //     push_diag(&format!("loop #{} alive, disconnect_flag={}", loop_count, do_disconnect));
         // }
         if do_disconnect {
-            push_diag("event_loop: disconnect_requested flag set");
-            let quit = OutQuitMessage::new();
-            match quit.send(&mut con) {
-                Ok(_) => push_diag("event_loop: OutQuitMessage sent OK"),
-                Err(e) => push_diag(&format!("event_loop: OutQuitMessage FAILED: {}", e)),
-            }
-            // Wait for server to close connection
-            push_diag("event_loop: waiting for server disconnect...");
-            for i in 0..15 {
-                let result =
-                    tokio::time::timeout(Duration::from_millis(200), con.events().next()).await;
-                match result {
-                    Ok(Some(Ok(_))) => {}
-                    Ok(Some(Err(_))) | Ok(None) => {
-                        push_diag("event_loop: server closed connection");
-                        break;
-                    }
-                    Err(_) => {
-                        if i == 14 {
-                            push_diag("event_loop: quit wait timeout, exiting");
-                        }
-                    }
-                }
-            }
+            let _ = con.disconnect(DisconnectOptions::new());
+            let _ = con.events().for_each(|_| future::ready(())).await;
             let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
             if current_gen == generation {
-                push_diag("event_loop: disconnect complete, exiting loop");
-                STATE
-                    .lock()
-                    .pending_events
-                    .push_back(TsEvent::Disconnected {
-                        reason: "User disconnected".into(),
-                    });
+                STATE.lock().pending_events.push_back(TsEvent::Disconnected {
+                    reason: "User disconnected".into(),
+                });
                 STATE.lock().connected = false;
                 STATE.lock().disconnect_requested = false;
                 *COMMAND_TX.lock() = None;
-            } else {
-                push_diag(&format!(
-                    "event_loop: stale disconnect skipped (gen mismatch)"
-                ));
             }
             return;
         }
@@ -412,49 +382,15 @@ async fn event_loop(
                     eprintln!("event_loop: set muted input={} output={}", input, output);
                 }
                 Command::Disconnect => {
-                    push_diag("event_loop: got Disconnect command");
-                    eprintln!("event_loop: disconnecting gen={}", generation);
-                    let quit = OutQuitMessage::new();
-                    match quit.send(&mut con) {
-                        Ok(_) => push_diag("event_loop: OutQuitMessage sent OK"),
-                        Err(e) => push_diag(&format!("event_loop: OutQuitMessage FAILED: {}", e)),
-                    }
-                    // Keep the Connection alive so the quit packet transmits.
-                    // Wait up to 3s for the server to close the connection.
-                    push_diag("event_loop: waiting for server disconnect...");
-                    for i in 0..15 {
-                        let result =
-                            tokio::time::timeout(Duration::from_millis(200), con.events().next())
-                                .await;
-                        match result {
-                            Ok(Some(Ok(_))) => {} // Drain events
-                            Ok(Some(Err(_))) | Ok(None) => {
-                                push_diag("event_loop: server closed connection");
-                                break;
-                            }
-                            Err(_) => {
-                                // Timeout after 200ms
-                                if i == 14 {
-                                    push_diag("event_loop: quit wait timeout, exiting");
-                                }
-                            }
-                        }
-                    }
+                    let _ = con.disconnect(DisconnectOptions::new());
+                    let _ = con.events().for_each(|_| future::ready(())).await;
                     let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
                     if current_gen == generation {
-                        push_diag("event_loop: disconnect complete, exiting loop");
-                        STATE
-                            .lock()
-                            .pending_events
-                            .push_back(TsEvent::Disconnected {
-                                reason: "User disconnected".into(),
-                            });
+                        STATE.lock().pending_events.push_back(TsEvent::Disconnected {
+                            reason: "User disconnected".into(),
+                        });
                         STATE.lock().connected = false;
                         *COMMAND_TX.lock() = None;
-                    } else {
-                        push_diag(&format!(
-                            "event_loop: stale disconnect skipped (gen mismatch)"
-                        ));
                     }
                     return;
                 }
@@ -779,48 +715,10 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
     push_diag(&format!("ts_disconnect: event_loop_alive={}", alive));
 
     if alive {
-        // Normal path: event loop will pick up the flag
-        push_diag("ts_disconnect: setting disconnect_requested flag");
         STATE.lock().disconnect_requested = true;
-    } else {
-        // Event loop is dead — send quit directly (wrapped in catch_unwind)
-        push_diag("ts_disconnect: event loop DEAD, sending quit directly");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Some(mut con) = crate::CONNECTION_STASH.lock().take() {
-                match OutQuitMessage::new().send(&mut con) {
-                    Ok(_) => push_diag("ts_disconnect: direct quit sent OK"),
-                    Err(e) => push_diag(&format!("ts_disconnect: direct quit FAILED: {}", e)),
-                }
-                for i in 0..10 {
-                    let result = RUNTIME.block_on(tokio::time::timeout(
-                        Duration::from_millis(200),
-                        con.events().next(),
-                    ));
-                    match result {
-                        Ok(Some(Ok(_))) => {}
-                        Ok(Some(Err(_))) | Ok(None) => {
-                            push_diag("ts_disconnect: server closed after direct quit");
-                            break;
-                        }
-                        Err(_) => {
-                            if i == 9 {
-                                push_diag("ts_disconnect: direct quit timeout");
-                            }
-                        }
-                    }
-                }
-            } else {
-                push_diag("ts_disconnect: CONNECTION_STASH is empty");
-            }
-        }));
-        if let Err(e) = result {
-            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown panic".into()
-            };
-            push_diag(&format!("ts_disconnect PANICKED: {}", msg));
-        }
+    } else if let Some(mut con) = crate::CONNECTION_STASH.lock().take() {
+        let _ = con.disconnect(DisconnectOptions::new());
+        let _ = RUNTIME.block_on(con.events().for_each(|_| future::ready(())));
         STATE.lock().connected = false;
         STATE.lock().disconnect_requested = false;
     }
