@@ -86,6 +86,14 @@ typedef _GetAudioDart = int Function(Pointer<Float>, int);
 typedef _SendAudioNative = Uint8 Function(Pointer<Float>, Uint32);
 typedef _SendAudioDart = int Function(Pointer<Float>, int);
 
+// ts_set_client_volume(client_id: u32, volume: f32) -> bool
+typedef _SetClientVolumeNative = Uint8 Function(Uint32, Float);
+typedef _SetClientVolumeDart = int Function(int, double);
+
+// ts_set_mic_gain(gain: f32)
+typedef _SetMicGainNative = Void Function(Float);
+typedef _SetMicGainDart = void Function(double);
+
 // ─── Bindings ───────────────────────────────────────────────────────
 
 final _connect = _lib.lookupFunction<_ConnectNative, _ConnectDart>(
@@ -141,6 +149,14 @@ final _getAudio = _lib.lookupFunction<_GetAudioNative, _GetAudioDart>(
 final _sendAudio = _lib.lookupFunction<_SendAudioNative, _SendAudioDart>(
   'ts_send_audio',
 );
+final _setClientVolume = _lib
+    .lookupFunction<_SetClientVolumeNative, _SetClientVolumeDart>(
+      'ts_set_client_volume',
+    );
+final _setMicGain =
+    _lib.lookupFunction<_SetMicGainNative, _SetMicGainDart>(
+      'ts_set_mic_gain',
+    );
 
 // ─── Helper ─────────────────────────────────────────────────────────
 
@@ -260,6 +276,16 @@ class TsNative {
 
   static bool sendAudio(Pointer<Float> data, int dataLen) {
     return _sendAudio(data, dataLen) != 0;
+  }
+
+  static bool setClientVolume(int clientId, double volume) {
+    debugLog('setClientVolume($clientId, $volume)');
+    return _setClientVolume(clientId, volume) != 0;
+  }
+
+  static void setMicGain(double gain) {
+    debugLog('setMicGain($gain)');
+    _setMicGain(gain);
   }
 }
 

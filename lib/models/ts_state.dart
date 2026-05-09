@@ -36,6 +36,7 @@ class TsConnectionState {
   final bool pttPressed;
   final bool vadEnabled;
   final double vadThreshold;
+  final double micGain;
 
   const TsConnectionState({
     this.connected = false,
@@ -59,6 +60,7 @@ class TsConnectionState {
     this.pttPressed = false,
     this.vadEnabled = true,
     this.vadThreshold = 0.005,
+    this.micGain = 1.0,
   });
 
   TsConnectionState copyWith({
@@ -83,6 +85,7 @@ class TsConnectionState {
     bool? pttPressed,
     bool? vadEnabled,
     double? vadThreshold,
+    double? micGain,
   }) =>
       TsConnectionState(
         connected: connected ?? this.connected,
@@ -108,6 +111,7 @@ class TsConnectionState {
         pttPressed: pttPressed ?? this.pttPressed,
         vadEnabled: vadEnabled ?? this.vadEnabled,
         vadThreshold: vadThreshold ?? this.vadThreshold,
+        micGain: micGain ?? this.micGain,
       );
 }
 
@@ -428,6 +432,21 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   void setVadEnabled(bool enabled) {
     state = state.copyWith(vadEnabled: enabled);
     TsNative.setVadEnabled(enabled);
+  }
+
+  void setMicGain(double gain) {
+    state = state.copyWith(micGain: gain);
+    TsNative.setMicGain(gain);
+  }
+
+  void setClientVolume(int clientId, double volume) {
+    TsNative.setClientVolume(clientId, volume);
+    // Update local client state immediately so UI reflects the change
+    state = state.copyWith(
+      clients: state.clients
+          .map((c) => c.id == clientId ? c.copyWith(volume: volume) : c)
+          .toList(),
+    );
   }
 
 }

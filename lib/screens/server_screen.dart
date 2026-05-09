@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/client.dart';
 import '../models/ts_state.dart';
 import '../widgets/channel_tree.dart';
 import '../widgets/client_list.dart';
@@ -105,10 +106,29 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
               child: ClientList(
                 clients: conn.clients,
                 currentChannelId: conn.selectedChannelId!,
-                onClientTap: (clientId) {},
+                onClientTap: (clientId) => _showClientVolume(clientId),
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  void _showClientVolume(int clientId) {
+    final conn = ref.read(tsConnectionProvider);
+    final connNotifier = ref.read(tsConnectionProvider.notifier);
+    final client = conn.clients.where((c) => c.id == clientId).firstOrNull;
+    if (client == null) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF12122A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (ctx) => _ClientVolumeSheet(
+        client: client,
+        notifier: connNotifier,
       ),
     );
   }
@@ -287,6 +307,7 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
   late bool _pttMode;
   late bool _vadEnabled;
   late double _vadThreshold;
+  late double _micGain;
 
   @override
   void initState() {
@@ -294,6 +315,7 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
     _pttMode = widget.conn.pttMode;
     _vadEnabled = widget.conn.vadEnabled;
     _vadThreshold = widget.conn.vadThreshold;
+    _micGain = widget.conn.micGain;
   }
 
   @override
@@ -369,6 +391,114 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
               ),
               Text(_vadThreshold.toStringAsFixed(3),
                   style: const TextStyle(color: Colors.grey, fontSize: 11)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Mic gain slider
+          Row(
+            children: [
+              const Text('Mic Gain',
+                  style: TextStyle(color: Colors.grey, fontSize: 12)),
+              Expanded(
+                child: Slider(
+                  value: _micGain,
+                  min: 0.0,
+                  max: 2.0,
+                  divisions: 40,
+                  activeColor: Colors.blue,
+                  onChanged: (v) {
+                    setState(() => _micGain = v);
+                    widget.notifier.setMicGain(v);
+                  },
+                ),
+              ),
+              Text(_micGain.toStringAsFixed(2),
+                  style: const TextStyle(color: Colors.grey, fontSize: 11)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Per-client volume sheet ────────────────────────────────────────
+
+class _ClientVolumeSheet extends StatefulWidget {
+  final TsClient client;
+  final TsConnectionNotifier notifier;
+
+  const _ClientVolumeSheet({required this.client, required this.notifier});
+
+  @override
+  State<_ClientVolumeSheet> createState() => _ClientVolumeSheetState();
+}
+
+class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
+  late double _volume;
+
+  @override
+  void initState() {
+    super.initState();
+    _volume = widget.client.volume;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.client;
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(c.isTalking ? Icons.mic : Icons.person,
+                  color: c.isTalking ? Colors.blue : Colors.grey, size: 20),
+              const SizedBox(width: 8),
+              Text(c.nickname,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold)),
+              const Spacer(),
+              if (c.isTalking)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text('Talking',
+                      style: TextStyle(color: Colors.blue, fontSize: 11)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              const Text('Volume',
+                  style: TextStyle(color: Colors.grey, fontSize: 12)),
+              Expanded(
+                child: Slider(
+                  value: _volume,
+                  min: 0.0,
+                  max: 2.0,
+                  divisions: 40,
+                  activeColor: Colors.blue,
+                  onChanged: (v) {
+                    setState(() => _volume = v);
+                    widget.notifier.setClientVolume(c.id, v);
+                  },
+                ),
+              ),
+              SizedBox(
+                width: 42,
+                child: Text(_volume.toStringAsFixed(2),
+                    style:
+                        const TextStyle(color: Colors.grey, fontSize: 11)),
+              ),
             ],
           ),
         ],

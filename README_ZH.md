@@ -73,12 +73,14 @@ linker = "<ndk路径>/toolchains/llvm/prebuilt/<系统平台>/bin/x86_64-linux-a
 ```
 
 将 `<ndk路径>` 替换为你的实际 NDK 路径，`<系统平台>` 替换为：
+
 - **Windows**：`windows-x86_64`
 - **Linux**：`linux-x86_64`
 - **macOS (Intel)**：`darwin-x86_64`
 - **macOS (Apple Silicon)**：`darwin-aarch64`
 
 示例（Windows）：
+
 ```toml
 [target.aarch64-linux-android]
 linker = "D:/software/android/SDK/ndk/29.0.13599879/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android21-clang.cmd"

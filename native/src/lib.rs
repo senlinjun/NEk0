@@ -20,6 +20,7 @@ pub enum Command {
     SendMessage { target_mode: u8, target_cid: u64, message: String },
     MoveChannel { client_id: u16, channel_id: u64 },
     SetMuted { input: bool, output: bool },
+    SetClientVolume { client_id: u16, volume: f32 },
     Disconnect,
     SendAudio { data: Vec<f32> },
 }
@@ -85,6 +86,7 @@ pub struct TsClient {
     pub input_muted: bool,
     pub output_muted: bool,
     pub is_talking: bool,
+    pub volume: f32,
 }
 
 // ─── Global State (no Connection — event loop owns it) ─────────────
@@ -112,6 +114,8 @@ pub struct TsConnection {
     pub voice_active: bool,          // Set true when audio frame is sent (for UI indicator)
     pub disconnect_requested: bool,  // Flag: event loop should send quit and exit
     pub talking_clients: HashMap<u16, Instant>,  // client_id -> last audio time
+    pub client_volumes: HashMap<u16, f32>,  // per-client local volume multiplier
+    pub mic_gain: f32,  // microphone pre-amp gain (1.0 = unity)
 }
 
 impl TsConnection {
@@ -138,6 +142,8 @@ impl TsConnection {
             voice_active: false,
             disconnect_requested: false,
             talking_clients: HashMap::new(),
+            client_volumes: HashMap::new(),
+            mic_gain: 1.0,
         }
     }
 }

@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tsclientlib::messages::c2s::*;
 use tsclientlib::{ChannelId, ClientId};
-use tsclientlib::{Connection, DisconnectOptions, OutCommandExt, StreamItem};
+use tsclientlib::{Connection, OutCommandExt, StreamItem};
 use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 
 fn to_c_str(s: String) -> *mut c_char {
@@ -66,6 +66,7 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
             order: c.order.0 as u32,
         })
         .collect();
+    let volumes = &STATE.lock().client_volumes;
     let clients = book
         .clients
         .values()
@@ -77,6 +78,7 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
             input_muted: c.input_muted,
             output_muted: c.output_muted,
             is_talking: false,
+            volume: volumes.get(&(c.id.0 as u16)).copied().unwrap_or(1.0),
         })
         .collect();
     (channels, clients)
@@ -354,6 +356,9 @@ async fn event_loop(
                 Command::SendAudio { data } => {
                     eprintln!("event_loop: cmd=SendAudio({} samples)", data.len());
                 }
+                Command::SetClientVolume { client_id, volume } => {
+                    eprintln!("event_loop: cmd=SetClientVolume({}, {})", client_id, volume);
+                }
                 _ => eprintln!("event_loop: cmd={:?}", cmd),
             }
             match cmd {
@@ -452,6 +457,12 @@ async fn event_loop(
                         ));
                     }
                     return;
+                }
+                Command::SetClientVolume {
+                    client_id,
+                    volume,
+                } => {
+                    STATE.lock().client_volumes.insert(client_id, volume);
                 }
                 Command::SendAudio { data } => {
                     const FRAME: usize = 960; // 20ms at 48kHz mono
@@ -648,8 +659,18 @@ async fn event_loop(
                             };
                             state.audio_decoder = decoder;
                             match decode_result {
-                                Some(Ok(Ok((samples, pcm_out)))) => {
+                                Some(Ok(Ok((samples, mut pcm_out)))) => {
                                     let safe_len = samples.min(pcm_out.len());
+                                    // Apply per-client volume
+                                    let vol = sender_id
+                                        .and_then(|sid| state.client_volumes.get(&sid))
+                                        .copied()
+                                        .unwrap_or(1.0);
+                                    if (vol - 1.0).abs() > 0.001 {
+                                        for s in &mut pcm_out[..safe_len] {
+                                            *s *= vol;
+                                        }
+                                    }
                                     let peak = pcm_out[..safe_len]
                                         .iter()
                                         .fold(0.0f32, |m, &s| m.max(s.abs()));
@@ -948,6 +969,31 @@ pub extern "C" fn ts_is_voice_active() -> u8 {
     if active { 1 } else { 0 }
 }
 
+// ─── Volume ──────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn ts_set_client_volume(client_id: u32, volume: f32) -> u8 {
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        if tx
+            .send(Command::SetClientVolume {
+                client_id: client_id as u16,
+                volume,
+            })
+            .is_ok()
+        {
+            return 1;
+        }
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn ts_set_mic_gain(gain: f32) {
+    eprintln!("ts_set_mic_gain: gain={}", gain);
+    STATE.lock().mic_gain = gain.clamp(0.0, 3.0);
+}
+
 // ─── Audio ────────────────────────────────────────────────────────────
 
 /// Start audio: create encoder and decoder
@@ -1019,13 +1065,23 @@ pub extern "C" fn ts_get_audio(buf: *mut f32, buf_len: u32) -> u32 {
 /// Push mic PCM data (f32 mono 48kHz) for encoding and sending.
 #[no_mangle]
 pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
-    if !STATE.lock().connected {
+    let (connected, mic_gain) = {
+        let state = STATE.lock();
+        (state.connected, state.mic_gain)
+    };
+    if !connected {
         return 0;
     }
     if data_len == 0 {
         return 0;
     }
-    let samples = unsafe { std::slice::from_raw_parts(data, data_len as usize) }.to_vec();
+    let raw = unsafe { std::slice::from_raw_parts(data, data_len as usize) };
+    // Apply mic gain before forwarding to event loop
+    let samples: Vec<f32> = if (mic_gain - 1.0).abs() > 0.001 {
+        raw.iter().map(|s| (s * mic_gain).clamp(-1.0, 1.0)).collect()
+    } else {
+        raw.to_vec()
+    };
     // Always forward mic data — VAD gate runs on complete 960-sample frames in event loop
     let tx = COMMAND_TX.lock();
     if let Some(tx) = tx.as_ref() {
