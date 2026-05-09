@@ -23,7 +23,7 @@ class AudioService {
   static const int _frameSize = 960; // 20ms at 48kHz mono
   static const int _feedThreshold = 960; // Feed when < 960 frames remain
 
-  static const _micChannel = EventChannel('com.example.teamspeak_apk/mic');
+  static const _micChannel = EventChannel('com.senlinjun.nek0/mic');
 
   bool get isRunning => _running;
 

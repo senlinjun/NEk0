@@ -1,4 +1,4 @@
-package com.example.teamspeak_apk
+package com.senlinjun.nek0
 
 import android.content.Context
 import android.media.AudioFormat
@@ -34,11 +34,11 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
 
         // Mic capture via EventChannel
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.teamspeak_apk/mic")
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.senlinjun.nek0/mic")
             .setStreamHandler(MicStreamHandler(this))
 
         // Foreground service control via MethodChannel
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.teamspeak_apk/service")
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.senlinjun.nek0/service")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "start" -> {

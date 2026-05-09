@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.teamspeak_apk"
+    namespace = "com.senlinjun.nek0"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,7 +20,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.teamspeak_apk"
+        applicationId = "com.senlinjun.nek0"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
