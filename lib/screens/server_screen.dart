@@ -34,10 +34,6 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
               onDisconnect: () async {
                 debugPrint('SERVER_SCREEN: disconnect tapped');
                 await connNotifier.disconnect();
-                for (int i = 0; i < 15; i++) {
-                  await Future.delayed(const Duration(milliseconds: 200));
-                  connNotifier.pollForDisconnectDiag();
-                }
                 debugPrint('SERVER_SCREEN: disconnect done, mounted=$mounted');
                 if (mounted) Navigator.of(context).pop();
               },
@@ -45,7 +41,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             Expanded(
               child: conn.connecting
                   ? const Center(
-                      child: CircularProgressIndicator(color: Colors.blue))
+                      child: CircularProgressIndicator(color: Colors.blue),
+                    )
                   : _buildLeftPanel(conn, connNotifier),
             ),
             _buildChatBar(conn),
@@ -57,7 +54,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   }
 
   Widget _buildLeftPanel(
-      TsConnectionState conn, TsConnectionNotifier notifier) {
+    TsConnectionState conn,
+    TsConnectionNotifier notifier,
+  ) {
     return Container(
       color: const Color(0xFF12122A),
       child: Column(
@@ -69,9 +68,10 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             child: const Text(
               'Channels',
               style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold),
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
           Expanded(
@@ -90,16 +90,14 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             child: const Text(
               'Users',
               style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold),
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+              ),
             ),
           ),
           if (conn.selectedChannelId == null)
-            Expanded(
-              flex: 2,
-              child: SizedBox.shrink(),
-            ),
+            Expanded(flex: 2, child: SizedBox.shrink()),
           if (conn.selectedChannelId != null)
             Expanded(
               flex: 2,
@@ -126,10 +124,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
       ),
-      builder: (ctx) => _ClientVolumeSheet(
-        client: client,
-        notifier: connNotifier,
-      ),
+      builder: (ctx) =>
+          _ClientVolumeSheet(client: client, notifier: connNotifier),
     );
   }
 
@@ -168,18 +164,21 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Row(
           children: [
-            const Icon(Icons.chat_bubble_outline,
-                color: Colors.grey, size: 16),
+            const Icon(Icons.chat_bubble_outline, color: Colors.grey, size: 16),
             const SizedBox(width: 8),
-            const Text('Chat',
-                style: TextStyle(color: Colors.grey, fontSize: 12)),
+            const Text(
+              'Chat',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
             const Spacer(),
             if (lastMsg != null)
               Flexible(
                 child: Text(
                   '${lastMsg.fromClient}: ${lastMsg.message}',
                   style: const TextStyle(
-                      color: Color(0xFF555577), fontSize: 11),
+                    color: Color(0xFF555577),
+                    fontSize: 11,
+                  ),
                   overflow: TextOverflow.ellipsis,
                   maxLines: 1,
                 ),
@@ -187,28 +186,26 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             if (unread > 0) ...[
               const SizedBox(width: 6),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                 decoration: BoxDecoration(
                   color: Colors.blue,
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Text('$unread',
-                    style: const TextStyle(
-                        color: Colors.white, fontSize: 10)),
+                child: Text(
+                  '$unread',
+                  style: const TextStyle(color: Colors.white, fontSize: 10),
+                ),
               ),
             ],
             const SizedBox(width: 4),
-            const Icon(Icons.keyboard_arrow_up,
-                color: Colors.grey, size: 18),
+            const Icon(Icons.keyboard_arrow_up, color: Colors.grey, size: 18),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildControls(
-      TsConnectionState conn, TsConnectionNotifier notifier) {
+  Widget _buildControls(TsConnectionState conn, TsConnectionNotifier notifier) {
     // Mic color: red=disabled, green=ready, blue=speaking/PTT-pushing
     final micDisabled = conn.inputMuted || (conn.pttMode && !conn.pttPressed);
     final micActive = conn.voiceActive || conn.pttPressed;
@@ -257,11 +254,14 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                   ),
                 ),
                 child: const Center(
-                  child: Text('PTT',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13)),
+                  child: Text(
+                    'PTT',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -270,16 +270,21 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
           // --- Speaker icon (toggle output mute) ---
           GestureDetector(
             onTap: () => notifier.toggleOutputMute(),
-            child: Icon(Icons.volume_up,
-                color: conn.outputMuted ? Colors.red : Colors.green,
-                size: 28),
+            child: Icon(
+              Icons.volume_up,
+              color: conn.outputMuted ? Colors.red : Colors.green,
+              size: 28,
+            ),
           ),
         ],
       ),
     );
   }
 
-  void _showVoiceSettings(TsConnectionState conn, TsConnectionNotifier notifier) {
+  void _showVoiceSettings(
+    TsConnectionState conn,
+    TsConnectionNotifier notifier,
+  ) {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF12122A),
@@ -325,18 +330,23 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text('Voice Settings',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold)),
+          const Text(
+            'Voice Settings',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
           const SizedBox(height: 16),
           // PTT / VA mode toggle
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('PTT Mode',
-                  style: TextStyle(color: Colors.white, fontSize: 14)),
+              const Text(
+                'PTT Mode',
+                style: TextStyle(color: Colors.white, fontSize: 14),
+              ),
               Switch(
                 value: _pttMode,
                 activeTrackColor: Colors.blue,
@@ -352,10 +362,13 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Voice Activation',
-                  style: TextStyle(
-                      color: _pttMode ? Colors.grey : Colors.white,
-                      fontSize: 14)),
+              Text(
+                'Voice Activation',
+                style: TextStyle(
+                  color: _pttMode ? Colors.grey : Colors.white,
+                  fontSize: 14,
+                ),
+              ),
               Switch(
                 value: _vadEnabled,
                 activeTrackColor: Colors.blue,
@@ -372,15 +385,18 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
           // Threshold slider
           Row(
             children: [
-              const Text('Threshold',
-                  style: TextStyle(color: Colors.grey, fontSize: 12)),
+              const Text(
+                'Threshold',
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
               Expanded(
                 child: Slider(
                   value: _vadThreshold,
                   min: 0.001,
                   max: 0.1,
-                  activeColor:
-                      (_pttMode || !_vadEnabled) ? Colors.grey : Colors.blue,
+                  activeColor: (_pttMode || !_vadEnabled)
+                      ? Colors.grey
+                      : Colors.blue,
                   onChanged: (_pttMode || !_vadEnabled)
                       ? null
                       : (v) {
@@ -389,16 +405,20 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
                         },
                 ),
               ),
-              Text(_vadThreshold.toStringAsFixed(3),
-                  style: const TextStyle(color: Colors.grey, fontSize: 11)),
+              Text(
+                _vadThreshold.toStringAsFixed(3),
+                style: const TextStyle(color: Colors.grey, fontSize: 11),
+              ),
             ],
           ),
           const SizedBox(height: 12),
           // Mic gain slider
           Row(
             children: [
-              const Text('Mic Gain',
-                  style: TextStyle(color: Colors.grey, fontSize: 12)),
+              const Text(
+                'Mic Gain',
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
               Expanded(
                 child: Slider(
                   value: _micGain,
@@ -412,8 +432,10 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
                   },
                 ),
               ),
-              Text(_micGain.toStringAsFixed(2),
-                  style: const TextStyle(color: Colors.grey, fontSize: 11)),
+              Text(
+                _micGain.toStringAsFixed(2),
+                style: const TextStyle(color: Colors.grey, fontSize: 11),
+              ),
             ],
           ),
         ],
@@ -453,33 +475,45 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
         children: [
           Row(
             children: [
-              Icon(c.isTalking ? Icons.mic : Icons.person,
-                  color: c.isTalking ? Colors.blue : Colors.grey, size: 20),
+              Icon(
+                c.isTalking ? Icons.mic : Icons.person,
+                color: c.isTalking ? Colors.blue : Colors.grey,
+                size: 20,
+              ),
               const SizedBox(width: 8),
-              Text(c.nickname,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold)),
+              Text(
+                c.nickname,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
               const Spacer(),
               if (c.isTalking)
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.blue.withValues(alpha: 0.3),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Text('Talking',
-                      style: TextStyle(color: Colors.blue, fontSize: 11)),
+                  child: const Text(
+                    'Talking',
+                    style: TextStyle(color: Colors.blue, fontSize: 11),
+                  ),
                 ),
             ],
           ),
           const SizedBox(height: 16),
           Row(
             children: [
-              const Text('Volume',
-                  style: TextStyle(color: Colors.grey, fontSize: 12)),
+              const Text(
+                'Volume',
+                style: TextStyle(color: Colors.grey, fontSize: 12),
+              ),
               Expanded(
                 child: Slider(
                   value: _volume,
@@ -495,9 +529,10 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
               ),
               SizedBox(
                 width: 42,
-                child: Text(_volume.toStringAsFixed(2),
-                    style:
-                        const TextStyle(color: Colors.grey, fontSize: 11)),
+                child: Text(
+                  _volume.toStringAsFixed(2),
+                  style: const TextStyle(color: Colors.grey, fontSize: 11),
+                ),
               ),
             ],
           ),
