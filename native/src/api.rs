@@ -1,4 +1,4 @@
-use crate::{Command, TsChannel, TsClient, TsEvent, COMMAND_TX, RUNTIME, STATE};
+use crate::{Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH, RUNTIME, STATE};
 
 use futures::prelude::*;
 use std::borrow::Cow;
@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tsclientlib::messages::c2s::*;
 use tsclientlib::{ChannelId, ClientId};
-use tsclientlib::{Connection, DisconnectOptions, OutCommandExt, StreamItem};
+use tsclientlib::{Connection, DisconnectOptions, Identity, OutCommandExt, StreamItem};
 use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
 
 fn to_c_str(s: String) -> *mut c_char {
@@ -67,20 +67,26 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
         })
         .collect();
     let volumes = &STATE.lock().client_volumes;
-    let clients = book
+    let clients: Vec<_> = book
         .clients
         .values()
-        .map(|c| TsClient {
-            id: c.id.0 as u32,
-            nickname: c.name.clone(),
-            channel_id: c.channel.0 as u32,
-            away: c.away_message.is_some(),
-            input_muted: c.input_muted,
-            output_muted: c.output_muted,
-            is_talking: false,
-            volume: volumes.get(&(c.id.0 as u16)).copied().unwrap_or(1.0),
+        .map(|c| {
+            let uid = c.uid.as_ref().map(|u| u.to_string());
+            TsClient {
+                id: c.id.0 as u32,
+                nickname: c.name.clone(),
+                channel_id: c.channel.0 as u32,
+                uid,
+                away: c.away_message.is_some(),
+                input_muted: c.input_muted,
+                output_muted: c.output_muted,
+                is_talking: false,
+                volume: volumes.get(&(c.id.0 as u16)).copied().unwrap_or(1.0),
+            }
         })
         .collect();
+    let uid_count = clients.iter().filter(|c| c.uid.is_some()).count();
+    eprintln!("refresh_from_book: {} clients, {} have UIDs", clients.len(), uid_count);
     (channels, clients)
 }
 
@@ -107,6 +113,33 @@ fn check_talking_timeout() {
         if let Some(c) = state.clients.iter_mut().find(|c| c.id == cid as u32) {
             c.is_talking = false;
         }
+    }
+}
+
+// ─── Identity ───────────────────────────────────────────────────────
+
+/// Set the client identity from a JSON string (Serde-serialized Identity).
+/// Dart calls this after loading from SharedPreferences.
+#[no_mangle]
+pub extern "C" fn ts_set_identity(json: *const c_char) {
+    if json.is_null() {
+        return;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(json) }
+        .to_string_lossy()
+        .into_owned();
+    *IDENTITY_STASH.lock() = if s.is_empty() { None } else { Some(s) };
+}
+
+/// Get the current identity as a JSON string. Dart calls this after
+/// a successful connection to save back to SharedPreferences.
+/// Returns null if no identity is set.
+#[no_mangle]
+pub extern "C" fn ts_get_identity() -> *mut c_char {
+    let id = IDENTITY_STASH.lock().clone();
+    match id {
+        Some(s) => to_c_str(s),
+        None => std::ptr::null_mut(),
     }
 }
 
@@ -182,6 +215,12 @@ async fn do_connect(
 ) -> Result<(), String> {
     crate::install_panic_hook();
     let mut opts = Connection::build(address).name(nickname);
+    // Restore persistent identity (first run: None → Identity::create() auto-generated)
+    if let Some(id_json) = IDENTITY_STASH.lock().take() {
+        if let Ok(id) = serde_json::from_str::<Identity>(&id_json) {
+            opts = opts.identity(id);
+        }
+    }
     if let Some(ch) = channel {
         opts = opts.channel(ch);
     }
@@ -252,6 +291,13 @@ async fn do_connect(
             server_name: sname,
             client_id: oid,
         });
+    }
+
+    // Save the identity so Dart can persist it for next session
+    if let Some(id) = con.get_options().get_identity() {
+        if let Ok(json) = serde_json::to_string(id) {
+            *IDENTITY_STASH.lock() = Some(json);
+        }
     }
 
     // Store Connection for fallback disconnect (if event loop dies)

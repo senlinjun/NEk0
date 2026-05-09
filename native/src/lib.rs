@@ -39,6 +39,10 @@ pub static EVENT_LOOP_ALIVE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(fal
 /// can take it from here and send the quit command directly.
 pub static CONNECTION_STASH: Lazy<Mutex<Option<tsclientlib::Connection>>> = Lazy::new(|| Mutex::new(None));
 
+/// Persistent client identity (serialized JSON). Set by Dart before connect,
+/// updated after successful connect. Ensures same identity across app restarts.
+pub static IDENTITY_STASH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
 // ─── Types for Dart ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -87,6 +91,7 @@ pub struct TsClient {
     pub output_muted: bool,
     pub is_talking: bool,
     pub volume: f32,
+    pub uid: Option<String>,
 }
 
 // ─── Global State (no Connection — event loop owns it) ─────────────

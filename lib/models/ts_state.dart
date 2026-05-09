@@ -138,6 +138,8 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   Timer? _pollTimer;
   AudioService? _audioService;
   bool _micEnabled = false;
+  Map<String, double> _savedVolumes = {}; // UID -> volume, persisted to SharedPreferences
+  SharedPreferences? _prefs; // cached for synchronous saves
 
   @override
   TsConnectionState build() {
@@ -148,6 +150,43 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     return const TsConnectionState();
   }
 
+  /// Push saved volumes to Rust and update local state
+  void _restoreClientVolumes() {
+    int withUid = state.clients.where((c) => c.uid != null).length;
+    int restored = 0;
+    debugPrint('TS: _restoreClientVolumes: ${state.clients.length} clients, $withUid have UIDs, ${_savedVolumes.length} saved volumes');
+    var updated = false;
+    var updatedClients = state.clients;
+    for (int i = 0; i < updatedClients.length; i++) {
+      final c = updatedClients[i];
+      if (c.uid != null && _savedVolumes.containsKey(c.uid)) {
+        final vol = _savedVolumes[c.uid]!;
+        TsNative.setClientVolume(c.id, vol);
+        updatedClients[i] = c.copyWith(volume: vol);
+        restored++;
+        updated = true;
+      }
+    }
+    if (updated) {
+      state = state.copyWith(clients: updatedClients);
+    }
+    debugPrint('TS: _restoreClientVolumes: restored $restored volumes');
+  }
+
+  /// Persist the UID → volume map to SharedPreferences (uses cached instance)
+  void _saveClientVolumes() {
+    _prefs?.setString('client_volumes', jsonEncode(_savedVolumes));
+  }
+
+  Future<void> _saveIdentity() async {
+    final id = TsNative.getIdentity();
+    if (id != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('client_identity', id);
+      debugPrint('TS: identity saved to storage');
+    }
+  }
+
   Future<void> connect({
     required String address,
     required String nickname,
@@ -156,6 +195,26 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   }) async {
     debugPrint('TS: connect($address, $nickname, ch=$channel)');
     state = state.copyWith(connecting: true, error: null);
+
+    // Push persisted identity to Rust before connecting
+    final prefs = await SharedPreferences.getInstance();
+    _prefs = prefs; // cache for synchronous saves
+    final id = prefs.getString('client_identity');
+    if (id != null) {
+      debugPrint('TS: pushing identity to Rust');
+      TsNative.setIdentity(id);
+    }
+    // Restore persisted volumes
+    final volsJson = prefs.getString('client_volumes');
+    if (volsJson != null) {
+      _savedVolumes = Map<String, double>.from(
+          (jsonDecode(volsJson) as Map).map((k, v) => MapEntry(k, (v as num).toDouble())));
+    }
+    final savedMicGain = prefs.getDouble('mic_gain');
+    if (savedMicGain != null) {
+      TsNative.setMicGain(savedMicGain);
+      state = state.copyWith(micGain: savedMicGain);
+    }
 
     // Call Rust FFI - starts async connection in background
     final resultJson = TsNative.connect(address, nickname, channel: channel, password: password);
@@ -241,6 +300,8 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         TsNative.setVadThreshold(state.vadThreshold);
         _updateMicState();
         ForegroundService.start(text: state.serverName);
+        _restoreClientVolumes();
+        _saveIdentity();
         break;
 
       case 'disconnected':
@@ -326,6 +387,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
             .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
             .toList();
         state = state.copyWith(channels: newChannels, clients: newClients);
+        _restoreClientVolumes();
         break;
     }
   }
@@ -437,6 +499,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   void setMicGain(double gain) {
     state = state.copyWith(micGain: gain);
     TsNative.setMicGain(gain);
+    _prefs?.setDouble('mic_gain', gain);
   }
 
   void setClientVolume(int clientId, double volume) {
@@ -447,6 +510,15 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           .map((c) => c.id == clientId ? c.copyWith(volume: volume) : c)
           .toList(),
     );
+    // Persist by UID
+    final client = state.clients.where((c) => c.id == clientId).firstOrNull;
+    debugPrint('TS: setClientVolume clientId=$clientId uid=${client?.uid} volume=$volume');
+    if (client?.uid != null) {
+      _savedVolumes[client!.uid!] = volume;
+      _saveClientVolumes();
+    } else {
+      debugPrint('TS: setClientVolume: no UID for client $clientId, NOT persisted');
+    }
   }
 
 }

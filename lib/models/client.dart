@@ -7,6 +7,7 @@ class TsClient {
   final bool outputMuted;
   final bool isTalking;
   final double volume;
+  final String? uid;
 
   const TsClient({
     required this.id,
@@ -17,6 +18,7 @@ class TsClient {
     this.outputMuted = false,
     this.isTalking = false,
     this.volume = 1.0,
+    this.uid,
   });
 
   factory TsClient.fromJson(Map<String, dynamic> json) => TsClient(
@@ -28,6 +30,7 @@ class TsClient {
         outputMuted: json['output_muted'] as bool? ?? false,
         isTalking: json['is_talking'] as bool? ?? false,
         volume: (json['volume'] as num?)?.toDouble() ?? 1.0,
+        uid: json['uid'] as String?,
       );
 
   TsClient copyWith({bool? isTalking, double? volume}) => TsClient(
@@ -39,5 +42,6 @@ class TsClient {
         outputMuted: outputMuted,
         isTalking: isTalking ?? this.isTalking,
         volume: volume ?? this.volume,
+        uid: uid,
       );
 }

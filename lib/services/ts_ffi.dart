@@ -86,6 +86,14 @@ typedef _GetAudioDart = int Function(Pointer<Float>, int);
 typedef _SendAudioNative = Uint8 Function(Pointer<Float>, Uint32);
 typedef _SendAudioDart = int Function(Pointer<Float>, int);
 
+// ts_set_identity(json: *const c_char)
+typedef _SetIdentityNative = Void Function(Pointer<Utf8>);
+typedef _SetIdentityDart = void Function(Pointer<Utf8>);
+
+// ts_get_identity() -> *mut c_char (null if none set)
+typedef _GetIdentityNative = Pointer<Utf8> Function();
+typedef _GetIdentityDart = Pointer<Utf8> Function();
+
 // ts_set_client_volume(client_id: u32, volume: f32) -> bool
 typedef _SetClientVolumeNative = Uint8 Function(Uint32, Float);
 typedef _SetClientVolumeDart = int Function(int, double);
@@ -148,6 +156,12 @@ final _getAudio = _lib.lookupFunction<_GetAudioNative, _GetAudioDart>(
 );
 final _sendAudio = _lib.lookupFunction<_SendAudioNative, _SendAudioDart>(
   'ts_send_audio',
+);
+final _setIdentity = _lib.lookupFunction<_SetIdentityNative, _SetIdentityDart>(
+  'ts_set_identity',
+);
+final _getIdentity = _lib.lookupFunction<_GetIdentityNative, _GetIdentityDart>(
+  'ts_get_identity',
 );
 final _setClientVolume = _lib
     .lookupFunction<_SetClientVolumeNative, _SetClientVolumeDart>(
@@ -246,6 +260,22 @@ class TsNative {
 
   static bool isConnected() {
     return _isConnected() != 0;
+  }
+
+  static void setIdentity(String json) {
+    final ptr = _strToPtr(json);
+    _setIdentity(ptr);
+    malloc.free(ptr);
+  }
+
+  static String? getIdentity() {
+    final ptr = _getIdentity();
+    if (ptr == nullptr) return null;
+    try {
+      return ptr.toDartString();
+    } finally {
+      _freeString(ptr.cast());
+    }
   }
 
   static void setVadThreshold(double threshold) {
