@@ -20,10 +20,11 @@ class KeepAliveService : Service() {
         const val CHANNEL_ID = "teamspeak_keepalive"
         const val NOTIFICATION_ID = 1
 
-        fun start(context: Context, title: String, text: String) {
+        fun start(context: Context, title: String, text: String, mic: Boolean = false) {
             val intent = Intent(context, KeepAliveService::class.java).apply {
                 putExtra("title", title)
                 putExtra("text", text)
+                putExtra("mic", mic)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -36,9 +37,17 @@ class KeepAliveService : Service() {
             context.stopService(Intent(context, KeepAliveService::class.java))
         }
 
-        fun update(context: Context, title: String, text: String) {
+        fun update(context: Context, title: String, text: String, mic: Boolean = false) {
+            val notification = buildNotification(context, title, text)
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.notify(NOTIFICATION_ID, buildNotification(context, title, text))
+            manager.notify(NOTIFICATION_ID, notification)
+            // Restart service to update foreground service type (Android 14+)
+            val serviceIntent = Intent(context, KeepAliveService::class.java).apply {
+                putExtra("title", title)
+                putExtra("text", text)
+                putExtra("mic", mic)
+            }
+            context.startService(serviceIntent)
         }
 
         private fun buildNotification(context: Context, title: String, text: String): Notification {
@@ -113,10 +122,11 @@ class KeepAliveService : Service() {
         val title = intent?.getStringExtra("title") ?: "TeamSpeak"
         val text = intent?.getStringExtra("text") ?: "Connected"
         val notification = buildNotification(this, title, text)
+        val hasMic = intent?.getBooleanExtra("mic", false) ?: false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            if (hasMic) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            startForeground(NOTIFICATION_ID, notification, types)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }

@@ -67,17 +67,18 @@ class AudioService {
 
   /// Enable microphone capture. Call this separately when user wants to speak.
   Future<bool> enableMic() async {
-    final status = await Permission.microphone.request();
-    if (status.isGranted) {
-      // Also request notification permission for foreground service (Android 13+)
-      if (await Permission.notification.isDenied) {
-        await Permission.notification.request();
+    try {
+      final status = await Permission.microphone.request();
+      if (status.isGranted) {
+        _startMic();
+        debugPrint('AudioService: mic enabled');
+        return true;
+      } else {
+        debugPrint('AudioService: mic permission denied — listen-only mode');
+        return false;
       }
-      _startMic();
-      debugPrint('AudioService: mic enabled');
-      return true;
-    } else {
-      debugPrint('AudioService: mic permission denied — listen-only mode');
+    } catch (e) {
+      debugPrint('AudioService: mic permission error: $e');
       return false;
     }
   }

@@ -299,7 +299,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         TsNative.setVadEnabled(true);
         TsNative.setVadThreshold(state.vadThreshold);
         _updateMicState();
-        ForegroundService.start(text: state.serverName);
+        ForegroundService.start(text: state.serverName, mic: false);
         _restoreClientVolumes();
         _saveIdentity();
         break;
@@ -448,11 +448,14 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     if (_audioService == null) return;
     final should = _shouldMicBeActive;
     if (should && !_micEnabled) {
-      _audioService!.enableMic();
+      _audioService!.enableMic().then((granted) {
+        if (granted) ForegroundService.update(mic: true);
+      });
       _micEnabled = true;
     } else if (!should && _micEnabled) {
       _audioService!.disableMic();
       _micEnabled = false;
+      ForegroundService.update(mic: false);
     }
   }
 

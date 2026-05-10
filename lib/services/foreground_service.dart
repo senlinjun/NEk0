@@ -6,11 +6,13 @@ class ForegroundService {
   static Future<bool> start({
     String title = 'TeamSpeak',
     String text = 'Connected',
+    bool mic = false,
   }) async {
     try {
       final result = await _channel.invokeMethod('start', {
         'title': title,
         'text': text,
+        'mic': mic,
       });
       return result == true;
     } catch (e) {
@@ -21,11 +23,13 @@ class ForegroundService {
   static Future<bool> update({
     String title = 'TeamSpeak',
     String text = 'Connected',
+    bool mic = false,
   }) async {
     try {
       final result = await _channel.invokeMethod('update', {
         'title': title,
         'text': text,
+        'mic': mic,
       });
       return result == true;
     } catch (e) {
