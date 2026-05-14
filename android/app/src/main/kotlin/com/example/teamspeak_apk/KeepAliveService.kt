@@ -20,6 +20,12 @@ class KeepAliveService : Service() {
         const val CHANNEL_ID = "teamspeak_keepalive"
         const val NOTIFICATION_ID = 1
 
+        init {
+            try { System.loadLibrary("tsclient") } catch (_: Exception) {}
+        }
+
+        @JvmStatic external fun tsDisconnect()
+
         fun start(context: Context, title: String, text: String, mic: Boolean = false) {
             val intent = Intent(context, KeepAliveService::class.java).apply {
                 putExtra("title", title)
@@ -111,6 +117,7 @@ class KeepAliveService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        try { tsDisconnect() } catch (_: Exception) {}
         stopForeground(STOP_FOREGROUND_REMOVE)
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null

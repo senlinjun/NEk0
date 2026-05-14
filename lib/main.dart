@@ -29,5 +29,3 @@ class TeamSpeakApp extends StatelessWidget {
     );
   }
 }
-
-// TODO: 后台退出自动断连，多人语音卡顿

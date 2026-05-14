@@ -35,6 +35,10 @@ pub static CONNECTION_GENERATION: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(
 /// Set to true while the event loop task is running. Used to detect crashes.
 pub static EVENT_LOOP_ALIVE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
+/// Set to true by JNI (KeepAliveService.onTaskRemoved) when app is swiped from recents.
+/// The event loop checks this flag and triggers a clean disconnect.
+pub static SWIPE_DISCONNECT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
 /// Fallback storage for the Connection. If the event loop dies, ts_disconnect
 /// can take it from here and send the quit command directly.
 pub static CONNECTION_STASH: Lazy<Mutex<Option<tsclientlib::Connection>>> = Lazy::new(|| Mutex::new(None));

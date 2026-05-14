@@ -1,4 +1,4 @@
-use crate::{Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH, RUNTIME, STATE};
+use crate::{Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH, RUNTIME, STATE, SWIPE_DISCONNECT};
 
 use futures::prelude::*;
 use std::borrow::Cow;
@@ -342,6 +342,11 @@ async fn event_loop(
     let mut _loop_count: u64 = 0;
     loop {
         _loop_count += 1;
+        // Check for swipe-from-recents disconnect (set by JNI in onTaskRemoved)
+        if SWIPE_DISCONNECT.load(Ordering::SeqCst) {
+            STATE.lock().disconnect_requested = true;
+            SWIPE_DISCONNECT.store(false, Ordering::SeqCst);
+        }
         // Check for disconnect request (flag-based, bypasses command channel)
         let do_disconnect = {
             let state = STATE.lock();
@@ -753,6 +758,14 @@ async fn event_loop(
 }
 
 // ─── Disconnect ─────────────────────────────────────────────────────
+
+/// Called from KeepAliveService.onTaskRemoved when app is swiped from recents.
+/// Only sets an atomic flag — no mutexes, no allocations, no blocking.
+/// The event loop picks up the flag and sends the actual disconnect.
+#[no_mangle]
+pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect() {
+    SWIPE_DISCONNECT.store(true, Ordering::SeqCst);
+}
 
 #[no_mangle]
 pub extern "C" fn ts_disconnect() -> *mut c_char {
