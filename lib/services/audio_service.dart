@@ -68,6 +68,7 @@ class AudioService {
   /// Enable microphone capture. Call this separately when user wants to speak.
   Future<bool> enableMic() async {
     try {
+      await Permission.notification.request();
       final status = await Permission.microphone.request();
       if (status.isGranted) {
         _startMic();

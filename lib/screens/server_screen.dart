@@ -20,6 +20,11 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(tsConnectionProvider.select((s) => s.connected), (prev, next) {
+      if (prev == true && !next && mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
+    });
     final conn = ref.watch(tsConnectionProvider);
     final connNotifier = ref.read(tsConnectionProvider.notifier);
 

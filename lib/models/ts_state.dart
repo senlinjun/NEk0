@@ -255,6 +255,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       final va = TsNative.isVoiceActive();
       if (va != state.voiceActive) {
         state = state.copyWith(voiceActive: va);
+        _refreshNotification();
       }
     } catch (e) {
       debugPrint('FFI poll error: $e');
@@ -299,7 +300,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         TsNative.setVadEnabled(true);
         TsNative.setVadThreshold(state.vadThreshold);
         _updateMicState();
-        ForegroundService.start(text: state.serverName, mic: false);
+        ForegroundService.start(title: state.serverName, text: _currentChannelName, mic: false);
         _restoreClientVolumes();
         _saveIdentity();
         break;
@@ -388,6 +389,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
             .toList();
         state = state.copyWith(channels: newChannels, clients: newClients);
         _restoreClientVolumes();
+        _refreshNotification();
         break;
     }
   }
@@ -438,6 +440,20 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
 
   // ─── Voice control flow ──────────────────────────────────────────
 
+  String get _currentChannelName {
+    final own = state.clients.where((c) => c.id == state.ownClientId).firstOrNull;
+    if (own == null) return '';
+    return state.channels.where((c) => c.id == own.channelId).firstOrNull?.name ?? '';
+  }
+
+  void _refreshNotification({bool mic = false}) {
+    var text = _currentChannelName;
+    if (!state.inputMuted || state.voiceActive) {
+      text = '$text \u2014 Speaking';
+    }
+    ForegroundService.update(title: state.serverName, text: text, mic: mic);
+  }
+
   /// Diagram: Start -> PTT? -> pushed? -> send : mute? -> send : nothing
   bool get _shouldMicBeActive {
     if (state.pttMode) return state.pttPressed;
@@ -449,13 +465,13 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     final should = _shouldMicBeActive;
     if (should && !_micEnabled) {
       _audioService!.enableMic().then((granted) {
-        if (granted) ForegroundService.update(mic: true);
+        if (granted) _refreshNotification(mic: true);
       });
       _micEnabled = true;
     } else if (!should && _micEnabled) {
       _audioService!.disableMic();
       _micEnabled = false;
-      ForegroundService.update(mic: false);
+      _refreshNotification(mic: false);
     }
   }
 
