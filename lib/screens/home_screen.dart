@@ -149,9 +149,15 @@ class HomeScreen extends ConsumerWidget {
     );
 
     if (context.mounted) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const ServerScreen()),
-      );
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const ServerScreen()))
+          .then((error) {
+        if (error is String && error.isNotEmpty && context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(error), backgroundColor: Colors.red),
+          );
+        }
+      });
     }
   }
 }

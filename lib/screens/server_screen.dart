@@ -25,6 +25,15 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         Navigator.of(context).popUntil((route) => route.isFirst);
       }
     });
+    // Pop on connect failure (connecting finished without success)
+    ref.listen(tsConnectionProvider.select((s) => s.connecting), (prev, next) {
+      if (prev == true && !next && mounted) {
+        final st = ref.read(tsConnectionProvider);
+        if (!st.connected) {
+          Navigator.of(context).pop(st.error);
+        }
+      }
+    });
     final conn = ref.watch(tsConnectionProvider);
     final connNotifier = ref.read(tsConnectionProvider.notifier);
 
