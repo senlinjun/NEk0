@@ -36,11 +36,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             ConnectionBar(
               serverName: conn.serverName,
               connected: conn.connected,
-              onDisconnect: () async {
-                debugPrint('SERVER_SCREEN: disconnect tapped');
-                await connNotifier.disconnect();
-                debugPrint('SERVER_SCREEN: disconnect done, mounted=$mounted');
-                if (mounted) Navigator.of(context).pop();
+              onDisconnect: () {
+                connNotifier.disconnect();
               },
             ),
             Expanded(
