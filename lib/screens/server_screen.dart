@@ -211,16 +211,14 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   }
 
   Widget _buildControls(TsConnectionState conn, TsConnectionNotifier notifier) {
-    // Mic color: red=disabled, green=ready, blue=speaking/PTT-pushing
-    final micDisabled = conn.inputMuted || (conn.pttMode && !conn.pttPressed);
-    final micActive = conn.voiceActive || conn.pttPressed;
+    // Mic color: red=muted, green=on-idle, blue=speaking/PTT-active
     Color micColor;
-    if (micDisabled) {
+    if (conn.inputMuted) {
       micColor = Colors.red;
-    } else if (micActive) {
-      micColor = Colors.blue;
+    } else if (conn.pttMode) {
+      micColor = conn.pttPressed ? Colors.blue : Colors.green;
     } else {
-      micColor = Colors.green;
+      micColor = conn.voiceActive ? Colors.blue : Colors.green;
     }
 
     return Container(
@@ -239,32 +237,37 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
           // --- PTT button (only in PTT mode) ---
           if (conn.pttMode) ...[
             const SizedBox(width: 24),
-            Listener(
-              onPointerDown: (_) => notifier.setPttPressed(true),
-              onPointerUp: (_) => notifier.setPttPressed(false),
-              onPointerCancel: (_) => notifier.setPttPressed(false),
-              child: Container(
-                width: 64,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: conn.pttPressed
-                      ? const Color(0xFF4444AA)
-                      : const Color(0xFF2A2A4A),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
+
+            IgnorePointer(
+              ignoring: conn.inputMuted,
+              child: Listener(
+                onPointerDown: (_) => notifier.setPttPressed(true),
+                onPointerUp: (_) => notifier.setPttPressed(false),
+                onPointerCancel: (_) => notifier.setPttPressed(false),
+                child: Container(
+                  width: 64,
+                  height: 40,
+                  decoration: BoxDecoration(
                     color: conn.pttPressed
-                        ? Colors.lightGreenAccent
-                        : const Color(0xFF888888),
-                    width: 2,
+                        ? const Color(0xFF4444AA)
+                        : const Color(0xFF2A2A4A),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: const Color(0xFF888888),
+                      // color: conn.pttPressed
+                      //     ? Colors.lightGreenAccent
+                      //     : const Color(0xFF888888),
+                      width: 2,
+                    ),
                   ),
-                ),
-                child: const Center(
-                  child: Text(
-                    'PTT',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13,
+                  child: const Center(
+                    child: Text(
+                      'PTT',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
                     ),
                   ),
                 ),
