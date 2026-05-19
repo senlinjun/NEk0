@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:ffi';
 import 'dart:typed_data'
-    show ByteData, Endian, Float32List, Int16List, Uint8List;
+    show ByteData, Endian, Float, Float32List, Uint8List;
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -13,17 +13,11 @@ import 'ts_ffi.dart';
 
 class AudioService {
   bool _running = false;
-  bool _playerSetup = false;
-  Timer? _fallbackTimer;
+  bool _playbackRunning = false;
   StreamSubscription? _micSubscription;
-  int _totalFed = 0;
-
-  static const int _sampleRate = 48000;
-  static const int _channels = 1; // Mono (TeamSpeak OpusVoice is mono)
-  static const int _frameSize = 960; // 20ms at 48kHz mono
-  static const int _feedThreshold = 960; // Feed when < 960 frames remain
 
   static const _micChannel = EventChannel('com.senlinjun.nek0/mic');
+  static const int _frameSize = 960; // 20ms at 48kHz mono
 
   bool get isRunning => _running;
 
@@ -35,37 +29,65 @@ class AudioService {
       return false;
     }
 
-    try {
-      await FlutterPcmSound.setup(
-        sampleRate: _sampleRate,
-        channelCount: _channels,
-      );
-      _playerSetup = true;
-      FlutterPcmSound.setFeedThreshold(_feedThreshold);
-      FlutterPcmSound.setFeedCallback((remainingFrames) {
-        // debugPrint('AudioService: feedCallback remaining=$remainingFrames');
-        _feedAudioFromRust();
-      });
-      // Kick-start the feed cycle
-      FlutterPcmSound.start();
-    } catch (e) {
-      debugPrint('AudioService: player setup failed: $e');
-      TsNative.stopAudio();
-      return false;
-    }
-
     _running = true;
-    debugPrint('AudioService: started (playback only, mic not yet active)');
+    debugPrint('AudioService: started (mic not yet active)');
 
-    // Fallback timer: poll Rust every 50ms in case feed callback doesn't fire
-    _fallbackTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      _feedAudioFromRust();
-    });
+    // Start playback immediately — always listening
+    _startPlayback();
 
     return true;
   }
 
-  /// Enable microphone capture. Call this separately when user wants to speak.
+  // ─── Playback ────────────────────────────────────────────────────
+
+  Future<void> _startPlayback() async {
+    if (_playbackRunning) return;
+    try {
+      await FlutterPcmSound.setup(sampleRate: 48000, channelCount: 1);
+      // Feed threshold: 960 frames (20ms). Low enough for real-time feel
+      // but avoids callback storms.
+      await FlutterPcmSound.setFeedThreshold(960);
+      FlutterPcmSound.setFeedCallback(_onPlaybackFeed);
+      _playbackRunning = true;
+      FlutterPcmSound.start(); // triggers _onPlaybackFeed(0) to kick things off
+      debugPrint('AudioService: playback started');
+    } catch (e) {
+      debugPrint('AudioService: playback setup error: $e');
+    }
+  }
+
+  void _onPlaybackFeed(int remainingFrames) {
+    if (!_playbackRunning) return;
+
+    final buf = calloc<Int16>(_frameSize);
+    try {
+      final got = TsNative.getAudio(buf, _frameSize);
+      if (got > 0) {
+        final samples = List<int>.generate(got, (i) => buf[i]);
+        FlutterPcmSound.feed(PcmArrayInt16.fromList(samples));
+      } else {
+        // No audio from Rust — feed silence to prevent AudioTrack underrun
+        FlutterPcmSound.feed(PcmArrayInt16.zeros(count: _frameSize));
+      }
+    } catch (e) {
+      debugPrint('AudioService: playback feed error: $e');
+    } finally {
+      calloc.free(buf);
+    }
+  }
+
+  void _stopPlayback() {
+    _playbackRunning = false;
+    try {
+      FlutterPcmSound.release();
+    } catch (e) {
+      debugPrint('AudioService: playback release error: $e');
+    }
+    debugPrint('AudioService: playback stopped');
+  }
+
+  // ─── Mic ─────────────────────────────────────────────────────────
+
   Future<bool> enableMic() async {
     try {
       await Permission.notification.request();
@@ -75,7 +97,7 @@ class AudioService {
         debugPrint('AudioService: mic enabled');
         return true;
       } else {
-        debugPrint('AudioService: mic permission denied — listen-only mode');
+        debugPrint('AudioService: mic permission denied');
         return false;
       }
     } catch (e) {
@@ -84,7 +106,6 @@ class AudioService {
     }
   }
 
-  /// Disable microphone capture
   void disableMic() {
     _stopMic();
     debugPrint('AudioService: mic disabled');
@@ -94,44 +115,11 @@ class AudioService {
     if (!_running) return;
     _running = false;
 
-    _fallbackTimer?.cancel();
-    _fallbackTimer = null;
     _stopMic();
-
-    if (_playerSetup) {
-      FlutterPcmSound.release();
-      _playerSetup = false;
-    }
+    _stopPlayback();
     TsNative.stopAudio();
     debugPrint('AudioService: stopped');
   }
-
-  /// Pull PCM from Rust and feed to audio player
-  void _feedAudioFromRust() {
-    if (!_running) return;
-    final buf = malloc<Float>(_frameSize);
-    try {
-      final samples = TsNative.getAudio(buf, _frameSize);
-      if (samples > 0) {
-        final pcm = Int16List(samples);
-        double peak = 0.0;
-        for (int i = 0; i < samples; i++) {
-          double s = buf[i].clamp(-1.0, 1.0);
-          if (s.abs() > peak) peak = s.abs();
-          pcm[i] = (s * 32767).round();
-        }
-        _totalFed += samples;
-        // debugPrint('AudioService: feed $samples samp peak=${peak.toStringAsFixed(4)} total=$_totalFed');
-        FlutterPcmSound.feed(PcmArrayInt16.fromList(pcm));
-      }
-    } catch (e) {
-      debugPrint('AudioService: feed error: $e');
-    } finally {
-      malloc.free(buf);
-    }
-  }
-
-  // ─── Mic ───────────────────────────────────────────────────────────
 
   void _startMic() {
     _micSubscription = _micChannel.receiveBroadcastStream().listen(

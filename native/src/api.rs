@@ -1,16 +1,20 @@
-use crate::{Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH, RUNTIME, STATE, SWIPE_DISCONNECT};
+use crate::{
+    Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH, RUNTIME, STATE,
+    SWIPE_DISCONNECT,
+};
 
 use futures::prelude::*;
+use opus_rs::OpusDecoder;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tsclientlib::messages::c2s::*;
 use tsclientlib::{ChannelId, ClientId};
 use tsclientlib::{Connection, DisconnectOptions, Identity, OutCommandExt, StreamItem};
-use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
+use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio};
 
 fn to_c_str(s: String) -> *mut c_char {
     CString::new(s)
@@ -25,14 +29,6 @@ pub extern "C" fn ts_free_string(s: *mut c_char) {
             let _ = CString::from_raw(s);
         }
     }
-}
-
-fn hex_slice(data: &[u8]) -> String {
-    data.iter()
-        .take(32)
-        .map(|b| format!("{:02x}", b))
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 fn push_diag(msg: &str) {
@@ -66,7 +62,6 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
             order: c.order.0 as u32,
         })
         .collect();
-    let volumes = &STATE.lock().client_volumes;
     let clients: Vec<_> = book
         .clients
         .values()
@@ -80,46 +75,24 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                 away: c.away_message.is_some(),
                 input_muted: c.input_muted,
                 output_muted: c.output_muted,
-                is_talking: false,
-                volume: volumes.get(&(c.id.0 as u16)).copied().unwrap_or(1.0),
+                is_talking: {
+                    let state = STATE.lock();
+                    state.talking_clients.get(&(c.id.0 as u16))
+                        .map(|t| t.elapsed().as_millis() < 500)
+                        .unwrap_or(false)
+                },
+                volume: {
+                    let state = STATE.lock();
+                    state.client_volumes.get(&(c.id.0 as u16)).copied().unwrap_or(1.0)
+                },
             }
         })
         .collect();
-    let uid_count = clients.iter().filter(|c| c.uid.is_some()).count();
-    eprintln!("refresh_from_book: {} clients, {} have UIDs", clients.len(), uid_count);
     (channels, clients)
-}
-
-/// Check for clients who stopped talking (no audio for >1s).
-/// Call periodically from the event loop.
-fn check_talking_timeout() {
-    let mut state = STATE.lock();
-    let now = Instant::now();
-    let timeout = Duration::from_secs(1);
-    let mut stopped = Vec::new();
-    state.talking_clients.retain(|&id, last| {
-        if now.duration_since(*last) > timeout {
-            stopped.push(id);
-            false
-        } else {
-            true
-        }
-    });
-    for cid in stopped {
-        state.pending_events.push_back(TsEvent::ClientTalking {
-            client_id: cid as u32,
-            is_talking: false,
-        });
-        if let Some(c) = state.clients.iter_mut().find(|c| c.id == cid as u32) {
-            c.is_talking = false;
-        }
-    }
 }
 
 // ─── Identity ───────────────────────────────────────────────────────
 
-/// Set the client identity from a JSON string (Serde-serialized Identity).
-/// Dart calls this after loading from SharedPreferences.
 #[no_mangle]
 pub extern "C" fn ts_set_identity(json: *const c_char) {
     if json.is_null() {
@@ -131,9 +104,6 @@ pub extern "C" fn ts_set_identity(json: *const c_char) {
     *IDENTITY_STASH.lock() = if s.is_empty() { None } else { Some(s) };
 }
 
-/// Get the current identity as a JSON string. Dart calls this after
-/// a successful connection to save back to SharedPreferences.
-/// Returns null if no identity is set.
 #[no_mangle]
 pub extern "C" fn ts_get_identity() -> *mut c_char {
     let id = IDENTITY_STASH.lock().clone();
@@ -215,7 +185,6 @@ async fn do_connect(
 ) -> Result<(), String> {
     crate::install_panic_hook();
     let mut opts = Connection::build(address).name(nickname);
-    // Restore persistent identity (first run: None → Identity::create() auto-generated)
     if let Some(id_json) = IDENTITY_STASH.lock().take() {
         if let Ok(id) = serde_json::from_str::<Identity>(&id_json) {
             opts = opts.identity(id);
@@ -256,7 +225,6 @@ async fn do_connect(
         return Err("No BookEvents".into());
     }
 
-    // Subscribe to all channels
     {
         let sub = OutChannelSubscribeAllMessage::new();
         let _ = sub.send(&mut con);
@@ -274,7 +242,6 @@ async fn do_connect(
         oid
     );
 
-    // Create command channel with generation guard
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let generation = crate::CONNECTION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     *COMMAND_TX.lock() = Some(cmd_tx);
@@ -293,17 +260,14 @@ async fn do_connect(
         });
     }
 
-    // Save the identity so Dart can persist it for next session
     if let Some(id) = con.get_options().get_identity() {
         if let Ok(json) = serde_json::to_string(id) {
             *IDENTITY_STASH.lock() = Some(json);
         }
     }
 
-    // Store Connection for fallback disconnect (if event loop dies)
     *crate::CONNECTION_STASH.lock() = Some(con);
 
-    // Spawn event loop — it takes Connection from stash, catches panics
     RUNTIME.spawn(async move {
         let con = crate::CONNECTION_STASH
             .lock()
@@ -329,8 +293,123 @@ async fn do_connect(
     Ok(())
 }
 
-/// Event loop owns Connection permanently.
-/// Polls server events AND processes commands from the command channel.
+// ─── Audio receive helpers ──────────────────────────────────────────
+
+/// Decode an incoming audio packet with a per-client OpusDecoder and mix into the
+/// accumulation buffer.  The decoder is created lazily on the first packet from a
+/// speaker and keeps its state across frames (required for correct Opus decoding).
+fn decode_and_mix(audio_buf: InAudioBuf, mix_buffer: &mut [f32]) {
+    // Extract data from the self_cell-wrapped buffer BEFORE locking STATE.
+    // InAudioBuf uses a self-referential pattern — we must clone the bytes we need
+    // while the borrow is alive, then drop the references.
+    let audio = audio_buf.data(); // &InAudio
+    let audio_data = audio.data(); // &AudioData
+
+    let (from_id, opus_vec) = match audio_data {
+        AudioData::S2C { from, data, .. } => (*from, data.to_vec()),
+        AudioData::S2CWhisper { from, data, .. } => (*from, data.to_vec()),
+        _ => return,
+    };
+    drop(audio_data);
+    drop(audio);
+    drop(audio_buf);
+
+    // Now we own opus_vec — safe to lock STATE.
+    let vol;
+    let mut state = STATE.lock();
+    vol = state.client_volumes.get(&from_id).copied().unwrap_or(1.0);
+    // Mark client as talking (used for blue dot indicator in UI)
+    state.talking_clients.insert(from_id, std::time::Instant::now());
+    let decoder = state
+        .audio_decoders
+        .entry(from_id)
+        .or_insert_with(|| OpusDecoder::new(48000, 1).expect("failed to create Opus decoder"));
+
+    let mut pcm_out = vec![0.0f32; mix_buffer.len()];
+    match decoder.decode(&opus_vec, mix_buffer.len(), &mut pcm_out) {
+        Ok(decoded_samples) => {
+            let n = decoded_samples.min(mix_buffer.len());
+            for i in 0..n {
+                mix_buffer[i] = (mix_buffer[i] + pcm_out[i] * vol).clamp(-1.0, 1.0);
+            }
+        }
+        Err(e) => {
+            eprintln!("opus decode error from client {}: {}", from_id, e);
+        }
+    }
+}
+
+/// Handle a non-audio stream item (book events, messages, disconnects).
+fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64) {
+    let handle_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match item {
+            StreamItem::Audio(_) => {} // handled upstream
+            StreamItem::BookEvents(events) => {
+                for ev in events {
+                    match ev {
+                        tsclientlib::events::Event::Message {
+                            target,
+                            invoker,
+                            message,
+                        } => {
+                            let target_mode = match target {
+                                tsclientlib::MessageTarget::Server => 3u8,
+                                tsclientlib::MessageTarget::Channel => 2u8,
+                                tsclientlib::MessageTarget::Client(_) => 1u8,
+                                tsclientlib::MessageTarget::Poke(_) => 0u8,
+                            };
+                            STATE.lock().pending_events.push_back(TsEvent::TextMessage {
+                                from_client: invoker.name.clone(),
+                                from_client_id: invoker.id.0 as u32,
+                                target_mode,
+                                message: message.clone(),
+                            });
+                        }
+                        _ => {
+                            let refreshed = con.get_state().ok().map(|b| refresh_from_book(&b));
+                            if let Some((ch, cl)) = refreshed {
+                                let mut state = STATE.lock();
+                                state.channels = ch;
+                                state.clients = cl;
+                                state.pending_events.push_back(TsEvent::ChannelsUpdated {});
+                            }
+                        }
+                    }
+                }
+            }
+            StreamItem::MessageEvent(msg) => {
+                use tsclientlib::messages::s2c::InMessage;
+                if let InMessage::TextMessage(txt) = msg {
+                    for p in txt.iter() {
+                        STATE.lock().pending_events.push_back(TsEvent::TextMessage {
+                            from_client: p.invoker_name.clone(),
+                            from_client_id: p.invoker_id.0 as u32,
+                            target_mode: p.target as u8,
+                            message: p.message.clone(),
+                        });
+                    }
+                }
+            }
+            StreamItem::DisconnectedTemporarily(r) => {
+                STATE.lock().pending_events.push_back(TsEvent::Error {
+                    message: format!("Temp disconnected: {:?}", r),
+                });
+            }
+            _ => {}
+        }
+    }));
+    if let Err(e) = handle_result {
+        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = e.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".into()
+        };
+        push_diag(&format!("event handler PANICKED: {}", msg));
+    }
+}
+
 async fn event_loop(
     mut con: Connection,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
@@ -339,33 +418,33 @@ async fn event_loop(
     eprintln!("event_loop: started gen={}", generation);
     push_diag(&format!("event_loop: started (gen={})", generation));
     crate::EVENT_LOOP_ALIVE.store(true, Ordering::SeqCst);
-    let mut _loop_count: u64 = 0;
     loop {
-        _loop_count += 1;
-        // Check for swipe-from-recents disconnect (set by JNI in onTaskRemoved)
+        // Clean up talking clients that haven't spoken in >2s
+        STATE.lock().talking_clients.retain(|_, t| t.elapsed().as_millis() < 2000);
+
         if SWIPE_DISCONNECT.load(Ordering::SeqCst) {
             STATE.lock().disconnect_requested = true;
             SWIPE_DISCONNECT.store(false, Ordering::SeqCst);
         }
-        // Check for disconnect request (flag-based, bypasses command channel)
         let do_disconnect = {
             let state = STATE.lock();
             state.disconnect_requested
         };
-        // Per-iteration heartbeat (1 of every 50 iterations ≈ every 2.5s)
-        // if loop_count % 50 == 1 {
-        //     push_diag(&format!("loop #{} alive, disconnect_flag={}", loop_count, do_disconnect));
-        // }
         if do_disconnect {
             let _ = con.disconnect(DisconnectOptions::new());
             let _ = con.events().for_each(|_| future::ready(())).await;
             let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
             if current_gen == generation {
-                STATE.lock().pending_events.push_back(TsEvent::Disconnected {
-                    reason: "User disconnected".into(),
-                });
+                STATE
+                    .lock()
+                    .pending_events
+                    .push_back(TsEvent::Disconnected {
+                        reason: "User disconnected".into(),
+                    });
                 STATE.lock().connected = false;
                 STATE.lock().disconnect_requested = false;
+                STATE.lock().audio_decoders.clear();
+                STATE.lock().audio_out.clear();
                 *COMMAND_TX.lock() = None;
             }
             return;
@@ -373,15 +452,6 @@ async fn event_loop(
 
         // 1. Process all pending commands (non-blocking)
         while let Ok(cmd) = cmd_rx.try_recv() {
-            match &cmd {
-                Command::SendAudio { data } => {
-                    eprintln!("event_loop: cmd=SendAudio({} samples)", data.len());
-                }
-                Command::SetClientVolume { client_id, volume } => {
-                    eprintln!("event_loop: cmd=SetClientVolume({}, {})", client_id, volume);
-                }
-                _ => eprintln!("event_loop: cmd={:?}", cmd),
-            }
             match cmd {
                 Command::SendMessage {
                     target_mode: _,
@@ -395,7 +465,6 @@ async fn event_loop(
                     };
                     let _ =
                         OutSendTextMessageMessage::new(&mut std::iter::once(part)).send(&mut con);
-                    eprintln!("event_loop: sent message");
                 }
                 Command::MoveChannel {
                     client_id,
@@ -407,10 +476,6 @@ async fn event_loop(
                         channel_password: None,
                     };
                     let _ = OutClientMoveMessage::new(&mut std::iter::once(part)).send(&mut con);
-                    eprintln!(
-                        "event_loop: moved client {} to channel {}",
-                        client_id, channel_id
-                    );
                 }
                 Command::SetMuted { input, output } => {
                     let part = OutClientUpdatePart {
@@ -430,35 +495,29 @@ async fn event_loop(
                         badges: None,
                     };
                     let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
-                    eprintln!("event_loop: set muted input={} output={}", input, output);
                 }
                 Command::Disconnect => {
                     let _ = con.disconnect(DisconnectOptions::new());
                     let _ = con.events().for_each(|_| future::ready(())).await;
                     let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
                     if current_gen == generation {
-                        STATE.lock().pending_events.push_back(TsEvent::Disconnected {
+                        let mut s = STATE.lock();
+                        s.pending_events.push_back(TsEvent::Disconnected {
                             reason: "User disconnected".into(),
                         });
-                        STATE.lock().connected = false;
+                        s.connected = false;
+                        s.audio_decoders.clear();
+                        s.audio_out.clear();
                         *COMMAND_TX.lock() = None;
                     }
                     return;
                 }
-                Command::SetClientVolume {
-                    client_id,
-                    volume,
-                } => {
-                    STATE.lock().client_volumes.insert(client_id, volume);
-                }
                 Command::SendAudio { data } => {
-                    const FRAME: usize = 960; // 20ms at 48kHz mono
-                                              // Buffer incoming PCM
+                    const FRAME: usize = 960;
                     {
                         let mut state = STATE.lock();
                         state.pcm_in.extend_from_slice(&data);
                     }
-                    // Encode full frames — lock only for buffer+encode, release before send
                     loop {
                         let encode_result = {
                             let mut state = STATE.lock();
@@ -466,18 +525,18 @@ async fn event_loop(
                                 break;
                             }
                             let frame: Vec<f32> = state.pcm_in.drain(..FRAME).collect();
-                            // VAD gate with hangover: keep sending for ~200ms after voice drops below threshold
-                            const HOLD_FRAMES: u32 = 10; // 200ms at 20ms/frame
+                            const HOLD_FRAMES: u32 = 10;
                             let vad_drop = if state.vad_enabled {
-                                let rms = (frame.iter().map(|s| s * s).sum::<f32>() / FRAME as f32).sqrt();
+                                let rms = (frame.iter().map(|s| s * s).sum::<f32>() / FRAME as f32)
+                                    .sqrt();
                                 if rms >= state.vad_threshold {
                                     state.vad_hold = HOLD_FRAMES;
-                                    false // voice active, don't drop
+                                    false
                                 } else if state.vad_hold > 0 {
                                     state.vad_hold -= 1;
-                                    false // in hangover, keep sending
+                                    false
                                 } else {
-                                    true // drop this frame
+                                    true
                                 }
                             } else {
                                 false
@@ -502,11 +561,10 @@ async fn event_loop(
                                     }
                                 }
                             } else {
-                                eprintln!("event_loop: no encoder for SendAudio");
                                 state.pcm_in.clear();
                                 None
                             }
-                        }; // lock released before send
+                        };
                         if let Some((seq, opus_data)) = encode_result {
                             let packet = OutAudio::new(&AudioData::C2S {
                                 id: seq,
@@ -514,7 +572,9 @@ async fn event_loop(
                                 data: &opus_data,
                             });
                             match con.send_audio(packet) {
-                                Ok(_) => { STATE.lock().voice_active = true; }
+                                Ok(_) => {
+                                    STATE.lock().voice_active = true;
+                                }
                                 Err(e) => eprintln!("event_loop: send_audio error: {}", e),
                             }
                         }
@@ -523,198 +583,24 @@ async fn event_loop(
             }
         }
 
-        // 2. Poll one event with short timeout
-        let result = tokio::time::timeout(Duration::from_millis(50), con.events().next()).await;
+        // 2. Poll events — drain all available audio, handle control events.
+        //    Batch all audio packets into ONE mixed 960-sample frame per iteration,
+        //    so production rate = 50 Hz × 960 = 48k samples/sec regardless of speaker count.
+        const FRAME: usize = 960;
+        let mut mix_buffer: Vec<f32> = vec![0.0f32; FRAME];
+        let mut had_audio = false;
 
-        match result {
+        // 2a. First event — up to 20ms timeout (keeps commands responsive)
+        let first = tokio::time::timeout(Duration::from_millis(20), con.events().next()).await;
+        let mut deferred: Option<StreamItem> = None;
+
+        match first {
+            Ok(Some(Ok(StreamItem::Audio(audio_buf)))) => {
+                decode_and_mix(audio_buf, &mut mix_buffer);
+                had_audio = true;
+            }
             Ok(Some(Ok(item))) => {
-                // Event sync handler (wrapped in catch_unwind for safety)
-                let handle_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut skip_audio = false;
-                    if let StreamItem::Audio(packet) = &item {
-                        let audio_data = packet.data().data();
-                        let codec = audio_data.codec();
-                        if codec != CodecType::OpusVoice && codec != CodecType::OpusMusic {
-                            skip_audio = true;
-                        }
-                        if audio_data.data().len() <= 1 {
-                            skip_audio = true;
-                        }
-                    }
-                    match &item {
-                        StreamItem::Audio(_) if skip_audio => {}
-                        StreamItem::BookEvents(events) => {
-                            for ev in events {
-                                match ev {
-                                    tsclientlib::events::Event::Message {
-                                        target,
-                                        invoker,
-                                        message,
-                                    } => {
-                                        let target_mode = match target {
-                                            tsclientlib::MessageTarget::Server => 3u8,
-                                            tsclientlib::MessageTarget::Channel => 2u8,
-                                            tsclientlib::MessageTarget::Client(_) => 1u8,
-                                            tsclientlib::MessageTarget::Poke(_) => 0u8,
-                                        };
-                                        STATE.lock().pending_events.push_back(
-                                            TsEvent::TextMessage {
-                                                from_client: invoker.name.clone(),
-                                                from_client_id: invoker.id.0 as u32,
-                                                target_mode,
-                                                message: message.clone(),
-                                            },
-                                        );
-                                    }
-                                    _ => {
-                                        let refreshed =
-                                            con.get_state().ok().map(|b| refresh_from_book(&b));
-                                        if let Some((ch, cl)) = refreshed {
-                                            let mut state = STATE.lock();
-                                            state.channels = ch;
-                                            state.clients = cl;
-                                            // Sync talking status from active talkers map
-                                            let talking: std::collections::HashSet<u16> =
-                                                state.talking_clients.keys().copied().collect();
-                                            for c in &mut state.clients {
-                                                c.is_talking = talking.contains(&(c.id as u16));
-                                            }
-                                            state
-                                                .pending_events
-                                                .push_back(TsEvent::ChannelsUpdated {});
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        StreamItem::MessageEvent(msg) => {
-                            use tsclientlib::messages::s2c::InMessage;
-                            if let InMessage::TextMessage(txt) = msg {
-                                for p in txt.iter() {
-                                    STATE.lock().pending_events.push_back(TsEvent::TextMessage {
-                                        from_client: p.invoker_name.clone(),
-                                        from_client_id: p.invoker_id.0 as u32,
-                                        target_mode: p.target as u8,
-                                        message: p.message.clone(),
-                                    });
-                                }
-                            }
-                        }
-                        StreamItem::DisconnectedTemporarily(r) => {
-                            STATE.lock().pending_events.push_back(TsEvent::Error {
-                                message: format!("Temp disconnected: {:?}", r),
-                            });
-                        }
-                        StreamItem::Audio(packet) => {
-                            let audio_data = packet.data().data();
-                            // Track who is talking (extract sender from AudioData)
-                            let sender_id: Option<u16> = match audio_data {
-                                AudioData::S2C { from, .. } | AudioData::S2CWhisper { from, .. } => Some(*from),
-                                _ => None,
-                            };
-                            eprintln!("audio packet: sender_id={:?} codec={:?}", sender_id, audio_data.codec());
-                            let opus_bytes = audio_data.data();
-                            let mut state = STATE.lock();
-                            if let Some(sid) = sender_id {
-                                if sid != state.own_client_id as u16 {
-                                    let is_new = !state.talking_clients.contains_key(&sid);
-                                    state.talking_clients.insert(sid, Instant::now());
-                                    if is_new {
-                                        eprintln!("TALKING START: client_id={}", sid);
-                                        state.pending_events.push_back(TsEvent::ClientTalking {
-                                            client_id: sid as u32,
-                                            is_talking: true,
-                                        });
-                                        if let Some(c) = state.clients.iter_mut().find(|c| c.id == sid as u32) {
-                                            c.is_talking = true;
-                                        }
-                                    }
-                                }
-                            }
-                            let mut decoder = state.audio_decoder.take();
-                            // Wrap decode in catch_unwind — opus-rs has off-by-one panics
-                            let decode_result = if let Some(ref mut dec) = decoder {
-                                let frame_size = 960;
-                                let mut pcm_out = vec![0.0f32; frame_size];
-                                let r =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        dec.decode(opus_bytes, frame_size, &mut pcm_out)
-                                    }));
-                                Some(r.map(|inner| inner.map(|samples| (samples, pcm_out))))
-                            } else {
-                                None
-                            };
-                            state.audio_decoder = decoder;
-                            match decode_result {
-                                Some(Ok(Ok((samples, mut pcm_out)))) => {
-                                    let safe_len = samples.min(pcm_out.len());
-                                    // Apply per-client volume
-                                    let vol = sender_id
-                                        .and_then(|sid| state.client_volumes.get(&sid))
-                                        .copied()
-                                        .unwrap_or(1.0);
-                                    if (vol - 1.0).abs() > 0.001 {
-                                        for s in &mut pcm_out[..safe_len] {
-                                            *s *= vol;
-                                        }
-                                    }
-                                    let peak = pcm_out[..safe_len]
-                                        .iter()
-                                        .fold(0.0f32, |m, &s| m.max(s.abs()));
-                                    let buf_was = state.audio_out.len();
-                                    state.audio_out.extend_from_slice(&pcm_out[..safe_len]);
-                                    eprintln!(
-                                        "audio: decoded {} samp peak={:.4} buf {}->{}",
-                                        safe_len,
-                                        peak,
-                                        buf_was,
-                                        state.audio_out.len()
-                                    );
-                                    state.audio_decoded_count += 1;
-                                    let cnt = state.audio_decoded_count;
-                                    let errs = state.audio_error_count;
-                                    let buf = state.audio_out.len();
-                                    if cnt % 25 == 1 {
-                                        state.pending_events.push_back(TsEvent::AudioReceived {
-                                            decoded: cnt,
-                                            errors: errs,
-                                            buf_samples: buf,
-                                        });
-                                    }
-                                }
-                                Some(Ok(Err(e))) => {
-                                    state.audio_error_count += 1;
-                                    eprintln!(
-                                        "audio: decode err: {} hex={}",
-                                        e,
-                                        hex_slice(&opus_bytes[..opus_bytes.len().min(32)])
-                                    );
-                                }
-                                Some(Err(panic_err)) => {
-                                    state.audio_error_count += 1;
-                                    let msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
-                                        s.to_string()
-                                    } else {
-                                        "unknown".into()
-                                    };
-                                    push_diag(&format!("opus decoder PANICKED: {}", msg));
-                                }
-                                None => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                }));
-                if let Err(e) = handle_result {
-                    let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = e.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "unknown panic".into()
-                    };
-                    push_diag(&format!("event handler PANICKED: {}", msg));
-                }
+                deferred = Some(item);
             }
             Ok(Some(Err(e))) => {
                 eprintln!("event_loop: stream error: {} (gen={})", e, generation);
@@ -735,26 +621,80 @@ async fn event_loop(
                 if current_gen == generation {
                     let mut s = STATE.lock();
                     s.connected = false;
+                    s.audio_decoders.clear();
+                    s.audio_out.clear();
                     s.pending_events.push_back(TsEvent::Disconnected {
                         reason: "Connection closed by server".into(),
                     });
                     *COMMAND_TX.lock() = None;
-                } else {
-                    eprintln!(
-                        "event_loop: stale stream-end ignored (current={}, my={})",
-                        current_gen, generation
-                    );
                 }
                 break;
             }
-            Err(_) => {
-                // Timeout — continue loop
+            Err(_) => {} // 20ms timeout — continue
+        }
+
+        // 2b. Drain remaining already-available events (1ms timeout, non-blocking).
+        //     Non-audio events are collected and processed after the drain to avoid
+        //     conflicting mutable borrows on `con` (the stream borrows con via events()).
+        let mut deferred_events: Vec<StreamItem> = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_millis(1), con.events().next()).await {
+                Ok(Some(Ok(StreamItem::Audio(audio_buf)))) => {
+                    decode_and_mix(audio_buf, &mut mix_buffer);
+                    had_audio = true;
+                }
+                Ok(Some(Ok(item))) => {
+                    deferred_events.push(item);
+                }
+                Ok(Some(Err(e))) => {
+                    eprintln!("event_loop: stream error: {} (gen={})", e, generation);
+                    let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+                    if current_gen == generation {
+                        STATE.lock().pending_events.push_back(TsEvent::Error {
+                            message: format!("{}", e),
+                        });
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+                    if current_gen == generation {
+                        let mut s = STATE.lock();
+                        s.connected = false;
+                        s.audio_decoders.clear();
+                        s.audio_out.clear();
+                        s.pending_events.push_back(TsEvent::Disconnected {
+                            reason: "Connection closed by server".into(),
+                        });
+                        *COMMAND_TX.lock() = None;
+                    }
+                    break;
+                }
+                Err(_) => break, // 1ms timeout — no more events
             }
         }
-        // Periodically check for clients who stopped talking
-        check_talking_timeout();
+
+        // 2c. Process deferred non-audio events (stream borrow released)
+        for item in deferred_events {
+            handle_control_item(&item, &mut con, generation);
+        }
+        if let Some(item) = deferred {
+            handle_control_item(&item, &mut con, generation);
+        }
+
+        // 2d. Flush ONE mixed output frame to audio_out
+        if had_audio {
+            let mut state = STATE.lock();
+            for &sample in &mix_buffer {
+                let clamped = sample.clamp(-1.0, 1.0);
+                state.audio_out.push_back((clamped * 32767.0) as i16);
+            }
+            // Cap output buffer — safety backstop for Dart-side jitter
+            while state.audio_out.len() > 15360 {
+                state.audio_out.pop_front();
+            }
+        }
     }
-    eprintln!("event_loop: exited");
 }
 
 // ─── Disconnect ─────────────────────────────────────────────────────
@@ -802,8 +742,11 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
     } else if let Some(mut con) = crate::CONNECTION_STASH.lock().take() {
         let _ = con.disconnect(DisconnectOptions::new());
         let _ = RUNTIME.block_on(con.events().for_each(|_| future::ready(())));
-        STATE.lock().connected = false;
-        STATE.lock().disconnect_requested = false;
+        let mut s = STATE.lock();
+        s.connected = false;
+        s.disconnect_requested = false;
+        s.audio_decoders.clear();
+        s.audio_out.clear();
     }
     to_c_str(r#"{"type":"disconnected","reason":"User disconnected"}"#.to_string())
 }
@@ -843,7 +786,6 @@ pub extern "C" fn ts_send_channel_message(_cid: u32, msg: *const c_char) -> u8 {
     let msg = unsafe { std::ffi::CStr::from_ptr(msg) }
         .to_string_lossy()
         .into_owned();
-    eprintln!("ts_send_channel_message: len={}", msg.len());
     if !STATE.lock().connected {
         return 0;
     }
@@ -870,7 +812,6 @@ pub extern "C" fn ts_send_channel_message(_cid: u32, msg: *const c_char) -> u8 {
 
 #[no_mangle]
 pub extern "C" fn ts_move_to_channel(cid: u32) -> u8 {
-    eprintln!("ts_move_to_channel: cid={}", cid);
     let own_id = STATE.lock().own_client_id;
     if !STATE.lock().connected {
         return 0;
@@ -897,7 +838,6 @@ pub extern "C" fn ts_move_to_channel(cid: u32) -> u8 {
 
 #[no_mangle]
 pub extern "C" fn ts_set_muted(inp: u8, out: u8) -> u8 {
-    eprintln!("ts_set_muted: inp={} out={}", inp, out);
     if !STATE.lock().connected {
         return 0;
     }
@@ -928,7 +868,7 @@ pub extern "C" fn ts_is_connected() -> u8 {
     }
 }
 
-// ─── VAD (Voice Activation Detection) ────────────────────────────────
+// ─── VAD ────────────────────────────────────────────────────────────
 
 #[no_mangle]
 pub extern "C" fn ts_set_vad_threshold(threshold: f32) {
@@ -941,47 +881,40 @@ pub extern "C" fn ts_set_vad_enabled(enabled: u8) -> u8 {
     1
 }
 
-/// Returns 1 if audio was sent within the last poll cycle (auto-resets)
 #[no_mangle]
 pub extern "C" fn ts_is_voice_active() -> u8 {
     let mut state = STATE.lock();
     let active = state.voice_active;
     state.voice_active = false;
-    if active { 1 } else { 0 }
-}
-
-// ─── Volume ──────────────────────────────────────────────────────────
-
-#[no_mangle]
-pub extern "C" fn ts_set_client_volume(client_id: u32, volume: f32) -> u8 {
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx
-            .send(Command::SetClientVolume {
-                client_id: client_id as u16,
-                volume,
-            })
-            .is_ok()
-        {
-            return 1;
-        }
+    if active {
+        1
+    } else {
+        0
     }
-    0
 }
+
+// ─── Mic gain ───────────────────────────────────────────────────────
 
 #[no_mangle]
 pub extern "C" fn ts_set_mic_gain(gain: f32) {
-    eprintln!("ts_set_mic_gain: gain={}", gain);
     STATE.lock().mic_gain = gain.clamp(0.0, 3.0);
 }
 
-// ─── Audio ────────────────────────────────────────────────────────────
+// ─── Per-client volume ──────────────────────────────────────────────
 
-/// Start audio: create encoder and decoder
+/// Set per-client volume in decibels.  Range -20 to +20 dB.
+/// Converted to linear gain internally: gain = 10^(dB/20).
+#[no_mangle]
+pub extern "C" fn ts_set_client_volume(client_id: u16, volume_db: f32) {
+    let vol_db = volume_db.clamp(-20.0, 20.0);
+    let gain = 10.0_f32.powf(vol_db / 20.0);
+    STATE.lock().client_volumes.insert(client_id, gain);
+}
+
+// ─── Audio (mic send only, no receive) ──────────────────────────────
+
 #[no_mangle]
 pub extern "C" fn ts_start_audio() -> u8 {
-    eprintln!("ts_start_audio: called");
-    // Encoder: mono, 48kHz, VOIP mode (matches TeamSpeak OpusVoice)
     let encoder = match opus_rs::OpusEncoder::new(48000, 1, opus_rs::Application::Voip) {
         Ok(e) => e,
         Err(e) => {
@@ -989,61 +922,40 @@ pub extern "C" fn ts_start_audio() -> u8 {
             return 0;
         }
     };
-    // Decoder: mono (TeamSpeak OpusVoice is mono; opus-rs requires matching channels)
-    let decoder = match opus_rs::OpusDecoder::new(48000, 1) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("ts_start_audio: decoder error: {}", e);
-            return 0;
-        }
-    };
     let mut state = STATE.lock();
     state.audio_encoder = Some(encoder);
-    state.audio_decoder = Some(decoder);
-    state.audio_out.clear();
     state.pcm_in.clear();
     state.audio_seq = 0;
-    eprintln!("ts_start_audio: OK (enc=mono, dec=mono)");
     1
 }
 
-/// Stop audio: drop encoder/decoder, clear buffers
 #[no_mangle]
 pub extern "C" fn ts_stop_audio() {
-    eprintln!("ts_stop_audio: called");
     let mut state = STATE.lock();
     state.audio_encoder = None;
-    state.audio_decoder = None;
+    state.audio_decoders.clear();
     state.audio_out.clear();
 }
 
-/// Get decoded audio samples (f32 mono 48kHz).
-/// Flutter calls this at ~20ms intervals.
-/// Returns number of f32 samples written to buf.
+/// Drain mixed audio samples from the output buffer.
+/// Returns the number of `i16` samples copied to `buf`.
 #[no_mangle]
-pub extern "C" fn ts_get_audio(buf: *mut f32, buf_len: u32) -> u32 {
+pub extern "C" fn ts_get_audio(buf: *mut i16, buf_len: u32) -> u32 {
     let mut state = STATE.lock();
-    let available = state.audio_out.len().min(buf_len as usize);
-    if available == 0 {
+    let to_copy = (buf_len as usize).min(state.audio_out.len());
+    if to_copy == 0 {
         return 0;
     }
-    let peak = state.audio_out[..available]
-        .iter()
-        .fold(0.0f32, |m, &s| m.max(s.abs()));
     unsafe {
-        std::ptr::copy_nonoverlapping(state.audio_out.as_ptr(), buf, available);
+        let slice = std::slice::from_raw_parts_mut(buf, to_copy);
+        for (i, dst) in slice.iter_mut().enumerate() {
+            *dst = state.audio_out[i];
+        }
     }
-    state.audio_out.drain(..available);
-    eprintln!(
-        "ts_get_audio: {} samp peak={:.4} rem={}",
-        available,
-        peak,
-        state.audio_out.len()
-    );
-    available as u32
+    state.audio_out.drain(..to_copy);
+    to_copy as u32
 }
 
-/// Push mic PCM data (f32 mono 48kHz) for encoding and sending.
 #[no_mangle]
 pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
     let (connected, mic_gain) = {
@@ -1057,13 +969,13 @@ pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
         return 0;
     }
     let raw = unsafe { std::slice::from_raw_parts(data, data_len as usize) };
-    // Apply mic gain before forwarding to event loop
     let samples: Vec<f32> = if (mic_gain - 1.0).abs() > 0.001 {
-        raw.iter().map(|s| (s * mic_gain).clamp(-1.0, 1.0)).collect()
+        raw.iter()
+            .map(|s| (s * mic_gain).clamp(-1.0, 1.0))
+            .collect()
     } else {
         raw.to_vec()
     };
-    // Always forward mic data — VAD gate runs on complete 960-sample frames in event loop
     let tx = COMMAND_TX.lock();
     if let Some(tx) = tx.as_ref() {
         if tx.send(Command::SendAudio { data: samples }).is_ok() {

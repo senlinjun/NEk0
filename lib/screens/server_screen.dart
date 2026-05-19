@@ -531,9 +531,9 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
               Expanded(
                 child: Slider(
                   value: _volume,
-                  min: 0.0,
-                  max: 2.0,
-                  divisions: 40,
+                  min: -20.0,
+                  max: 20.0,
+                  divisions: 80,
                   activeColor: Colors.blue,
                   onChanged: (v) {
                     setState(() => _volume = v);
@@ -542,9 +542,9 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
                 ),
               ),
               SizedBox(
-                width: 42,
+                width: 52,
                 child: Text(
-                  _volume.toStringAsFixed(2),
+                  '${_volume.toStringAsFixed(1)} dB',
                   style: const TextStyle(color: Colors.grey, fontSize: 11),
                 ),
               ),

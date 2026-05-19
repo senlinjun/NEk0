@@ -12,15 +12,12 @@ pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 });
 
 // ─── Command queue ───────────────────────────────────────────────────
-// FFI functions push commands; the event loop consumes them.
-// This eliminates the race where event loop takes Connection out of state.
 
 #[derive(Debug)]
 pub enum Command {
     SendMessage { target_mode: u8, target_cid: u64, message: String },
     MoveChannel { client_id: u16, channel_id: u64 },
     SetMuted { input: bool, output: bool },
-    SetClientVolume { client_id: u16, volume: f32 },
     Disconnect,
     SendAudio { data: Vec<f32> },
 }
@@ -28,23 +25,10 @@ pub enum Command {
 pub static COMMAND_TX: Lazy<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Command>>>> =
     Lazy::new(|| Mutex::new(None));
 
-/// Connection generation counter. Prevents stale event loops from
-/// corrupting state after disconnect+reconnect (race condition fix).
 pub static CONNECTION_GENERATION: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-
-/// Set to true while the event loop task is running. Used to detect crashes.
 pub static EVENT_LOOP_ALIVE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-
-/// Set to true by JNI (KeepAliveService.onTaskRemoved) when app is swiped from recents.
-/// The event loop checks this flag and triggers a clean disconnect.
 pub static SWIPE_DISCONNECT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-
-/// Fallback storage for the Connection. If the event loop dies, ts_disconnect
-/// can take it from here and send the quit command directly.
 pub static CONNECTION_STASH: Lazy<Mutex<Option<tsclientlib::Connection>>> = Lazy::new(|| Mutex::new(None));
-
-/// Persistent client identity (serialized JSON). Set by Dart before connect,
-/// updated after successful connect. Ensures same identity across app restarts.
 pub static IDENTITY_STASH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
 // ─── Types for Dart ─────────────────────────────────────────────────
@@ -64,14 +48,10 @@ pub enum TsEvent {
     ClientLeft { client_id: u32, nickname: String },
     #[serde(rename = "channels_updated")]
     ChannelsUpdated {},
-    #[serde(rename = "audio_received")]
-    AudioReceived { decoded: u32, errors: u32, buf_samples: usize },
     #[serde(rename = "diag")]
     Diag { msg: String },
     #[serde(rename = "error")]
     Error { message: String },
-    #[serde(rename = "client_talking")]
-    ClientTalking { client_id: u32, is_talking: bool },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -98,7 +78,7 @@ pub struct TsClient {
     pub uid: Option<String>,
 }
 
-// ─── Global State (no Connection — event loop owns it) ─────────────
+// ─── Global State ───────────────────────────────────────────────────
 
 pub struct TsConnection {
     pub connected: bool,
@@ -109,22 +89,21 @@ pub struct TsConnection {
     pub channels: Vec<TsChannel>,
     pub clients: Vec<TsClient>,
     pub pending_events: VecDeque<TsEvent>,
-    // Audio state
-    pub audio_out: Vec<f32>,       // Decoded PCM (mono 48kHz) for Flutter to consume
-    pub pcm_in: Vec<f32>,          // Mic PCM buffer — accumulate until full frame (960 samples)
+    // Audio send state
+    pub pcm_in: Vec<f32>,
     pub audio_encoder: Option<opus_rs::OpusEncoder>,
-    pub audio_decoder: Option<opus_rs::OpusDecoder>,
-    pub audio_seq: u16,             // Outgoing packet counter
-    pub audio_decoded_count: u32,   // Diagnostic: total packets decoded
-    pub audio_error_count: u32,     // Diagnostic: total decode errors
-    pub vad_threshold: f32,          // RMS threshold for voice activation (0.0 = disabled)
+    pub audio_seq: u16,
+    pub vad_threshold: f32,
     pub vad_enabled: bool,
-    pub vad_hold: u32,               // Hangover frames remaining after VAD drops (prevents cutoff)
-    pub voice_active: bool,          // Set true when audio frame is sent (for UI indicator)
-    pub disconnect_requested: bool,  // Flag: event loop should send quit and exit
-    pub talking_clients: HashMap<u16, Instant>,  // client_id -> last audio time
-    pub client_volumes: HashMap<u16, f32>,  // per-client local volume multiplier
-    pub mic_gain: f32,  // microphone pre-amp gain (1.0 = unity)
+    pub vad_hold: u32,
+    pub voice_active: bool,
+    pub disconnect_requested: bool,
+    pub mic_gain: f32,
+    // Audio receive state
+    pub audio_decoders: HashMap<u16, opus_rs::OpusDecoder>,
+    pub audio_out: VecDeque<i16>,
+    pub client_volumes: HashMap<u16, f32>, // per-client linear gain (from dB)
+    pub talking_clients: HashMap<u16, Instant>, // last audio timestamp per client
 }
 
 impl TsConnection {
@@ -138,36 +117,30 @@ impl TsConnection {
             channels: Vec::new(),
             clients: Vec::new(),
             pending_events: VecDeque::new(),
-            audio_out: Vec::new(),
             pcm_in: Vec::new(),
             audio_encoder: None,
-            audio_decoder: None,
             audio_seq: 0,
-            audio_decoded_count: 0,
-            audio_error_count: 0,
             vad_threshold: 0.0,
             vad_enabled: false,
             vad_hold: 0,
             voice_active: false,
             disconnect_requested: false,
-            talking_clients: HashMap::new(),
-            client_volumes: HashMap::new(),
             mic_gain: 1.0,
+            audio_decoders: HashMap::new(),
+            audio_out: VecDeque::new(),
+            client_volumes: HashMap::new(),
+            talking_clients: HashMap::new(),
         }
     }
 }
 
 pub static STATE: Lazy<Mutex<TsConnection>> = Lazy::new(|| Mutex::new(TsConnection::new()));
-
-/// Separate lock for panic hook — avoids contention with STATE's lock
 pub static PANIC_LOG: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
-/// Install a panic hook that captures the panic location.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let location = info.location()
             .map(|l| {
-                // Extract just filename (not full path) for readability
                 let file = l.file();
                 let short = file.rsplit(&['/', '\\']).next().unwrap_or(file);
                 format!("{}:{}:{}", short, l.line(), l.column())
@@ -182,12 +155,10 @@ pub fn install_panic_hook() {
         };
         let msg = format!("PANIC {}: {}", location, payload);
         eprintln!("{}", msg);
-        // Store in separate lock (won't be held by panicking code)
         *PANIC_LOG.lock() = msg;
     }));
 }
 
-/// Drain panic log into pending_events so Dart can see it.
 pub fn flush_panic_log() {
     let mut log = PANIC_LOG.lock();
     if !log.is_empty() {

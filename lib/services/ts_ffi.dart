@@ -78,9 +78,9 @@ typedef _StartAudioDart = int Function();
 typedef _StopAudioNative = Void Function();
 typedef _StopAudioDart = void Function();
 
-// ts_get_audio(buf: *mut f32, buf_len: u32) -> u32
-typedef _GetAudioNative = Uint32 Function(Pointer<Float>, Uint32);
-typedef _GetAudioDart = int Function(Pointer<Float>, int);
+// ts_get_audio(buf: *mut i16, buf_len: u32) -> u32
+typedef _GetAudioNative = Uint32 Function(Pointer<Int16>, Uint32);
+typedef _GetAudioDart = int Function(Pointer<Int16>, int);
 
 // ts_send_audio(data: *const f32, data_len: u32) -> bool
 typedef _SendAudioNative = Uint8 Function(Pointer<Float>, Uint32);
@@ -94,13 +94,13 @@ typedef _SetIdentityDart = void Function(Pointer<Utf8>);
 typedef _GetIdentityNative = Pointer<Utf8> Function();
 typedef _GetIdentityDart = Pointer<Utf8> Function();
 
-// ts_set_client_volume(client_id: u32, volume: f32) -> bool
-typedef _SetClientVolumeNative = Uint8 Function(Uint32, Float);
-typedef _SetClientVolumeDart = int Function(int, double);
-
 // ts_set_mic_gain(gain: f32)
 typedef _SetMicGainNative = Void Function(Float);
 typedef _SetMicGainDart = void Function(double);
+
+// ts_set_client_volume(client_id: u16, volume_db: f32)
+typedef _SetClientVolumeNative = Void Function(Uint16, Float);
+typedef _SetClientVolumeDart = void Function(int, double);
 
 // ─── Bindings ───────────────────────────────────────────────────────
 
@@ -163,13 +163,13 @@ final _setIdentity = _lib.lookupFunction<_SetIdentityNative, _SetIdentityDart>(
 final _getIdentity = _lib.lookupFunction<_GetIdentityNative, _GetIdentityDart>(
   'ts_get_identity',
 );
-final _setClientVolume = _lib
-    .lookupFunction<_SetClientVolumeNative, _SetClientVolumeDart>(
-      'ts_set_client_volume',
-    );
 final _setMicGain =
     _lib.lookupFunction<_SetMicGainNative, _SetMicGainDart>(
       'ts_set_mic_gain',
+    );
+final _setClientVolume = _lib
+    .lookupFunction<_SetClientVolumeNative, _SetClientVolumeDart>(
+      'ts_set_client_volume',
     );
 
 // ─── Helper ─────────────────────────────────────────────────────────
@@ -300,22 +300,21 @@ class TsNative {
     _stopAudio();
   }
 
-  static int getAudio(Pointer<Float> buf, int bufLen) {
-    return _getAudio(buf, bufLen);
-  }
-
   static bool sendAudio(Pointer<Float> data, int dataLen) {
     return _sendAudio(data, dataLen) != 0;
   }
 
-  static bool setClientVolume(int clientId, double volume) {
-    debugLog('setClientVolume($clientId, $volume)');
-    return _setClientVolume(clientId, volume) != 0;
+  static int getAudio(Pointer<Int16> buf, int len) {
+    return _getAudio(buf, len);
   }
 
   static void setMicGain(double gain) {
     debugLog('setMicGain($gain)');
     _setMicGain(gain);
+  }
+
+  static void setClientVolume(int clientId, double volumeDb) {
+    _setClientVolume(clientId, volumeDb);
   }
 }
 
