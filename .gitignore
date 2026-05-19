@@ -52,3 +52,5 @@ app.*.map.json
 
 # Rust
 target/
+
+.claude
