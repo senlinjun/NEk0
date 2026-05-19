@@ -760,11 +760,35 @@ async fn event_loop(
 // ─── Disconnect ─────────────────────────────────────────────────────
 
 /// Called from KeepAliveService.onTaskRemoved when app is swiped from recents.
-/// Only sets an atomic flag — no mutexes, no allocations, no blocking.
-/// The event loop picks up the flag and sends the actual disconnect.
+/// Sets the disconnect flag directly on STATE (one less hop than SWIPE_DISCONNECT),
+/// pushes a Disconnect command into the channel if possible, and falls back to
+/// taking Connection from CONNECTION_STASH for a sync disconnect if the event
+/// loop is already dead.  This is needed because in release builds Android kills
+/// the process almost immediately after onTaskRemoved returns — the event loop
+/// may not get another iteration to check the flag.
 #[no_mangle]
 pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect() {
+    // Fast path: set the flag directly so the event loop sees it on next iter
+    STATE.lock().disconnect_requested = true;
     SWIPE_DISCONNECT.store(true, Ordering::SeqCst);
+
+    // Try to push a Disconnect command — the event loop drains commands
+    // synchronously before each poll, so this takes effect immediately.
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        let _ = tx.send(crate::Command::Disconnect);
+    }
+    drop(tx);
+
+    // Fallback: if the event loop is dead, take the Connection from stash
+    // and do a synchronous block_on disconnect directly.
+    if let Some(mut con) = crate::CONNECTION_STASH.lock().take() {
+        let _ = con.disconnect(DisconnectOptions::new());
+        let _ = RUNTIME.block_on(con.events().for_each(|_| future::ready(())));
+        let mut s = STATE.lock();
+        s.connected = false;
+        s.disconnect_requested = false;
+    }
 }
 
 #[no_mangle]

@@ -118,10 +118,17 @@ class KeepAliveService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         try { tsDisconnect() } catch (_: Exception) {}
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
-        stopSelf()
+        // Don't tear down immediately — the Rust event loop needs time
+        // to process the disconnect before Android kills the process.
+        // Release builds kill the process much faster than debug builds,
+        // so we defer teardown on a background thread.
+        Thread {
+            Thread.sleep(500)
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+            wakeLock?.let { if (it.isHeld) it.release() }
+            wakeLock = null
+            stopSelf()
+        }.start()
         super.onTaskRemoved(rootIntent)
     }
 
