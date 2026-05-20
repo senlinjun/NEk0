@@ -541,28 +541,40 @@ async fn event_loop(
                             } else {
                                 false
                             };
+                            // Read gain before dropping state (avoid split-borrow conflict)
+                            let gain = state.mic_gain;
+                            drop(state);
                             if vad_drop {
                                 None
-                            } else if let Some(ref mut encoder) = state.audio_encoder {
-                                let mut opus_out = vec![0u8; 4000];
-                                match encoder.encode(&frame, FRAME, &mut opus_out) {
-                                    Ok(len) => {
-                                        let seq = state.audio_seq;
-                                        state.audio_seq = state.audio_seq.wrapping_add(1);
-                                        Some((seq, opus_out[..len].to_vec()))
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "opus encode ERROR: {} (frame_len={})",
-                                            e,
-                                            frame.len()
-                                        );
-                                        None
-                                    }
-                                }
                             } else {
-                                state.pcm_in.clear();
-                                None
+                                // Apply mic gain AFTER VAD so VAD sees raw mic level
+                                let gained: Vec<f32> = if (gain - 1.0).abs() > 0.001 {
+                                    frame.iter().map(|s| (s * gain).clamp(-1.0, 1.0)).collect()
+                                } else {
+                                    frame
+                                };
+                                let mut state = STATE.lock();
+                                if let Some(ref mut encoder) = state.audio_encoder {
+                                    let mut opus_out = vec![0u8; 4000];
+                                    match encoder.encode(&gained, FRAME, &mut opus_out) {
+                                        Ok(len) => {
+                                            let seq = state.audio_seq;
+                                            state.audio_seq = state.audio_seq.wrapping_add(1);
+                                            Some((seq, opus_out[..len].to_vec()))
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "opus encode ERROR: {} (frame_len={})",
+                                                e,
+                                                gained.len()
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    state.pcm_in.clear();
+                                    None
+                                }
                             }
                         };
                         if let Some((seq, opus_data)) = encode_result {
@@ -969,13 +981,7 @@ pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
         return 0;
     }
     let raw = unsafe { std::slice::from_raw_parts(data, data_len as usize) };
-    let samples: Vec<f32> = if (mic_gain - 1.0).abs() > 0.001 {
-        raw.iter()
-            .map(|s| (s * mic_gain).clamp(-1.0, 1.0))
-            .collect()
-    } else {
-        raw.to_vec()
-    };
+    let samples: Vec<f32> = raw.to_vec();  // raw samples — gain applied after VAD
     let tx = COMMAND_TX.lock();
     if let Some(tx) = tx.as_ref() {
         if tx.send(Command::SendAudio { data: samples }).is_ok() {

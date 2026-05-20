@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:ffi';
+import 'dart:math' show sqrt;
 import 'dart:typed_data'
     show ByteData, Endian, Float, Float32List, Uint8List;
 
@@ -20,6 +21,10 @@ class AudioService {
   static const int _frameSize = 960; // 20ms at 48kHz mono
 
   bool get isRunning => _running;
+
+  double _micRms = 0.0;
+  double get micRms => _micRms;
+  void Function(double rms)? onMicLevel;
 
   Future<bool> start() async {
     if (_running) return true;
@@ -144,9 +149,14 @@ class AudioService {
     if (floatCount == 0) return;
     final bd = ByteData.sublistView(bytes);
     final floats = Float32List(floatCount);
+    var sumSq = 0.0;
     for (int i = 0; i < floatCount; i++) {
-      floats[i] = bd.getFloat32(i * 4, Endian.little);
+      final s = bd.getFloat32(i * 4, Endian.little);
+      floats[i] = s;
+      sumSq += s * s;
     }
+    _micRms = sqrt(sumSq / floatCount);
+    onMicLevel?.call(_micRms);
     _sendMicData(floats);
   }
 

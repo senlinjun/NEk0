@@ -34,6 +34,7 @@ class TsConnectionState {
   final bool vadEnabled;
   final double vadThreshold;
   final double micGain;
+  final double micRms;
 
   const TsConnectionState({
     this.connected = false,
@@ -55,6 +56,7 @@ class TsConnectionState {
     this.vadEnabled = true,
     this.vadThreshold = 0.005,
     this.micGain = 1.0,
+    this.micRms = 0.0,
   });
 
   TsConnectionState copyWith({
@@ -77,6 +79,7 @@ class TsConnectionState {
     bool? vadEnabled,
     double? vadThreshold,
     double? micGain,
+    double? micRms,
   }) =>
       TsConnectionState(
         connected: connected ?? this.connected,
@@ -100,6 +103,7 @@ class TsConnectionState {
         vadEnabled: vadEnabled ?? this.vadEnabled,
         vadThreshold: vadThreshold ?? this.vadThreshold,
         micGain: micGain ?? this.micGain,
+        micRms: micRms ?? this.micRms,
       );
 }
 
@@ -248,6 +252,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
 
         // Auto-start audio playback (listening is always on in Teamspeak)
         _audioService = AudioService();
+        _audioService!.onMicLevel = (double rms) {
+          state = state.copyWith(micRms: rms);
+        };
         _audioService!.start();
         // Init VAD defaults and start mic via control flow
         TsNative.setVadEnabled(true);

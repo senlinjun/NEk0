@@ -396,35 +396,68 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
             ],
           ),
           const SizedBox(height: 12),
-          // Threshold slider
-          Row(
-            children: [
-              const Text(
-                'Threshold',
-                style: TextStyle(color: Colors.grey, fontSize: 12),
-              ),
-              Expanded(
-                child: Slider(
-                  value: _vadThreshold,
-                  min: 0.001,
-                  max: 0.1,
-                  activeColor: (_pttMode || !_vadEnabled)
-                      ? Colors.grey
-                      : Colors.blue,
-                  onChanged: (_pttMode || !_vadEnabled)
-                      ? null
-                      : (v) {
-                          setState(() => _vadThreshold = v);
-                          widget.notifier.setVadThreshold(v);
-                        },
+          // Threshold slider stacked on mic level bar (same 0–1 scale)
+          Builder(builder: (_) {
+            final s = widget.notifier.state;
+            final micActive = !s.inputMuted && (!s.pttMode || s.pttPressed);
+            final rms = micActive ? s.micRms : 0.0;
+            final fill = rms.clamp(0.0, 1.0);
+            final over = rms >= _vadThreshold && _vadThreshold > 0.0;
+            return Row(
+              children: [
+                const SizedBox(
+                  width: 60,
+                  child: Text(
+                    'Level',
+                    style: TextStyle(color: Colors.grey, fontSize: 11),
+                  ),
                 ),
-              ),
-              Text(
-                _vadThreshold.toStringAsFixed(3),
-                style: const TextStyle(color: Colors.grey, fontSize: 11),
-              ),
-            ],
-          ),
+                Expanded(
+                  child: Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [
+                      // Bottom: mic level bar
+                      LinearProgressIndicator(
+                        value: fill,
+                        backgroundColor: Colors.grey[800],
+                        color: over ? Colors.blue : Colors.grey,
+                        minHeight: 4,
+                      ),
+                      // Top: threshold slider (transparent track, only knob visible)
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 4,
+                          overlayShape: SliderComponentShape.noOverlay,
+                          activeTrackColor: Colors.transparent,
+                          inactiveTrackColor: Colors.transparent,
+                          thumbColor: Colors.blue,
+                          disabledThumbColor: Colors.grey,
+                        ),
+                        child: Slider(
+                          value: _vadThreshold,
+                          min: 0.0,
+                          max: 1.0,
+                          onChanged: (_pttMode || !_vadEnabled)
+                              ? null
+                              : (v) {
+                                  setState(() => _vadThreshold = v);
+                                  widget.notifier.setVadThreshold(v);
+                                },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(
+                  width: 42,
+                  child: Text(
+                    _vadThreshold.toStringAsFixed(3),
+                    style: const TextStyle(color: Colors.grey, fontSize: 11),
+                  ),
+                ),
+              ],
+            );
+          }),
           const SizedBox(height: 12),
           // Mic gain slider
           Row(
