@@ -149,19 +149,20 @@ pub extern "C" fn ts_connect(
 
     eprintln!("ts_connect: address={}", address);
 
-    {
-        let mut state = STATE.lock();
-        if state.connecting || state.connected {
-            return to_c_str(
-                serde_json::to_string(&TsEvent::Error {
-                    message: "Already connecting".into(),
-                })
-                .unwrap(),
-            );
-        }
-        state.connecting = true;
-        state.nickname = nickname.clone();
+    let mut state = STATE.lock();
+    if state.connecting || state.connected {
+        return to_c_str(
+            serde_json::to_string(&TsEvent::Error {
+                message: "Already connecting".into(),
+            })
+            .unwrap(),
+        );
     }
+    state.connecting = true;
+    state.nickname = nickname.clone();
+    // Clear any stale events from a previous connection
+    state.pending_events.clear();
+    drop(state);
 
     RUNTIME.spawn(async move {
         if let Err(e) = do_connect(address, nickname, channel, password).await {

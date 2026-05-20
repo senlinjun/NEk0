@@ -265,6 +265,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         break;
 
       case 'disconnected':
+        if (state.connecting) break; // stale event from previous connection, ignore
         _pollTimer?.cancel();
         _audioService?.stop();
         _audioService = null;
