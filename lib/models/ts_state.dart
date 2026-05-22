@@ -134,9 +134,20 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
 
   @override
   TsConnectionState build() {
-    // Clean up timer on dispose
+    ForegroundService.init();
+    ForegroundService.onToggleMute = (bool inputMuted) {
+      if (state.inputMuted != inputMuted) {
+        toggleInputMute();
+      }
+    };
+    ForegroundService.onNotificationDisconnect = () {
+      disconnect();
+    };
+
     ref.onDispose(() {
       _pollTimer?.cancel();
+      ForegroundService.onToggleMute = null;
+      ForegroundService.onNotificationDisconnect = null;
     });
     return const TsConnectionState();
   }
@@ -260,7 +271,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         TsNative.setVadEnabled(true);
         TsNative.setVadThreshold(state.vadThreshold);
         _updateMicState();
-        ForegroundService.start(title: state.serverName, text: _currentChannelName, mic: false);
+        ForegroundService.start(title: state.serverName, text: _currentChannelName, mic: false, inputMuted: state.inputMuted);
         _saveIdentity();
         break;
 
@@ -389,7 +400,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     if (!state.inputMuted || state.voiceActive) {
       text = '$text \u2014 Speaking';
     }
-    ForegroundService.update(title: state.serverName, text: text, mic: mic);
+    ForegroundService.update(title: state.serverName, text: text, mic: mic, inputMuted: state.inputMuted);
   }
 
   /// Diagram: Start -> PTT? -> pushed? -> send : mute? -> send : nothing

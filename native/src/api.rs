@@ -720,7 +720,10 @@ async fn event_loop(
 /// the process almost immediately after onTaskRemoved returns — the event loop
 /// may not get another iteration to check the flag.
 #[no_mangle]
-pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect() {
+pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) {
     // Fast path: set the flag directly so the event loop sees it on next iter
     STATE.lock().disconnect_requested = true;
     SWIPE_DISCONNECT.store(true, Ordering::SeqCst);

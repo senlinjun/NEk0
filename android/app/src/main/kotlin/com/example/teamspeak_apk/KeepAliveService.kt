@@ -26,11 +26,20 @@ class KeepAliveService : Service() {
 
         @JvmStatic external fun tsDisconnect()
 
-        fun start(context: Context, title: String, text: String, mic: Boolean = false) {
+        // Stored for NotificationActionReceiver to rebuild notification after actions
+        @JvmField var lastTitle: String = "TeamSpeak"
+        @JvmField var lastText: String = "Connected"
+        @JvmField var lastInputMuted: Boolean = false
+
+        fun start(context: Context, title: String, text: String, mic: Boolean = false, inputMuted: Boolean = false) {
+            lastTitle = title
+            lastText = text
+            lastInputMuted = inputMuted
             val intent = Intent(context, KeepAliveService::class.java).apply {
                 putExtra("title", title)
                 putExtra("text", text)
                 putExtra("mic", mic)
+                putExtra("input_muted", inputMuted)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -43,8 +52,11 @@ class KeepAliveService : Service() {
             context.stopService(Intent(context, KeepAliveService::class.java))
         }
 
-        fun update(context: Context, title: String, text: String, mic: Boolean = false) {
-            val notification = buildNotification(context, title, text)
+        fun update(context: Context, title: String, text: String, mic: Boolean = false, inputMuted: Boolean = false) {
+            lastTitle = title
+            lastText = text
+            lastInputMuted = inputMuted
+            val notification = buildNotification(context, title, text, inputMuted)
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.notify(NOTIFICATION_ID, notification)
             // Restart service to update foreground service type (Android 14+)
@@ -52,11 +64,13 @@ class KeepAliveService : Service() {
                 putExtra("title", title)
                 putExtra("text", text)
                 putExtra("mic", mic)
+                putExtra("input_muted", inputMuted)
             }
             context.startService(serviceIntent)
         }
 
-        private fun buildNotification(context: Context, title: String, text: String): Notification {
+        @JvmStatic
+        fun buildNotification(context: Context, title: String, text: String, inputMuted: Boolean = false): Notification {
             val launchIntent = context.packageManager
                 .getLaunchIntentForPackage(context.packageName)
             val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -66,6 +80,22 @@ class KeepAliveService : Service() {
             }
             val pendingIntent = PendingIntent.getActivity(context, 0, launchIntent, flags)
 
+            // Mute toggle action
+            val muteIntent = Intent(context, NotificationActionReceiver::class.java).apply {
+                action = NotificationActionReceiver.ACTION_TOGGLE_MUTE
+                putExtra("input_muted", !inputMuted)
+            }
+            val mutePending = PendingIntent.getBroadcast(context, 1, muteIntent, flags)
+
+            // Disconnect action
+            val discIntent = Intent(context, NotificationActionReceiver::class.java).apply {
+                action = NotificationActionReceiver.ACTION_DISCONNECT
+            }
+            val discPending = PendingIntent.getBroadcast(context, 2, discIntent, flags)
+
+            val muteIcon = if (inputMuted) R.drawable.ic_mic_off else R.drawable.ic_mic
+            val muteLabel = if (inputMuted) "Unmute" else "Mute"
+
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(context, CHANNEL_ID)
                     .setContentTitle(title)
@@ -73,6 +103,8 @@ class KeepAliveService : Service() {
                     .setSmallIcon(android.R.drawable.ic_dialog_info)
                     .setOngoing(true)
                     .setContentIntent(pendingIntent)
+                    .addAction(muteIcon, muteLabel, mutePending)
+                    .addAction(R.drawable.ic_disconnect, "Disconnect", discPending)
                     .build()
             } else {
                 @Suppress("DEPRECATION")
@@ -83,6 +115,8 @@ class KeepAliveService : Service() {
                     .setOngoing(true)
                     .setContentIntent(pendingIntent)
                     .setPriority(Notification.PRIORITY_LOW)
+                    .addAction(muteIcon, muteLabel, mutePending)
+                    .addAction(R.drawable.ic_disconnect, "Disconnect", discPending)
                     .build()
             }
         }
@@ -135,7 +169,8 @@ class KeepAliveService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val title = intent?.getStringExtra("title") ?: "TeamSpeak"
         val text = intent?.getStringExtra("text") ?: "Connected"
-        val notification = buildNotification(this, title, text)
+        val inputMuted = intent?.getBooleanExtra("input_muted", false) ?: false
+        val notification = buildNotification(this, title, text, inputMuted)
         val hasMic = intent?.getBooleanExtra("mic", false) ?: false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK

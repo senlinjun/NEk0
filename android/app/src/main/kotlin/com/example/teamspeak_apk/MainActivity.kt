@@ -45,7 +45,8 @@ class MainActivity : FlutterActivity() {
                         val title = call.argument<String>("title") ?: "TeamSpeak"
                         val text = call.argument<String>("text") ?: "Connected"
                         val mic = call.argument<Boolean>("mic") ?: false
-                        KeepAliveService.start(this, title, text, mic)
+                        val inputMuted = call.argument<Boolean>("input_muted") ?: false
+                        KeepAliveService.start(this, title, text, mic, inputMuted)
                         result.success(true)
                     }
                     "stop" -> {
@@ -56,7 +57,8 @@ class MainActivity : FlutterActivity() {
                         val title = call.argument<String>("title") ?: "TeamSpeak"
                         val text = call.argument<String>("text") ?: "Connected"
                         val mic = call.argument<Boolean>("mic") ?: false
-                        KeepAliveService.update(this, title, text, mic)
+                        val inputMuted = call.argument<Boolean>("input_muted") ?: false
+                        KeepAliveService.update(this, title, text, mic, inputMuted)
                         result.success(true)
                     }
                     else -> result.notImplemented()
