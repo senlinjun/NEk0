@@ -1,6 +1,6 @@
 use crate::{
-    Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH, RUNTIME, STATE,
-    SWIPE_DISCONNECT,
+    ClientAudioBuffer, Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH,
+    RUNTIME, STATE, SWIPE_DISCONNECT,
 };
 
 use futures::prelude::*;
@@ -296,15 +296,14 @@ async fn do_connect(
 
 // ─── Audio receive helpers ──────────────────────────────────────────
 
-/// Decode an incoming audio packet with a per-client OpusDecoder and mix into the
-/// accumulation buffer.  The decoder is created lazily on the first packet from a
-/// speaker and keeps its state across frames (required for correct Opus decoding).
-fn decode_and_mix(audio_buf: InAudioBuf, mix_buffer: &mut [f32]) {
+/// Decode an incoming audio packet with a per-client OpusDecoder and push the
+/// decoded frame into that client's own jitter buffer.  Each speaker gets an
+/// independent buffer — no mixing occurs here.
+fn decode_to_client_buffer(audio_buf: InAudioBuf) {
+    const FRAME: usize = 960;
     // Extract data from the self_cell-wrapped buffer BEFORE locking STATE.
-    // InAudioBuf uses a self-referential pattern — we must clone the bytes we need
-    // while the borrow is alive, then drop the references.
-    let audio = audio_buf.data(); // &InAudio
-    let audio_data = audio.data(); // &AudioData
+    let audio = audio_buf.data();
+    let audio_data = audio.data();
 
     let (from_id, opus_vec) = match audio_data {
         AudioData::S2C { from, data, .. } => (*from, data.to_vec()),
@@ -315,28 +314,67 @@ fn decode_and_mix(audio_buf: InAudioBuf, mix_buffer: &mut [f32]) {
     drop(audio);
     drop(audio_buf);
 
-    // Now we own opus_vec — safe to lock STATE.
+    // Decode + buffer under STATE lock
     let vol;
     let mut state = STATE.lock();
     vol = state.client_volumes.get(&from_id).copied().unwrap_or(1.0);
-    // Mark client as talking (used for blue dot indicator in UI)
     state.talking_clients.insert(from_id, std::time::Instant::now());
-    let decoder = state
-        .audio_decoders
-        .entry(from_id)
-        .or_insert_with(|| OpusDecoder::new(48000, 1).expect("failed to create Opus decoder"));
 
-    let mut pcm_out = vec![0.0f32; mix_buffer.len()];
-    match decoder.decode(&opus_vec, mix_buffer.len(), &mut pcm_out) {
-        Ok(decoded_samples) => {
-            let n = decoded_samples.min(mix_buffer.len());
-            for i in 0..n {
-                mix_buffer[i] = (mix_buffer[i] + pcm_out[i] * vol).clamp(-1.0, 1.0);
+    // Get or create per-client decoder (mono, fallback stereo)
+    let decoder = state.audio_decoders.entry(from_id)
+        .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
+    let mut pcm_out = vec![0.0f32; FRAME];
+    let ok = match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
+        Ok(_) => true,
+        Err(_) => {
+            let stereo = state.audio_decoders_stereo.entry(from_id)
+                .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
+            let mut stereo_out = vec![0.0f32; FRAME * 2];
+            match stereo.decode(&opus_vec, FRAME, &mut stereo_out) {
+                Ok(decoded) => {
+                    let n = decoded.min(FRAME);
+                    for i in 0..n {
+                        pcm_out[i] = (stereo_out[i * 2] + stereo_out[i * 2 + 1]) * 0.5;
+                    }
+                    true
+                }
+                Err(e) => {
+                    eprintln!("opus decode error from client {}: {}", from_id, e);
+                    false
+                }
             }
         }
-        Err(e) => {
-            eprintln!("opus decode error from client {}: {}", from_id, e);
+    };
+
+    if !ok { return; }
+
+    // Convert f32 → i16, apply volume, push to per-client buffer
+    let frame: Vec<i16> = pcm_out.iter()
+        .map(|&s| (s.clamp(-1.0, 1.0) * vol * 1.5 * 32767.0).clamp(-32768.0, 32767.0) as i16)
+        .collect();
+
+    let buf = state.client_buffers.entry(from_id).or_insert_with(ClientAudioBuffer::new);
+
+    // Adaptive jitter tracking
+    let now = std::time::Instant::now();
+    if buf.last_seq != 0 {
+        let interval = now.duration_since(buf.last_packet).as_secs_f32() * 1000.0;
+        let jitter = (interval - 20.0).abs();
+        buf.jitter_ms = ClientAudioBuffer::JITTER_ALPHA * jitter
+            + (1.0 - ClientAudioBuffer::JITTER_ALPHA) * buf.jitter_ms;
+        // Adjust target depth based on jitter
+        if buf.jitter_ms > 10.0 && buf.target_depth < ClientAudioBuffer::MAX_DEPTH {
+            buf.target_depth += 1;
+        } else if buf.jitter_ms < 2.0 && buf.target_depth > ClientAudioBuffer::MIN_DEPTH {
+            buf.target_depth -= 1;
         }
+    }
+    buf.frames.push_back(frame);
+    buf.last_packet = now;
+
+    // Trim to target depth (drop oldest if too deep)
+    while buf.frames.len() > buf.target_depth {
+        buf.frames.pop_front();
     }
 }
 
@@ -445,7 +483,10 @@ async fn event_loop(
                 STATE.lock().connected = false;
                 STATE.lock().disconnect_requested = false;
                 STATE.lock().audio_decoders.clear();
+                STATE.lock().audio_decoders_stereo.clear();
+                STATE.lock().client_buffers.clear();
                 STATE.lock().audio_out.clear();
+                STATE.lock().mix_track.clear();
                 *COMMAND_TX.lock() = None;
             }
             return;
@@ -508,7 +549,10 @@ async fn event_loop(
                         });
                         s.connected = false;
                         s.audio_decoders.clear();
+                        s.audio_decoders_stereo.clear();
+                        s.client_buffers.clear();
                         s.audio_out.clear();
+                        s.mix_track.clear();
                         *COMMAND_TX.lock() = None;
                     }
                     return;
@@ -596,21 +640,15 @@ async fn event_loop(
             }
         }
 
-        // 2. Poll events — drain all available audio, handle control events.
-        //    Batch all audio packets into ONE mixed 960-sample frame per iteration,
-        //    so production rate = 50 Hz × 960 = 48k samples/sec regardless of speaker count.
-        const FRAME: usize = 960;
-        let mut mix_buffer: Vec<f32> = vec![0.0f32; FRAME];
-        let mut had_audio = false;
-
+        // 2. Poll events — decode each audio packet to its speaker's own buffer.
+        //    Do NOT mix — each speaker's audio is kept separate.
         // 2a. First event — up to 20ms timeout (keeps commands responsive)
         let first = tokio::time::timeout(Duration::from_millis(20), con.events().next()).await;
         let mut deferred: Option<StreamItem> = None;
 
         match first {
             Ok(Some(Ok(StreamItem::Audio(audio_buf)))) => {
-                decode_and_mix(audio_buf, &mut mix_buffer);
-                had_audio = true;
+                decode_to_client_buffer(audio_buf);
             }
             Ok(Some(Ok(item))) => {
                 deferred = Some(item);
@@ -626,16 +664,16 @@ async fn event_loop(
                 break;
             }
             Ok(None) => {
-                eprintln!(
-                    "event_loop: stream ended (server disconnect, gen={})",
-                    generation
-                );
+                eprintln!("event_loop: stream ended (server disconnect, gen={})", generation);
                 let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
                 if current_gen == generation {
                     let mut s = STATE.lock();
                     s.connected = false;
                     s.audio_decoders.clear();
+                    s.audio_decoders_stereo.clear();
+                    s.client_buffers.clear();
                     s.audio_out.clear();
+                        s.mix_track.clear();
                     s.pending_events.push_back(TsEvent::Disconnected {
                         reason: "Connection closed by server".into(),
                     });
@@ -646,15 +684,12 @@ async fn event_loop(
             Err(_) => {} // 20ms timeout — continue
         }
 
-        // 2b. Drain remaining already-available events (1ms timeout, non-blocking).
-        //     Non-audio events are collected and processed after the drain to avoid
-        //     conflicting mutable borrows on `con` (the stream borrows con via events()).
+        // 2b. Drain remaining already-available events (1ms timeout)
         let mut deferred_events: Vec<StreamItem> = Vec::new();
         loop {
             match tokio::time::timeout(Duration::from_millis(1), con.events().next()).await {
                 Ok(Some(Ok(StreamItem::Audio(audio_buf)))) => {
-                    decode_and_mix(audio_buf, &mut mix_buffer);
-                    had_audio = true;
+                    decode_to_client_buffer(audio_buf);
                 }
                 Ok(Some(Ok(item))) => {
                     deferred_events.push(item);
@@ -675,7 +710,10 @@ async fn event_loop(
                         let mut s = STATE.lock();
                         s.connected = false;
                         s.audio_decoders.clear();
+                        s.audio_decoders_stereo.clear();
+                        s.client_buffers.clear();
                         s.audio_out.clear();
+                        s.mix_track.clear();
                         s.pending_events.push_back(TsEvent::Disconnected {
                             reason: "Connection closed by server".into(),
                         });
@@ -683,11 +721,11 @@ async fn event_loop(
                     }
                     break;
                 }
-                Err(_) => break, // 1ms timeout — no more events
+                Err(_) => break,
             }
         }
 
-        // 2c. Process deferred non-audio events (stream borrow released)
+        // 2c. Process deferred non-audio events
         for item in deferred_events {
             handle_control_item(&item, &mut con, generation);
         }
@@ -695,16 +733,46 @@ async fn event_loop(
             handle_control_item(&item, &mut con, generation);
         }
 
-        // 2d. Flush ONE mixed output frame to audio_out
-        if had_audio {
+        // 2d. Speaker selection: pick the most recent talker, push one frame
+        {
             let mut state = STATE.lock();
-            for &sample in &mix_buffer {
-                let clamped = sample.clamp(-1.0, 1.0);
-                state.audio_out.push_back((clamped * 32767.0) as i16);
+            // Select most recent speaker among active talkers
+            let best = state.talking_clients.iter()
+                .filter(|(id, _)| state.client_buffers.contains_key(id))
+                .max_by_key(|(_, t)| t.elapsed().as_millis().wrapping_neg());
+            state.active_speaker = best.map(|(&id, _)| id);
+
+            if let Some(speaker) = state.active_speaker {
+                if let Some(buf) = state.client_buffers.get_mut(&speaker) {
+                    if let Some(frame) = buf.frames.pop_front() {
+                        // "Fake mix": copy the selected speaker's frame
+                        // into the independent mix track, then drain to output
+                        state.mix_track.extend(&frame);
+                        while state.mix_track.len() > 19200 {
+                            state.mix_track.pop_front();
+                        }
+                    }
+                }
             }
-            // Cap output buffer — safety backstop for Dart-side jitter
-            while state.audio_out.len() > 15360 {
+            // Drain mix_track into audio_out for Dart consumption
+            while let Some(sample) = state.mix_track.pop_front() {
+                state.audio_out.push_back(sample);
+            }
+            // Cap output
+            while state.audio_out.len() > 19200 {
                 state.audio_out.pop_front();
+            }
+            // Clean up stale buffers (speaker silent > 5s)
+            let mut stale: Vec<u16> = Vec::new();
+            for (&id, b) in &state.client_buffers {
+                if !state.talking_clients.contains_key(&id)
+                    && b.last_packet.elapsed().as_millis() >= 5000
+                {
+                    stale.push(id);
+                }
+            }
+            for id in stale {
+                state.client_buffers.remove(&id);
             }
         }
     }
@@ -762,7 +830,10 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
         s.connected = false;
         s.disconnect_requested = false;
         s.audio_decoders.clear();
+        s.audio_decoders_stereo.clear();
+        s.client_buffers.clear();
         s.audio_out.clear();
+                        s.mix_track.clear();
     }
     to_c_str(r#"{"type":"disconnected","reason":"User disconnected"}"#.to_string())
 }
@@ -788,9 +859,20 @@ pub extern "C" fn ts_get_channels() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn ts_get_clients() -> *mut c_char {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     if !state.connected {
         return to_c_str("[]".to_string());
+    }
+    // Recompute is_talking from live talking_clients data
+    // Collect talking client IDs first to avoid split-borrow conflict
+    let talking: Vec<u16> = state
+        .talking_clients
+        .iter()
+        .filter(|(_, t)| t.elapsed().as_millis() < 500)
+        .map(|(&id, _)| id)
+        .collect();
+    for c in &mut state.clients {
+        c.is_talking = talking.contains(&(c.id as u16));
     }
     to_c_str(serde_json::to_string(&state.clients).unwrap_or_else(|_| "[]".into()))
 }
@@ -950,7 +1032,10 @@ pub extern "C" fn ts_stop_audio() {
     let mut state = STATE.lock();
     state.audio_encoder = None;
     state.audio_decoders.clear();
+    state.audio_decoders_stereo.clear();
+    state.client_buffers.clear();
     state.audio_out.clear();
+    state.mix_track.clear();
 }
 
 /// Drain mixed audio samples from the output buffer.

@@ -78,6 +78,40 @@ pub struct TsClient {
     pub uid: Option<String>,
 }
 
+// ─── Per-client jitter buffer ────────────────────────────────────────
+
+/// Per-speaker audio buffer with adaptive jitter tracking.
+/// Each active speaker gets their own buffer — no mixing.
+pub struct ClientAudioBuffer {
+    /// Ring buffer of decoded frames (each 960 × i16)
+    pub frames: VecDeque<Vec<i16>>,
+    /// Adaptive target depth (frames), clamped to [MIN, MAX]
+    pub target_depth: usize,
+    /// Sequence number of the last decoded frame (for gap detection)
+    pub last_seq: u16,
+    /// When the last packet was received (for jitter calculation)
+    pub last_packet: Instant,
+    /// Smoothed inter-packet jitter (ms), EMA-filtered
+    pub jitter_ms: f32,
+}
+
+impl ClientAudioBuffer {
+    const MIN_DEPTH: usize = 2;    // 40ms
+    const MAX_DEPTH: usize = 10;   // 200ms
+    const NOMINAL_DEPTH: usize = 4; // 80ms
+    const JITTER_ALPHA: f32 = 0.1;
+
+    fn new() -> Self {
+        Self {
+            frames: VecDeque::new(),
+            target_depth: Self::NOMINAL_DEPTH,
+            last_seq: 0,
+            last_packet: Instant::now(),
+            jitter_ms: 0.0,
+        }
+    }
+}
+
 // ─── Global State ───────────────────────────────────────────────────
 
 pub struct TsConnection {
@@ -101,9 +135,13 @@ pub struct TsConnection {
     pub mic_gain: f32,
     // Audio receive state
     pub audio_decoders: HashMap<u16, opus_rs::OpusDecoder>,
-    pub audio_out: VecDeque<i16>,
+    pub audio_decoders_stereo: HashMap<u16, opus_rs::OpusDecoder>,
+    pub audio_out: VecDeque<i16>,         // output track consumed by Dart
+    pub mix_track: VecDeque<i16>,         // independent mix output (fake-mixed single speaker)
     pub client_volumes: HashMap<u16, f32>, // per-client linear gain (from dB)
     pub talking_clients: HashMap<u16, Instant>, // last audio timestamp per client
+    pub client_buffers: HashMap<u16, ClientAudioBuffer>, // per-speaker jitter buffers
+    pub active_speaker: Option<u16>, // currently selected speaker ID
 }
 
 impl TsConnection {
@@ -127,9 +165,13 @@ impl TsConnection {
             disconnect_requested: false,
             mic_gain: 1.0,
             audio_decoders: HashMap::new(),
+            audio_decoders_stereo: HashMap::new(),
             audio_out: VecDeque::new(),
+            mix_track: VecDeque::new(),
             client_volumes: HashMap::new(),
             talking_clients: HashMap::new(),
+            client_buffers: HashMap::new(),
+            active_speaker: None,
         }
     }
 }

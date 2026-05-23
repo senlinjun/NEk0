@@ -225,6 +225,16 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         state = state.copyWith(voiceActive: va);
         _refreshNotification();
       }
+      // Refresh client talking indicators from live Rust data
+      try {
+        final clientsJson = TsNative.getClients();
+        final clients = (jsonDecode(clientsJson) as List)
+            .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
+            .toList();
+        if (clients.isNotEmpty) {
+          state = state.copyWith(clients: clients);
+        }
+      } catch (_) {} // ignore parse errors during refresh
     } catch (e) {
       debugPrint('FFI poll error: $e');
     }

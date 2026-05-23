@@ -38,7 +38,7 @@ class AudioService {
     debugPrint('AudioService: started (mic not yet active)');
 
     // Start playback immediately — always listening
-    _startPlayback();
+    await _startPlayback();
 
     return true;
   }
@@ -54,7 +54,12 @@ class AudioService {
       await FlutterPcmSound.setFeedThreshold(960);
       FlutterPcmSound.setFeedCallback(_onPlaybackFeed);
       _playbackRunning = true;
-      FlutterPcmSound.start(); // triggers _onPlaybackFeed(0) to kick things off
+      // Manual kickstart: FlutterPcmSound.start() only triggers the
+      // callback if _needsStart is true (first-ever session). On reconnect
+      // _needsStart is stale-false, so we call the callback directly.
+      if (!FlutterPcmSound.start()) {
+        _onPlaybackFeed(0);
+      }
       debugPrint('AudioService: playback started');
     } catch (e) {
       debugPrint('AudioService: playback setup error: $e');
@@ -69,6 +74,7 @@ class AudioService {
       final got = TsNative.getAudio(buf, _frameSize);
       if (got > 0) {
         final samples = List<int>.generate(got, (i) => buf[i]);
+        debugPrint('AudioService: feed $got samples first=${samples.take(3)} rem=$remainingFrames');
         FlutterPcmSound.feed(PcmArrayInt16.fromList(samples));
       } else {
         // No audio from Rust — feed silence to prevent AudioTrack underrun
