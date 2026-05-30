@@ -72,12 +72,15 @@ class AudioService {
     final buf = calloc<Int16>(_frameSize);
     try {
       final got = TsNative.getAudio(buf, _frameSize);
-      if (got > 0) {
-        final samples = List<int>.generate(got, (i) => buf[i]);
-        debugPrint('AudioService: feed $got samples first=${samples.take(3)} rem=$remainingFrames');
+      if (got >= _frameSize) {
+        FlutterPcmSound.feed(PcmArrayInt16.fromList(
+            List<int>.generate(_frameSize, (i) => buf[i])));
+      } else if (got > 0) {
+        // Partial read — pad with silence
+        final samples = List<int>.filled(_frameSize, 0);
+        for (int i = 0; i < got; i++) { samples[i] = buf[i]; }
         FlutterPcmSound.feed(PcmArrayInt16.fromList(samples));
       } else {
-        // No audio from Rust — feed silence to prevent AudioTrack underrun
         FlutterPcmSound.feed(PcmArrayInt16.zeros(count: _frameSize));
       }
     } catch (e) {

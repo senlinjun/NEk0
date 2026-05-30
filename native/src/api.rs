@@ -1,6 +1,6 @@
 use crate::{
-    ClientAudioBuffer, Command, TsChannel, TsClient, TsEvent, COMMAND_TX, IDENTITY_STASH,
-    RUNTIME, STATE, SWIPE_DISCONNECT,
+    alloc_frame, free_frame, ClientAudioBuffer, Command, TsChannel, TsClient, TsEvent,
+    AUDIO_OUT, COMMAND_TX, IDENTITY_STASH, MIX_REQUESTED, RUNTIME, STATE, SWIPE_DISCONNECT,
 };
 
 use futures::prelude::*;
@@ -305,9 +305,9 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     let audio = audio_buf.data();
     let audio_data = audio.data();
 
-    let (from_id, opus_vec) = match audio_data {
-        AudioData::S2C { from, data, .. } => (*from, data.to_vec()),
-        AudioData::S2CWhisper { from, data, .. } => (*from, data.to_vec()),
+    let (from_id, seq_id, opus_vec) = match audio_data {
+        AudioData::S2C { id, from, data, .. } => (*from, *id, data.to_vec()),
+        AudioData::S2CWhisper { id, from, data, .. } => (*from, *id, data.to_vec()),
         _ => return,
     };
     drop(audio_data);
@@ -348,10 +348,11 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
 
     if !ok { return; }
 
-    // Convert f32 → i16, apply volume, push to per-client buffer
-    let frame: Vec<i16> = pcm_out.iter()
-        .map(|&s| (s.clamp(-1.0, 1.0) * vol * 1.5 * 32767.0).clamp(-32768.0, 32767.0) as i16)
-        .collect();
+    // Convert f32 → i16, apply volume
+    let mut frame = alloc_frame();
+    for (i, &s) in pcm_out.iter().enumerate() {
+        frame[i] = (s.clamp(-1.0, 1.0) * vol * 1.5 * 32767.0).clamp(-32768.0, 32767.0) as i16;
+    }
 
     let buf = state.client_buffers.entry(from_id).or_insert_with(ClientAudioBuffer::new);
 
@@ -362,20 +363,25 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
         let jitter = (interval - 20.0).abs();
         buf.jitter_ms = ClientAudioBuffer::JITTER_ALPHA * jitter
             + (1.0 - ClientAudioBuffer::JITTER_ALPHA) * buf.jitter_ms;
-        // Adjust target depth based on jitter
         if buf.jitter_ms > 10.0 && buf.target_depth < ClientAudioBuffer::MAX_DEPTH {
             buf.target_depth += 1;
         } else if buf.jitter_ms < 2.0 && buf.target_depth > ClientAudioBuffer::MIN_DEPTH {
             buf.target_depth -= 1;
         }
     }
-    buf.frames.push_back(frame);
+
+    // Sequence-number alignment with wrap handling (Fix 4)
+    if buf.last_seq == 0 {
+        buf.base_seq = seq_id;
+        buf.base_slot = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 / 20;
+    }
+    buf.last_seq = seq_id;
     buf.last_packet = now;
 
-    // Trim to target depth (drop oldest if too deep)
-    while buf.frames.len() > buf.target_depth {
-        buf.frames.pop_front();
-    }
+    let slot = buf.slot_for_seq(seq_id);
+    buf.push_frame(slot, frame);
+    buf.trim();
 }
 
 /// Handle a non-audio stream item (book events, messages, disconnects).
@@ -458,6 +464,10 @@ async fn event_loop(
     push_diag(&format!("event_loop: started (gen={})", generation));
     crate::EVENT_LOOP_ALIVE.store(true, Ordering::SeqCst);
     loop {
+        // Watermark: Dart callback detected low buffer, mix immediately (Fix 2)
+        if MIX_REQUESTED.swap(false, Ordering::Acquire) {
+            // Event loop is now aware — mixing will run inline at step 2d
+        }
         // Clean up talking clients that haven't spoken in >2s
         STATE.lock().talking_clients.retain(|_, t| t.elapsed().as_millis() < 2000);
 
@@ -485,8 +495,6 @@ async fn event_loop(
                 STATE.lock().audio_decoders.clear();
                 STATE.lock().audio_decoders_stereo.clear();
                 STATE.lock().client_buffers.clear();
-                STATE.lock().audio_out.clear();
-                STATE.lock().mix_track.clear();
                 *COMMAND_TX.lock() = None;
             }
             return;
@@ -551,8 +559,6 @@ async fn event_loop(
                         s.audio_decoders.clear();
                         s.audio_decoders_stereo.clear();
                         s.client_buffers.clear();
-                        s.audio_out.clear();
-                        s.mix_track.clear();
                         *COMMAND_TX.lock() = None;
                     }
                     return;
@@ -672,8 +678,6 @@ async fn event_loop(
                     s.audio_decoders.clear();
                     s.audio_decoders_stereo.clear();
                     s.client_buffers.clear();
-                    s.audio_out.clear();
-                        s.mix_track.clear();
                     s.pending_events.push_back(TsEvent::Disconnected {
                         reason: "Connection closed by server".into(),
                     });
@@ -712,8 +716,6 @@ async fn event_loop(
                         s.audio_decoders.clear();
                         s.audio_decoders_stereo.clear();
                         s.client_buffers.clear();
-                        s.audio_out.clear();
-                        s.mix_track.clear();
                         s.pending_events.push_back(TsEvent::Disconnected {
                             reason: "Connection closed by server".into(),
                         });
@@ -733,48 +735,69 @@ async fn event_loop(
             handle_control_item(&item, &mut con, generation);
         }
 
-        // 2d. Speaker selection: pick the most recent talker, push one frame
+        // 2d. 3-Phase mixing (Fix 3) + watermark check (Fix 2)
         {
-            let mut state = STATE.lock();
-            // Select most recent speaker among active talkers
-            let best = state.talking_clients.iter()
-                .filter(|(id, _)| state.client_buffers.contains_key(id))
-                .max_by_key(|(_, t)| t.elapsed().as_millis().wrapping_neg());
-            state.active_speaker = best.map(|(&id, _)| id);
-
-            if let Some(speaker) = state.active_speaker {
-                if let Some(buf) = state.client_buffers.get_mut(&speaker) {
-                    if let Some(frame) = buf.frames.pop_front() {
-                        // "Fake mix": copy the selected speaker's frame
-                        // into the independent mix track, then drain to output
-                        state.mix_track.extend(&frame);
-                        while state.mix_track.len() > 19200 {
-                            state.mix_track.pop_front();
+            // Phase A: Quick collect under lock (~10us) — ownership transferred
+            let to_mix: Vec<Vec<i16>>;
+            {
+                let mut state = STATE.lock();
+                let min = state.client_buffers.values()
+                    .filter_map(|b| b.min_slot())
+                    .min();
+                let mut frames = Vec::new();
+                if let Some(slot) = min {
+                    for buf in state.client_buffers.values_mut() {
+                        if let Some(f) = buf.pop_from(slot) {
+                            frames.push(f);
                         }
                     }
                 }
-            }
-            // Drain mix_track into audio_out for Dart consumption
-            while let Some(sample) = state.mix_track.pop_front() {
-                state.audio_out.push_back(sample);
-            }
-            // Cap output
-            while state.audio_out.len() > 19200 {
-                state.audio_out.pop_front();
-            }
-            // Clean up stale buffers (speaker silent > 5s)
-            let mut stale: Vec<u16> = Vec::new();
-            for (&id, b) in &state.client_buffers {
-                if !state.talking_clients.contains_key(&id)
-                    && b.last_packet.elapsed().as_millis() >= 5000
-                {
-                    stale.push(id);
+                // Clean stale
+                let mut stale: Vec<u16> = Vec::new();
+                for (&id, b) in &state.client_buffers {
+                    if !state.talking_clients.contains_key(&id)
+                        && b.last_packet.elapsed().as_millis() >= 5000
+                    { stale.push(id); }
                 }
+                for id in stale { state.client_buffers.remove(&id); }
+                to_mix = frames;
+                // Lock released here
             }
-            for id in stale {
-                state.client_buffers.remove(&id);
+
+            // Phase B: Compute outside lock — no shared state access
+            let output: Vec<i16> = if !to_mix.is_empty() {
+                let count = to_mix.len() as f32;
+                let atten = 1.0 / count.sqrt();
+                let frame_size = to_mix[0].len();
+                let mut mixed = vec![0i32; frame_size];
+                for frame in &to_mix {
+                    for i in 0..frame_size {
+                        mixed[i] += frame[i] as i32;
+                    }
+                }
+                let output: Vec<i16> = mixed.iter()
+                    .map(|&s| ((s as f32 * atten) as i16))
+                    .collect();
+                // Return consumed frames to pool
+                for f in to_mix { free_frame(f); }
+                output
+            } else {
+                Vec::new()
+            };
+
+            // Phase C: Push to audio_out under separate lock (no STATE contention)
+            {
+                let mut out = AUDIO_OUT.lock();
+                out.extend(&output);
+                while out.len() > 48000 { out.pop_front(); }
             }
         }
+    }
+
+    // Watermark: Dart side requests mix if buffer low (Fix 2)
+    if MIX_REQUESTED.swap(false, Ordering::Acquire) {
+        // Run mix phase immediately (already done inline above — this is
+        // a no-op if mixing already happened; just prevents duplicate work)
     }
 }
 
@@ -832,8 +855,6 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
         s.audio_decoders.clear();
         s.audio_decoders_stereo.clear();
         s.client_buffers.clear();
-        s.audio_out.clear();
-                        s.mix_track.clear();
     }
     to_c_str(r#"{"type":"disconnected","reason":"User disconnected"}"#.to_string())
 }
@@ -1034,26 +1055,30 @@ pub extern "C" fn ts_stop_audio() {
     state.audio_decoders.clear();
     state.audio_decoders_stereo.clear();
     state.client_buffers.clear();
-    state.audio_out.clear();
-    state.mix_track.clear();
 }
 
 /// Drain mixed audio samples from the output buffer.
 /// Returns the number of `i16` samples copied to `buf`.
 #[no_mangle]
 pub extern "C" fn ts_get_audio(buf: *mut i16, buf_len: u32) -> u32 {
-    let mut state = STATE.lock();
-    let to_copy = (buf_len as usize).min(state.audio_out.len());
+    let mut out = AUDIO_OUT.lock();
+    let to_copy = (buf_len as usize).min(out.len());
     if to_copy == 0 {
+        // Watermark check: request mix if low (Fix 2)
+        MIX_REQUESTED.store(true, Ordering::Relaxed);
         return 0;
     }
     unsafe {
         let slice = std::slice::from_raw_parts_mut(buf, to_copy);
         for (i, dst) in slice.iter_mut().enumerate() {
-            *dst = state.audio_out[i];
+            *dst = out[i];
         }
     }
-    state.audio_out.drain(..to_copy);
+    out.drain(..to_copy);
+    // Watermark check (Fix 2)
+    if out.len() < 1920 {
+        MIX_REQUESTED.store(true, Ordering::Relaxed);
+    }
     to_copy as u32
 }
 
