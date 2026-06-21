@@ -293,7 +293,7 @@ async fn do_connect(
         let config = cpal::StreamConfig {
             channels: 1,
             sample_rate: cpal::SampleRate(48000),
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: cpal::BufferSize::Fixed(960),
         };
         match device.build_output_stream(
             &config,
@@ -473,7 +473,7 @@ fn unwrap_seq(seq: u16, base: u16) -> u32 {
 /// No STATE lock held — decoders and buffers are in DashMaps.
 fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     const FRAME: usize = 960;
-    const TARGET_DELAY: u64 = 5; // 100ms initial jitter buffer
+    const TARGET_DELAY: u64 = 2; // 40ms jitter buffer
 
     // Extract data from the self_cell-wrapped buffer
     let audio = audio_buf.data();
