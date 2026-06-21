@@ -542,12 +542,42 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
             buf.base_slot.store(now_slot + TARGET_DELAY, Ordering::Release);
         }
     }
-    let base_seq = buf.base_seq.load(Ordering::Relaxed);
+    let mut base_seq = buf.base_seq.load(Ordering::Relaxed);
     let global_seq = unwrap_seq(seq_u16, base_seq as u16);
+    let write_seq_before = buf.write_seq.load(Ordering::Relaxed);
 
-    // Sanity check: discard if distance is unreasonably large (>1000 frames = 20s)
-    if global_seq.wrapping_sub(base_seq) > 1000 {
-        return;
+    // Sanity check: discard if >1000 frames from the last accepted frame.
+    // Uses wrapping-min to handle both forward jumps and reordered packets.
+    if write_seq_before != 0 {
+        let forward = global_seq.wrapping_sub(write_seq_before);
+        let backward = write_seq_before.wrapping_sub(global_seq);
+        let distance = forward.min(backward);
+        if distance > 1000 {
+            return;
+        }
+    }
+
+    // If the reader has overrun during a silence gap, rebase to realign.
+    // PLAYED_SAMPLES keeps advancing during silence but TS sequence numbers
+    // do not — so the reader's expected_seq can run far ahead of the writer.
+    {
+        let current_slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / crate::FRAME_SIZE;
+        let base_slot_before = buf.base_slot.load(Ordering::Relaxed);
+        let reader_expected = current_slot
+            .wrapping_sub(base_slot_before)
+            .wrapping_add(base_seq as u64);
+        // If reader is >32 frames ahead, the jitter buffer has drained entirely
+        if (global_seq as u64).wrapping_add(32) < reader_expected {
+            buf.base_seq.store(global_seq, Ordering::Release);
+            buf.base_slot.store(current_slot + TARGET_DELAY, Ordering::Release);
+            // Clear stale slots from old mapping to prevent misreads
+            for slot in &buf.slots {
+                if let Some(frame) = slot.swap(None) {
+                    buf.frame_pool.push(frame);
+                }
+            }
+            base_seq = global_seq; // local sync after rebase
+        }
     }
 
     // Write frame to the lock-free jitter buffer
