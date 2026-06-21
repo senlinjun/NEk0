@@ -559,15 +559,20 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
 
     // If the reader has overrun during a silence gap, rebase to realign.
     // PLAYED_SAMPLES keeps advancing during silence but TS sequence numbers
-    // do not — so the reader's expected_seq can run far ahead of the writer.
+    // do not — so even a 1-frame reader lead is permanent (both advance at
+    // the same rate and the gap never closes).
     {
         let current_slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / crate::FRAME_SIZE;
         let base_slot_before = buf.base_slot.load(Ordering::Relaxed);
         let reader_expected = current_slot
             .wrapping_sub(base_slot_before)
             .wrapping_add(base_seq as u64);
-        // If reader is >32 frames ahead, the jitter buffer has drained entirely
-        if (global_seq as u64).wrapping_add(32) < reader_expected {
+        // Rebase when: not init, frame is forward (not delayed/reordered),
+        // and reader has already passed this frame's play position.
+        if write_seq_before != 0
+            && global_seq > write_seq_before
+            && (global_seq as u64) < reader_expected
+        {
             buf.base_seq.store(global_seq, Ordering::Release);
             buf.base_slot.store(current_slot + TARGET_DELAY, Ordering::Release);
             // Clear stale slots from old mapping to prevent misreads
