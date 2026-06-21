@@ -17,7 +17,7 @@ class TsClient {
     this.inputMuted = false,
     this.outputMuted = false,
     this.isTalking = false,
-    this.volume = 1.0,
+    this.volume = 0.0,
     this.uid,
   });
 
@@ -29,7 +29,7 @@ class TsClient {
         inputMuted: json['input_muted'] as bool? ?? false,
         outputMuted: json['output_muted'] as bool? ?? false,
         isTalking: json['is_talking'] as bool? ?? false,
-        volume: (json['volume'] as num?)?.toDouble() ?? 1.0,
+        volume: (json['volume'] as num?)?.toDouble() ?? 0.0,
         uid: json['uid'] as String?,
       );
 

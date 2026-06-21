@@ -141,6 +141,8 @@ pub struct TsConnection {
     pub mic_gain: f32,
     // Audio receive state
     pub talking_clients: HashMap<u16, Instant>, // last audio timestamp per client (monotonic Instant)
+    /// Per-client volume in decibels (dB). Source of truth — NOT cleared on disconnect.
+    pub client_volumes: HashMap<u16, f32>,
 }
 
 impl TsConnection {
@@ -164,6 +166,7 @@ impl TsConnection {
             disconnect_requested: false,
             mic_gain: 1.0,
             talking_clients: HashMap::new(),
+            client_volumes: HashMap::new(),
         }
     }
 }

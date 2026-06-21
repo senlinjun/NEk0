@@ -85,9 +85,21 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                         .unwrap_or(false)
                 },
                 volume: {
-                    crate::CLIENT_BUFFERS.get(&(c.id.0 as u16))
-                        .map(|b| f32::from_bits(b.volume.load(Ordering::Relaxed)))
-                        .unwrap_or(1.0)
+                    let cid = c.id.0 as u16;
+                    let state = STATE.lock();
+                    // Primary source: persisted dB value
+                    if let Some(&db) = state.client_volumes.get(&cid) {
+                        db
+                    } else {
+                        // Fallback: convert linear gain from jitter buffer → dB
+                        drop(state);
+                        crate::CLIENT_BUFFERS.get(&cid)
+                            .map(|b| {
+                                let gain = f32::from_bits(b.volume.load(Ordering::Relaxed));
+                                20.0 * gain.max(1e-10).log10()
+                            })
+                            .unwrap_or(0.0) // default: 0 dB = unity gain
+                    }
                 },
             }
         })
@@ -512,7 +524,15 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     }
 
     // Get or create per-client jitter buffer — DashMap, no STATE lock
-    let buf = CLIENT_BUFFERS.entry(from_id).or_insert_with(|| crate::ClientJitterBuffer::new());
+    let buf = CLIENT_BUFFERS.entry(from_id).or_insert_with(|| {
+        let b = crate::ClientJitterBuffer::new();
+        // Inherit persisted volume when creating a new jitter buffer
+        if let Some(&db) = STATE.lock().client_volumes.get(&from_id) {
+            let gain = 10.0_f32.powf(db / 20.0);
+            b.volume.store(f32::to_bits(gain), Ordering::Release);
+        }
+        b
+    });
 
     // Init baseline with compare_exchange (prevents race when two packets arrive simultaneously)
     let tmp_global = unwrap_seq(seq_u16, 0);
@@ -1083,6 +1103,14 @@ pub extern "C" fn ts_get_clients() -> *mut c_char {
     for c in &mut state.clients {
         c.is_talking = talking.contains(&(c.id as u16));
     }
+    // Refresh per-client volumes from persistent store before serializing
+    // Snapshot to avoid borrow conflict with mutable clients iteration
+    let volume_snapshot: Vec<(u16, f32)> = state.client_volumes.iter().map(|(&k, &v)| (k, v)).collect();
+    for c in &mut state.clients {
+        if let Some(&(_id, db)) = volume_snapshot.iter().find(|(id, _)| *id == c.id as u16) {
+            c.volume = db;
+        }
+    }
     to_c_str(serde_json::to_string(&state.clients).unwrap_or_else(|_| "[]".into()))
 }
 
@@ -1215,6 +1243,11 @@ pub extern "C" fn ts_set_mic_gain(gain: f32) {
 pub extern "C" fn ts_set_client_volume(client_id: u16, volume_db: f32) {
     let vol_db = volume_db.clamp(-20.0, 20.0);
     let gain = 10.0_f32.powf(vol_db / 20.0);
+
+    // Persist dB to STATE — source of truth, survives disconnect
+    STATE.lock().client_volumes.insert(client_id, vol_db);
+
+    // Also update the live jitter buffer if it exists
     if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
         buf.volume.store(f32::to_bits(gain), Ordering::Release);
     }

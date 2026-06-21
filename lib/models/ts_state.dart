@@ -283,6 +283,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         _updateMicState();
         ForegroundService.start(title: state.serverName, text: _currentChannelName, mic: false, inputMuted: state.inputMuted);
         _saveIdentity();
+
+        // Restore saved per-client volumes from SharedPreferences
+        _restoreClientVolumes();
         break;
 
       case 'disconnected':
@@ -488,6 +491,36 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       return c;
     }).toList();
     state = state.copyWith(clients: newClients);
+    // Persist per-client volume to SharedPreferences
+    _prefs?.setDouble('client_volume_$clientId', volumeDb);
+  }
+
+  /// Restore per-client volumes from SharedPreferences and push to Rust.
+  Future<void> _restoreClientVolumes() async {
+    final prefs = await SharedPreferences.getInstance();
+    bool anyRestored = false;
+    for (final key in prefs.getKeys()) {
+      if (!key.startsWith('client_volume_')) continue;
+      final idStr = key.substring('client_volume_'.length);
+      final id = int.tryParse(idStr);
+      final db = prefs.getDouble(key);
+      if (id != null && db != null) {
+        TsNative.setClientVolume(id, db);
+        anyRestored = true;
+      }
+    }
+    if (anyRestored) {
+      // Re-fetch clients from Rust to get corrected volumes
+      try {
+        final clientsJson = TsNative.getClients();
+        final clients = (jsonDecode(clientsJson) as List)
+            .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
+            .toList();
+        if (clients.isNotEmpty) {
+          state = state.copyWith(clients: clients);
+        }
+      } catch (_) {}
+    }
   }
 
 }
