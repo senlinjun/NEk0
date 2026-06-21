@@ -1,6 +1,8 @@
 use crate::{
-    alloc_frame, free_frame, ClientAudioBuffer, Command, TsChannel, TsClient, TsEvent,
-    AUDIO_OUT, COMMAND_TX, IDENTITY_STASH, MIX_REQUESTED, RUNTIME, STATE, SWIPE_DISCONNECT,
+    Command, TsChannel, TsClient, TsEvent,
+    AUDIO_DECODERS, AUDIO_DECODERS_STEREO, AUDIO_STREAM, CB_STATS, CLIENT_BUFFERS,
+    COMMAND_TX, FRAME_SIZE, IDENTITY_STASH, PLAYED_SAMPLES, ACTIVE_CLIENT_IDS,
+    RUNTIME, STATE, SWIPE_DISCONNECT,
 };
 
 use futures::prelude::*;
@@ -10,11 +12,12 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tsclientlib::messages::c2s::*;
 use tsclientlib::{ChannelId, ClientId};
 use tsclientlib::{Connection, DisconnectOptions, Identity, OutCommandExt, StreamItem};
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 fn to_c_str(s: String) -> *mut c_char {
     CString::new(s)
@@ -82,8 +85,9 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                         .unwrap_or(false)
                 },
                 volume: {
-                    let state = STATE.lock();
-                    state.client_volumes.get(&(c.id.0 as u16)).copied().unwrap_or(1.0)
+                    crate::CLIENT_BUFFERS.get(&(c.id.0 as u16))
+                        .map(|b| f32::from_bits(b.volume.load(Ordering::Relaxed)))
+                        .unwrap_or(1.0)
                 },
             }
         })
@@ -269,6 +273,144 @@ async fn do_connect(
 
     *crate::CONNECTION_STASH.lock() = Some(con);
 
+    // --- Push-mode audio output (cpal) with sample-driven mixing ---
+    spawn_maintenance_task();
+
+    let host = cpal::default_host();
+    if let Some(device) = host.default_output_device() {
+        let config = cpal::StreamConfig {
+            channels: 1,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        match device.build_output_stream(
+            &config,
+            {
+                let current_mix_slot = std::cell::Cell::new(u64::MAX);
+                let current_mix_buf = std::cell::RefCell::new([0.0f32; FRAME_SIZE as usize]);
+                let cb_seq = std::cell::Cell::new(0u64);
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    // ── diagnostics: first 3 callbacks print liveness ──────────
+                    let seq = cb_seq.get();
+                    if seq < 3 {
+                        eprintln!("[cpal-stats] cb#{} data.len={} played_before={}",
+                            seq, data.len(), PLAYED_SAMPLES.load(Ordering::Relaxed));
+                        cb_seq.set(seq + 1);
+                    }
+                    // ── diagnostics: entry timing ────────────────────────────
+                    let cb_entry = std::time::Instant::now();
+                    let played = PLAYED_SAMPLES.load(Ordering::Relaxed);
+                    let played_before = played;
+                    // Consistency: next-callback expects this value
+                    let expected = CB_STATS.expected_next_played.load(Ordering::Relaxed);
+                    if expected != 0 && played_before != expected {
+                        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let cb_elapsed_ns = cb_entry.elapsed().as_nanos() as u64;
+                    let last_ns = CB_STATS.last_cb_entry_ns.swap(cb_elapsed_ns, Ordering::Relaxed);
+                    if last_ns != 0 {
+                        CB_STATS.last_interval_us.store(
+                            cb_elapsed_ns.wrapping_sub(last_ns) / 1000, Ordering::Relaxed);
+                    }
+                    let mut slot = played / FRAME_SIZE;
+                    let mut offset = (played % FRAME_SIZE) as usize;
+                    let mut data_offset = 0usize;
+                    let mut mix_count = 0u64;
+
+                    while data_offset < data.len() {
+                        // Generate new mix frame when entering a new logical frame
+                        if slot != current_mix_slot.get() {
+                            mix_count += 1;
+                            let mut mix_buf = [0.0f32; FRAME_SIZE as usize];
+                            let mut active = 0u32;
+
+                            // Phase A: collect one frame from each active client via snapshot
+                            let client_ids = ACTIVE_CLIENT_IDS.load();
+                            for &client_id in client_ids.iter() {
+                                if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
+                                    let base_seq = buf.base_seq.load(Ordering::Relaxed);
+                                    if base_seq == 0 { continue; }
+                                    let base_slot = buf.base_slot.load(Ordering::Relaxed);
+                                    let expected_seq = slot.wrapping_sub(base_slot)
+                                        .wrapping_add(base_seq as u64);
+                                    let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
+                                    if write_seq >= expected_seq {
+                                        let idx = (expected_seq.wrapping_sub(base_seq as u64))
+                                            as usize % 32;
+                                        if let Some(frame) = buf.slots[idx].swap(None) {
+                                            let vol = f32::from_bits(
+                                                buf.volume.load(Ordering::Relaxed));
+                                            for i in 0..FRAME_SIZE as usize {
+                                                mix_buf[i] += frame[i] as f32 * vol;
+                                            }
+                                            active += 1;
+                                            buf.frame_pool.push(frame);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Phase B: attenuate
+                            let atten = if active > 0 {
+                                1.0 / (active as f32).sqrt()
+                            } else {
+                                1.0
+                            };
+                            for s in &mut mix_buf {
+                                *s = (*s * atten).clamp(-32768.0, 32767.0) / 32768.0;
+                            }
+
+                            *current_mix_buf.borrow_mut() = mix_buf;
+                            current_mix_slot.set(slot);
+                        }
+
+                        // Copy from cached mix buffer to output
+                        let mix = current_mix_buf.borrow();
+                        let remaining_data = data.len() - data_offset;
+                        let remaining_frame = FRAME_SIZE as usize - offset;
+                        let copy = remaining_data.min(remaining_frame);
+
+                        data[data_offset..data_offset + copy]
+                            .copy_from_slice(&mix[offset..offset + copy]);
+
+                        data_offset += copy;
+                        offset += copy;
+                        if offset >= FRAME_SIZE as usize {
+                            offset = 0;
+                            slot += 1;
+                        }
+                    }
+
+                    // ── diagnostics: record stats ────────────────────────
+                    CB_STATS.callbacks.fetch_add(1, Ordering::Relaxed);
+                    CB_STATS.samples_total.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    CB_STATS.mix_frames.fetch_add(mix_count, Ordering::Relaxed);
+                    // PLAYED_SAMPLES consistency: old value must equal played_before
+                    let old = PLAYED_SAMPLES.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    if old != played_before {
+                        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Store expected value for next callback's entry check
+                    CB_STATS.expected_next_played.store(old + data.len() as u64, Ordering::Relaxed);
+                }
+            },
+            |err| eprintln!("cpal output error: {}", err),
+            None,
+        ) {
+            Ok(stream) => {
+                if stream.play().is_ok() {
+                    crate::AUDIO_STREAM.lock().unwrap().0 = Some(stream);
+                    eprintln!("cpal: output stream started (Default buffer, sample-driven)");
+                } else {
+                    eprintln!("cpal: play() failed");
+                }
+            }
+            Err(e) => eprintln!("cpal: build_output_stream failed: {}", e),
+        }
+    } else {
+        eprintln!("cpal: no output device");
+    }
+
     RUNTIME.spawn(async move {
         let con = crate::CONNECTION_STASH
             .lock()
@@ -296,38 +438,53 @@ async fn do_connect(
 
 // ─── Audio receive helpers ──────────────────────────────────────────
 
-/// Decode an incoming audio packet with a per-client OpusDecoder and push the
-/// decoded frame into that client's own jitter buffer.  Each speaker gets an
-/// independent buffer — no mixing occurs here.
+/// Map a u16 packet sequence number to u32 global sequence space,
+/// handling the 65536 wrap. Returns a stale-packet value (much smaller
+/// than base) when the sequence has moved backward too far.
+fn unwrap_seq(seq: u16, base: u16) -> u32 {
+    let base_u32 = base as u32;
+    let delta = seq.wrapping_sub(base) as i16 as i32;
+    if delta >= 0 {
+        base_u32.wrapping_add(delta as u32)
+    } else if delta > -32768 {
+        // Forward wrap: actual forward distance = 65536 + delta (range 32769..65535)
+        base_u32.wrapping_add((65536u32).wrapping_add(delta as u32))
+    } else {
+        // delta <= -32768: stale/backward packet.
+        // Returns a value much smaller than base_u32; outer sanity check discards it.
+        base_u32.wrapping_add(delta as u32)
+    }
+}
+
+/// Decode an incoming audio packet with a per-client OpusDecoder and push
+/// the decoded frame into that client's lock-free jitter buffer.
+/// No STATE lock held — decoders and buffers are in DashMaps.
 fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     const FRAME: usize = 960;
-    // Extract data from the self_cell-wrapped buffer BEFORE locking STATE.
+    const TARGET_DELAY: u64 = 5; // 100ms initial jitter buffer
+
+    // Extract data from the self_cell-wrapped buffer
     let audio = audio_buf.data();
     let audio_data = audio.data();
 
     let (from_id, seq_id, opus_vec) = match audio_data {
-        AudioData::S2C { id, from, data, .. } => (*from, *id, data.to_vec()),
-        AudioData::S2CWhisper { id, from, data, .. } => (*from, *id, data.to_vec()),
+        AudioData::S2C { id, from, data, .. } => (*from, *id as u32, data.to_vec()),
+        AudioData::S2CWhisper { id, from, data, .. } => (*from, *id as u32, data.to_vec()),
         _ => return,
     };
-    drop(audio_data);
-    drop(audio);
+    let seq_u16 = seq_id as u16;
+    // audio_data and audio are references — they get dropped naturally
     drop(audio_buf);
 
-    // Decode + buffer under STATE lock
-    let vol;
-    let mut state = STATE.lock();
-    vol = state.client_volumes.get(&from_id).copied().unwrap_or(1.0);
-    state.talking_clients.insert(from_id, std::time::Instant::now());
-
-    // Get or create per-client decoder (mono, fallback stereo)
-    let decoder = state.audio_decoders.entry(from_id)
+    // Get or create per-client decoder (mono, fallback stereo) — DashMap, no STATE lock
+    let mut decoder = AUDIO_DECODERS.entry(from_id)
         .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
     let mut pcm_out = vec![0.0f32; FRAME];
     let ok = match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
         Ok(_) => true,
         Err(_) => {
-            let stereo = state.audio_decoders_stereo.entry(from_id)
+            drop(decoder);
+            let mut stereo = AUDIO_DECODERS_STEREO.entry(from_id)
                 .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
             let mut stereo_out = vec![0.0f32; FRAME * 2];
             match stereo.decode(&opus_vec, FRAME, &mut stereo_out) {
@@ -348,40 +505,114 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
 
     if !ok { return; }
 
-    // Convert f32 → i16, apply volume
-    let mut frame = alloc_frame();
+    // Convert f32 → i16 (no volume post-gain — volume is applied as mixing weight in callback)
+    let mut frame = vec![0i16; FRAME];
     for (i, &s) in pcm_out.iter().enumerate() {
-        frame[i] = (s.clamp(-1.0, 1.0) * vol * 1.5 * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        frame[i] = (s.clamp(-1.0, 1.0) * 32767.0).clamp(-32768.0, 32767.0) as i16;
     }
 
-    let buf = state.client_buffers.entry(from_id).or_insert_with(ClientAudioBuffer::new);
+    // Get or create per-client jitter buffer — DashMap, no STATE lock
+    let buf = CLIENT_BUFFERS.entry(from_id).or_insert_with(|| crate::ClientJitterBuffer::new());
 
-    // Adaptive jitter tracking
-    let now = std::time::Instant::now();
-    if buf.last_seq != 0 {
-        let interval = now.duration_since(buf.last_packet).as_secs_f32() * 1000.0;
-        let jitter = (interval - 20.0).abs();
-        buf.jitter_ms = ClientAudioBuffer::JITTER_ALPHA * jitter
-            + (1.0 - ClientAudioBuffer::JITTER_ALPHA) * buf.jitter_ms;
-        if buf.jitter_ms > 10.0 && buf.target_depth < ClientAudioBuffer::MAX_DEPTH {
-            buf.target_depth += 1;
-        } else if buf.jitter_ms < 2.0 && buf.target_depth > ClientAudioBuffer::MIN_DEPTH {
-            buf.target_depth -= 1;
+    // Init baseline with compare_exchange (prevents race when two packets arrive simultaneously)
+    let tmp_global = unwrap_seq(seq_u16, 0);
+    if buf.base_seq.load(Ordering::Relaxed) == 0 {
+        if buf.base_seq.compare_exchange(0, tmp_global, Ordering::Release, Ordering::Relaxed).is_ok() {
+            let now_slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / crate::FRAME_SIZE;
+            buf.base_slot.store(now_slot + TARGET_DELAY, Ordering::Release);
         }
     }
+    let base_seq = buf.base_seq.load(Ordering::Relaxed);
+    let global_seq = unwrap_seq(seq_u16, base_seq as u16);
 
-    // Sequence-number alignment with wrap handling (Fix 4)
-    if buf.last_seq == 0 {
-        buf.base_seq = seq_id;
-        buf.base_slot = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 / 20;
+    // Sanity check: discard if distance is unreasonably large (>1000 frames = 20s)
+    if global_seq.wrapping_sub(base_seq) > 1000 {
+        return;
     }
-    buf.last_seq = seq_id;
-    buf.last_packet = now;
 
-    let slot = buf.slot_for_seq(seq_id);
-    buf.push_frame(slot, frame);
-    buf.trim();
+    // Write frame to the lock-free jitter buffer
+    let slot_idx = (global_seq.wrapping_sub(base_seq)) as usize % 32;
+
+    // Evict old frame if overwriting a slot
+    if let Some(old) = buf.slots[slot_idx].swap(None) {
+        buf.frame_pool.push(old);
+    }
+
+    // Get frame buffer from pool or allocate
+    let mut write_frame = buf.frame_pool.pop().unwrap_or_else(|| vec![0i16; FRAME]);
+    write_frame.copy_from_slice(&frame);
+    buf.slots[slot_idx].swap(Some(write_frame));
+    buf.write_seq.store(global_seq, Ordering::Release);
+    buf.last_packet.store(Some(Instant::now()));
+
+    // Briefly lock STATE only for talking_clients update (monotonic Instant)
+    STATE.lock().talking_clients.insert(from_id, Instant::now());
+}
+
+/// Background task: periodically cleans up stale clients and refreshes the
+/// client-ID snapshot used by the audio callback.
+fn spawn_maintenance_task() {
+    eprintln!("[cpal-stats] maintenance task starting (stats every 5s)");
+    RUNTIME.spawn(async {
+        let mut cleanup_tick = tokio::time::interval(Duration::from_secs(5));
+        let mut snapshot_tick = tokio::time::interval(Duration::from_millis(500));
+        let mut stats_tick = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = cleanup_tick.tick() => {
+                    let now = Instant::now();
+
+                    // Phase 1: collect candidates (read-only iteration, fast)
+                    let mut candidates: Vec<u16> = Vec::new();
+                    for entry in CLIENT_BUFFERS.iter() {
+                        if let Some(last) = entry.value().last_packet.load() {
+                            if now.duration_since(last) > Duration::from_secs(10) {
+                                candidates.push(*entry.key());
+                            }
+                        }
+                    }
+
+                    // Phase 2: double-check before removal
+                    for id in &candidates {
+                        let should_remove = match CLIENT_BUFFERS.get(id) {
+                            Some(buf) => match buf.last_packet.load() {
+                                Some(last) => now.duration_since(last) > Duration::from_secs(10),
+                                None => false, // started talking again, skip
+                            },
+                            None => false, // already gone
+                        };
+                        if should_remove {
+                            if let Some((_, buf)) = CLIENT_BUFFERS.remove(id) {
+                                for slot in &buf.slots {
+                                    if let Some(frame) = slot.swap(None) {
+                                        buf.frame_pool.push(frame);
+                                    }
+                                }
+                            }
+                            AUDIO_DECODERS.remove(id);
+                            AUDIO_DECODERS_STEREO.remove(id);
+                        }
+                    }
+                }
+                _ = snapshot_tick.tick() => {
+                    // Refresh client ID snapshot for the audio callback
+                    let ids: Vec<u16> = CLIENT_BUFFERS.iter().map(|e| *e.key()).collect();
+                    ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(ids));
+                }
+                _ = stats_tick.tick() => {
+                    let cbs = CB_STATS.callbacks.swap(0, Ordering::Relaxed);
+                    let samps = CB_STATS.samples_total.swap(0, Ordering::Relaxed);
+                    let mixes = CB_STATS.mix_frames.swap(0, Ordering::Relaxed);
+                    let mism = CB_STATS.played_mismatches.swap(0, Ordering::Relaxed);
+                    let intv_us = CB_STATS.last_interval_us.swap(0, Ordering::Relaxed);
+                    if cbs > 0 {
+                        eprintln!("[cpal-stats] callbacks={} samples={} mix_frames={} interval_us={} mismatches={}",
+                            cbs, samps, mixes, intv_us, mism);
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Handle a non-audio stream item (book events, messages, disconnects).
@@ -464,10 +695,6 @@ async fn event_loop(
     push_diag(&format!("event_loop: started (gen={})", generation));
     crate::EVENT_LOOP_ALIVE.store(true, Ordering::SeqCst);
     loop {
-        // Watermark: Dart callback detected low buffer, mix immediately (Fix 2)
-        if MIX_REQUESTED.swap(false, Ordering::Acquire) {
-            // Event loop is now aware — mixing will run inline at step 2d
-        }
         // Clean up talking clients that haven't spoken in >2s
         STATE.lock().talking_clients.retain(|_, t| t.elapsed().as_millis() < 2000);
 
@@ -492,9 +719,12 @@ async fn event_loop(
                     });
                 STATE.lock().connected = false;
                 STATE.lock().disconnect_requested = false;
-                STATE.lock().audio_decoders.clear();
-                STATE.lock().audio_decoders_stereo.clear();
-                STATE.lock().client_buffers.clear();
+                AUDIO_STREAM.lock().unwrap().0 = None;
+                CLIENT_BUFFERS.clear();
+                AUDIO_DECODERS.clear();
+                AUDIO_DECODERS_STEREO.clear();
+                PLAYED_SAMPLES.store(0, Ordering::Relaxed);
+                ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
                 *COMMAND_TX.lock() = None;
             }
             return;
@@ -556,9 +786,13 @@ async fn event_loop(
                             reason: "User disconnected".into(),
                         });
                         s.connected = false;
-                        s.audio_decoders.clear();
-                        s.audio_decoders_stereo.clear();
-                        s.client_buffers.clear();
+                        drop(s);
+                        AUDIO_STREAM.lock().unwrap().0 = None;
+                        CLIENT_BUFFERS.clear();
+                        AUDIO_DECODERS.clear();
+                        AUDIO_DECODERS_STEREO.clear();
+                        PLAYED_SAMPLES.store(0, Ordering::Relaxed);
+                        ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
                         *COMMAND_TX.lock() = None;
                     }
                     return;
@@ -675,12 +909,16 @@ async fn event_loop(
                 if current_gen == generation {
                     let mut s = STATE.lock();
                     s.connected = false;
-                    s.audio_decoders.clear();
-                    s.audio_decoders_stereo.clear();
-                    s.client_buffers.clear();
                     s.pending_events.push_back(TsEvent::Disconnected {
                         reason: "Connection closed by server".into(),
                     });
+                    drop(s);
+                    AUDIO_STREAM.lock().unwrap().0 = None;
+                    CLIENT_BUFFERS.clear();
+                    AUDIO_DECODERS.clear();
+                    AUDIO_DECODERS_STEREO.clear();
+                    PLAYED_SAMPLES.store(0, Ordering::Relaxed);
+                    ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
                     *COMMAND_TX.lock() = None;
                 }
                 break;
@@ -713,12 +951,16 @@ async fn event_loop(
                     if current_gen == generation {
                         let mut s = STATE.lock();
                         s.connected = false;
-                        s.audio_decoders.clear();
-                        s.audio_decoders_stereo.clear();
-                        s.client_buffers.clear();
                         s.pending_events.push_back(TsEvent::Disconnected {
                             reason: "Connection closed by server".into(),
                         });
+                        drop(s);
+                        AUDIO_STREAM.lock().unwrap().0 = None;
+                        CLIENT_BUFFERS.clear();
+                        AUDIO_DECODERS.clear();
+                        AUDIO_DECODERS_STEREO.clear();
+                        PLAYED_SAMPLES.store(0, Ordering::Relaxed);
+                        ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
                         *COMMAND_TX.lock() = None;
                     }
                     break;
@@ -735,69 +977,6 @@ async fn event_loop(
             handle_control_item(&item, &mut con, generation);
         }
 
-        // 2d. 3-Phase mixing (Fix 3) + watermark check (Fix 2)
-        {
-            // Phase A: Quick collect under lock (~10us) — ownership transferred
-            let to_mix: Vec<Vec<i16>>;
-            {
-                let mut state = STATE.lock();
-                let min = state.client_buffers.values()
-                    .filter_map(|b| b.min_slot())
-                    .min();
-                let mut frames = Vec::new();
-                if let Some(slot) = min {
-                    for buf in state.client_buffers.values_mut() {
-                        if let Some(f) = buf.pop_from(slot) {
-                            frames.push(f);
-                        }
-                    }
-                }
-                // Clean stale
-                let mut stale: Vec<u16> = Vec::new();
-                for (&id, b) in &state.client_buffers {
-                    if !state.talking_clients.contains_key(&id)
-                        && b.last_packet.elapsed().as_millis() >= 5000
-                    { stale.push(id); }
-                }
-                for id in stale { state.client_buffers.remove(&id); }
-                to_mix = frames;
-                // Lock released here
-            }
-
-            // Phase B: Compute outside lock — no shared state access
-            let output: Vec<i16> = if !to_mix.is_empty() {
-                let count = to_mix.len() as f32;
-                let atten = 1.0 / count.sqrt();
-                let frame_size = to_mix[0].len();
-                let mut mixed = vec![0i32; frame_size];
-                for frame in &to_mix {
-                    for i in 0..frame_size {
-                        mixed[i] += frame[i] as i32;
-                    }
-                }
-                let output: Vec<i16> = mixed.iter()
-                    .map(|&s| ((s as f32 * atten) as i16))
-                    .collect();
-                // Return consumed frames to pool
-                for f in to_mix { free_frame(f); }
-                output
-            } else {
-                Vec::new()
-            };
-
-            // Phase C: Push to audio_out under separate lock (no STATE contention)
-            {
-                let mut out = AUDIO_OUT.lock();
-                out.extend(&output);
-                while out.len() > 48000 { out.pop_front(); }
-            }
-        }
-    }
-
-    // Watermark: Dart side requests mix if buffer low (Fix 2)
-    if MIX_REQUESTED.swap(false, Ordering::Acquire) {
-        // Run mix phase immediately (already done inline above — this is
-        // a no-op if mixing already happened; just prevents duplicate work)
     }
 }
 
@@ -846,15 +1025,24 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
 
     if alive {
         STATE.lock().disconnect_requested = true;
+        // Also send Command::Disconnect for immediate processing
+        let tx = COMMAND_TX.lock();
+        if let Some(tx) = tx.as_ref() {
+            let _ = tx.send(crate::Command::Disconnect);
+        }
     } else if let Some(mut con) = crate::CONNECTION_STASH.lock().take() {
         let _ = con.disconnect(DisconnectOptions::new());
         let _ = RUNTIME.block_on(con.events().for_each(|_| future::ready(())));
         let mut s = STATE.lock();
         s.connected = false;
         s.disconnect_requested = false;
-        s.audio_decoders.clear();
-        s.audio_decoders_stereo.clear();
-        s.client_buffers.clear();
+        drop(s);
+        AUDIO_STREAM.lock().unwrap().0 = None;
+        CLIENT_BUFFERS.clear();
+        AUDIO_DECODERS.clear();
+        AUDIO_DECODERS_STEREO.clear();
+        PLAYED_SAMPLES.store(0, Ordering::Relaxed);
+        ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
     }
     to_c_str(r#"{"type":"disconnected","reason":"User disconnected"}"#.to_string())
 }
@@ -1027,7 +1215,9 @@ pub extern "C" fn ts_set_mic_gain(gain: f32) {
 pub extern "C" fn ts_set_client_volume(client_id: u16, volume_db: f32) {
     let vol_db = volume_db.clamp(-20.0, 20.0);
     let gain = 10.0_f32.powf(vol_db / 20.0);
-    STATE.lock().client_volumes.insert(client_id, gain);
+    if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
+        buf.volume.store(f32::to_bits(gain), Ordering::Release);
+    }
 }
 
 // ─── Audio (mic send only, no receive) ──────────────────────────────
@@ -1052,42 +1242,18 @@ pub extern "C" fn ts_start_audio() -> u8 {
 pub extern "C" fn ts_stop_audio() {
     let mut state = STATE.lock();
     state.audio_encoder = None;
-    state.audio_decoders.clear();
-    state.audio_decoders_stereo.clear();
-    state.client_buffers.clear();
-}
-
-/// Drain mixed audio samples from the output buffer.
-/// Returns the number of `i16` samples copied to `buf`.
-#[no_mangle]
-pub extern "C" fn ts_get_audio(buf: *mut i16, buf_len: u32) -> u32 {
-    let mut out = AUDIO_OUT.lock();
-    let to_copy = (buf_len as usize).min(out.len());
-    if to_copy == 0 {
-        // Watermark check: request mix if low (Fix 2)
-        MIX_REQUESTED.store(true, Ordering::Relaxed);
-        return 0;
-    }
-    unsafe {
-        let slice = std::slice::from_raw_parts_mut(buf, to_copy);
-        for (i, dst) in slice.iter_mut().enumerate() {
-            *dst = out[i];
-        }
-    }
-    out.drain(..to_copy);
-    // Watermark check (Fix 2)
-    if out.len() < 1920 {
-        MIX_REQUESTED.store(true, Ordering::Relaxed);
-    }
-    to_copy as u32
+    drop(state);
+    AUDIO_STREAM.lock().unwrap().0 = None;
+    CLIENT_BUFFERS.clear();
+    AUDIO_DECODERS.clear();
+    AUDIO_DECODERS_STEREO.clear();
+    PLAYED_SAMPLES.store(0, Ordering::Relaxed);
+    ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
 }
 
 #[no_mangle]
 pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
-    let (connected, mic_gain) = {
-        let state = STATE.lock();
-        (state.connected, state.mic_gain)
-    };
+    let connected = STATE.lock().connected;
     if !connected {
         return 0;
     }

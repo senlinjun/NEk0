@@ -365,10 +365,11 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     _audioService = null;
     _micEnabled = false;
     ForegroundService.stop();
-    _pollTimer?.cancel();
-    TsNative.disconnect();
-    // Keep polling for ~3 seconds to capture Rust disconnect diag messages
-    state = state.copyWith(connecting: false, connected: false);
+    TsNative.disconnect(); // sends Command::Disconnect to event loop
+    // Let the real 'disconnected' event from the event loop drive cleanup.
+    // The poll timer keeps running — _handleEvent('disconnected') will
+    // cancel it, reset state, and trigger the server_screen pop listener.
+    state = state.copyWith(connecting: false);
   }
 
   Future<void> sendChannelMessage(String text) async {

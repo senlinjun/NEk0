@@ -78,10 +78,6 @@ typedef _StartAudioDart = int Function();
 typedef _StopAudioNative = Void Function();
 typedef _StopAudioDart = void Function();
 
-// ts_get_audio(buf: *mut i16, buf_len: u32) -> u32
-typedef _GetAudioNative = Uint32 Function(Pointer<Int16>, Uint32);
-typedef _GetAudioDart = int Function(Pointer<Int16>, int);
-
 // ts_send_audio(data: *const f32, data_len: u32) -> bool
 typedef _SendAudioNative = Uint8 Function(Pointer<Float>, Uint32);
 typedef _SendAudioDart = int Function(Pointer<Float>, int);
@@ -150,9 +146,6 @@ final _startAudio = _lib.lookupFunction<_StartAudioNative, _StartAudioDart>(
 );
 final _stopAudio = _lib.lookupFunction<_StopAudioNative, _StopAudioDart>(
   'ts_stop_audio',
-);
-final _getAudio = _lib.lookupFunction<_GetAudioNative, _GetAudioDart>(
-  'ts_get_audio',
 );
 final _sendAudio = _lib.lookupFunction<_SendAudioNative, _SendAudioDart>(
   'ts_send_audio',
@@ -302,10 +295,6 @@ class TsNative {
 
   static bool sendAudio(Pointer<Float> data, int dataLen) {
     return _sendAudio(data, dataLen) != 0;
-  }
-
-  static int getAudio(Pointer<Int16> buf, int len) {
-    return _getAudio(buf, len);
   }
 
   static void setMicGain(double gain) {

@@ -35,7 +35,6 @@ dependencies:
   shared_preferences: ^2.3.0
   uuid: ^4.5.0
   ffi: ^2.1.0
-  flutter_pcm_sound: ^3.3.3
   permission_handler: ^12.0.1
 
 dev_dependencies:

@@ -7,18 +7,15 @@ import 'dart:typed_data'
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'ts_ffi.dart';
 
 class AudioService {
   bool _running = false;
-  bool _playbackRunning = false;
   StreamSubscription? _micSubscription;
 
   static const _micChannel = EventChannel('com.senlinjun.nek0/mic');
-  static const int _frameSize = 960; // 20ms at 48kHz mono
 
   bool get isRunning => _running;
 
@@ -36,68 +33,7 @@ class AudioService {
 
     _running = true;
     debugPrint('AudioService: started (mic not yet active)');
-
-    // Start playback immediately — always listening
-    await _startPlayback();
-
     return true;
-  }
-
-  // ─── Playback ────────────────────────────────────────────────────
-
-  Future<void> _startPlayback() async {
-    if (_playbackRunning) return;
-    try {
-      await FlutterPcmSound.setup(sampleRate: 48000, channelCount: 1);
-      // Feed threshold: 960 frames (20ms). Low enough for real-time feel
-      // but avoids callback storms.
-      await FlutterPcmSound.setFeedThreshold(960);
-      FlutterPcmSound.setFeedCallback(_onPlaybackFeed);
-      _playbackRunning = true;
-      // Manual kickstart: FlutterPcmSound.start() only triggers the
-      // callback if _needsStart is true (first-ever session). On reconnect
-      // _needsStart is stale-false, so we call the callback directly.
-      if (!FlutterPcmSound.start()) {
-        _onPlaybackFeed(0);
-      }
-      debugPrint('AudioService: playback started');
-    } catch (e) {
-      debugPrint('AudioService: playback setup error: $e');
-    }
-  }
-
-  void _onPlaybackFeed(int remainingFrames) {
-    if (!_playbackRunning) return;
-
-    final buf = calloc<Int16>(_frameSize);
-    try {
-      final got = TsNative.getAudio(buf, _frameSize);
-      if (got >= _frameSize) {
-        FlutterPcmSound.feed(PcmArrayInt16.fromList(
-            List<int>.generate(_frameSize, (i) => buf[i])));
-      } else if (got > 0) {
-        // Partial read — pad with silence
-        final samples = List<int>.filled(_frameSize, 0);
-        for (int i = 0; i < got; i++) { samples[i] = buf[i]; }
-        FlutterPcmSound.feed(PcmArrayInt16.fromList(samples));
-      } else {
-        FlutterPcmSound.feed(PcmArrayInt16.zeros(count: _frameSize));
-      }
-    } catch (e) {
-      debugPrint('AudioService: playback feed error: $e');
-    } finally {
-      calloc.free(buf);
-    }
-  }
-
-  void _stopPlayback() {
-    _playbackRunning = false;
-    try {
-      FlutterPcmSound.release();
-    } catch (e) {
-      debugPrint('AudioService: playback release error: $e');
-    }
-    debugPrint('AudioService: playback stopped');
   }
 
   // ─── Mic ─────────────────────────────────────────────────────────
@@ -130,7 +66,6 @@ class AudioService {
     _running = false;
 
     _stopMic();
-    _stopPlayback();
     TsNative.stopAudio();
     debugPrint('AudioService: stopped');
   }

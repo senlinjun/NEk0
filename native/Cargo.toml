@@ -19,6 +19,10 @@ parking_lot = "0.12"
 futures = "0.3"
 opus-rs = "0.1"
 arrayvec = "0.7"
+cpal = "0.15"
+dashmap = "6"
+crossbeam = "0.8"
+arc-swap = "1"
 
 [patch."https://github.com/ReSpeak/tsclientlib.git"]
 tsclientlib = { path = "local_tsclientlib/tsclientlib" }
