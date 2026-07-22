@@ -24,11 +24,20 @@ jobs:
         rustup target add x86_64-linux-android
     - name: Install system deps
       run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+    - name: Setup Android NDK
+      id: ndk
+      uses: nttld/setup-ndk@v1.6.0
+      with: 
+        ndk-version: r29a
     - name: Check Rust
+      env:
+        ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
       run: |
         cd native
         cargo check
     - name: Prebuild
+      env:
+        ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
       run: python3 pre_build.py
     - name: Flutter check
       run: |
