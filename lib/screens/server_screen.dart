@@ -399,7 +399,7 @@ class _VoiceSettingsSheetState extends State<_VoiceSettingsSheet> {
           // Threshold slider stacked on mic level bar (same 0–1 scale)
           Builder(
             builder: (_) {
-              final s = widget.notifier.state;
+              final s = widget.conn;
               final micActive = !s.inputMuted && (!s.pttMode || s.pttPressed);
               final rms = micActive ? s.micRms : 0.0;
               final fill = rms.clamp(0.0, 1.0);
