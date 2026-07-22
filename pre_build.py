@@ -1,7 +1,7 @@
 import subprocess,os,shutil
 os.chdir("native")
-process1 = subprocess.Popen("cargo build --release --target x86_64-linux-android")
-process2 = subprocess.Popen("cargo build --release --target aarch64-linux-android")
+process1 = subprocess.Popen("cargo build --release --target x86_64-linux-android",shell=True)
+process2 = subprocess.Popen("cargo build --release --target aarch64-linux-android",shell=True)
 process1.wait()
 process2.wait()
 os.chdir("..")
