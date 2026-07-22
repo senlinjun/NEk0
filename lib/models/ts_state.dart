@@ -130,6 +130,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   Timer? _pollTimer;
   AudioService? _audioService;
   bool _micEnabled = false;
+  bool _micGranted = false; // true only after enableMic() successfully completes
   SharedPreferences? _prefs; // cached for synchronous saves
 
   @override
@@ -409,12 +410,13 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     return state.channels.where((c) => c.id == own.channelId).firstOrNull?.name ?? '';
   }
 
-  void _refreshNotification({bool mic = false}) {
+  void _refreshNotification({bool? mic}) {
+    final hasMic = mic ?? _micGranted;
     var text = _currentChannelName;
     if (!state.inputMuted || state.voiceActive) {
       text = '$text \u2014 Speaking';
     }
-    ForegroundService.update(title: state.serverName, text: text, mic: mic, inputMuted: state.inputMuted);
+    ForegroundService.update(title: state.serverName, text: text, mic: hasMic, inputMuted: state.inputMuted);
   }
 
   /// Diagram: Start -> PTT? -> pushed? -> send : mute? -> send : nothing
@@ -428,12 +430,16 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     final should = _shouldMicBeActive;
     if (should && !_micEnabled) {
       _audioService!.enableMic().then((granted) {
-        if (granted) _refreshNotification(mic: true);
+        if (granted) {
+          _micGranted = true;
+          _refreshNotification(mic: true);
+        }
       });
       _micEnabled = true;
     } else if (!should && _micEnabled) {
       _audioService!.disableMic();
       _micEnabled = false;
+      _micGranted = false;
       _refreshNotification(mic: false);
     }
   }
