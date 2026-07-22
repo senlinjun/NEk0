@@ -19,10 +19,12 @@ jobs:
     - name: Setup Python
       uses: actions/setup-python@v7.0.0
     - name: Check Rust
-      run: cd native |
+      run: |
+           cd native
            cargo check
     - name: Prebuild
       run: python3 pre_build.py
     - name: Flutter check
-      run: flutter format --set-exit-if-changed |
+      run: |
+           flutter format --set-exit-if-changed
            flutter analyze
