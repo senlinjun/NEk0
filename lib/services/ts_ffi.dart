@@ -138,9 +138,7 @@ final _setVadEnabled = _lib
       'ts_set_vad_enabled',
     );
 final _isVoiceActive = _lib
-    .lookupFunction<_IsConnectedNative, _IsConnectedDart>(
-      'ts_is_voice_active',
-    );
+    .lookupFunction<_IsConnectedNative, _IsConnectedDart>('ts_is_voice_active');
 final _startAudio = _lib.lookupFunction<_StartAudioNative, _StartAudioDart>(
   'ts_start_audio',
 );
@@ -156,10 +154,9 @@ final _setIdentity = _lib.lookupFunction<_SetIdentityNative, _SetIdentityDart>(
 final _getIdentity = _lib.lookupFunction<_GetIdentityNative, _GetIdentityDart>(
   'ts_get_identity',
 );
-final _setMicGain =
-    _lib.lookupFunction<_SetMicGainNative, _SetMicGainDart>(
-      'ts_set_mic_gain',
-    );
+final _setMicGain = _lib.lookupFunction<_SetMicGainNative, _SetMicGainDart>(
+  'ts_set_mic_gain',
+);
 final _setClientVolume = _lib
     .lookupFunction<_SetClientVolumeNative, _SetClientVolumeDart>(
       'ts_set_client_volume',

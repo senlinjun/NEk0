@@ -28,7 +28,10 @@ class _ChannelTreeState extends State<ChannelTree> {
   Widget build(BuildContext context) {
     if (widget.channels.isEmpty) {
       return const Center(
-        child: Text('No channels', style: TextStyle(color: Colors.grey, fontSize: 13)),
+        child: Text(
+          'No channels',
+          style: TextStyle(color: Colors.grey, fontSize: 13),
+        ),
       );
     }
     return ListView.builder(
@@ -49,7 +52,9 @@ class _ChannelTreeState extends State<ChannelTree> {
       children: [
         // Channel row
         Material(
-          color: isSelected ? Colors.blue.withValues(alpha: 0.15) : Colors.transparent,
+          color: isSelected
+              ? Colors.blue.withValues(alpha: 0.15)
+              : Colors.transparent,
           child: InkWell(
             onTap: () {
               widget.onChannelTap(channel.id);
@@ -103,7 +108,9 @@ class _ChannelTreeState extends State<ChannelTree> {
                       channel.name,
                       style: TextStyle(
                         color: isSelected ? Colors.blue : Colors.white,
-                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: isSelected
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                         fontSize: 14,
                       ),
                       overflow: TextOverflow.ellipsis,
@@ -112,7 +119,10 @@ class _ChannelTreeState extends State<ChannelTree> {
                   // Client count badge
                   if (channel.clientCount > 0)
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.grey.withValues(alpha: 0.2),
                         borderRadius: BorderRadius.circular(10),

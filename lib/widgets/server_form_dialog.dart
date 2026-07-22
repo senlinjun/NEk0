@@ -45,9 +45,7 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
 
     final server = Server(
       id: widget.existing?.id ?? const Uuid().v4(),
-      name: _nameCtrl.text.trim().isEmpty
-          ? address
-          : _nameCtrl.text.trim(),
+      name: _nameCtrl.text.trim().isEmpty ? address : _nameCtrl.text.trim(),
       address: address,
       nickname: _nicknameCtrl.text.trim().isEmpty
           ? 'TeamSpeakUser'
@@ -77,15 +75,18 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
           children: [
             _field(_nameCtrl, 'Server Name', Icons.label),
             const SizedBox(height: 12),
-            _field(_addressCtrl, 'Address (e.g. ts.example.com)',
-                Icons.dns),
+            _field(_addressCtrl, 'Address (e.g. ts.example.com)', Icons.dns),
             const SizedBox(height: 12),
             _field(_nicknameCtrl, 'Nickname', Icons.person),
             const SizedBox(height: 12),
             _field(_channelCtrl, 'Channel (optional)', Icons.tag),
             const SizedBox(height: 12),
-            _field(_passwordCtrl, 'Password (optional)', Icons.lock,
-                obscure: true),
+            _field(
+              _passwordCtrl,
+              'Password (optional)',
+              Icons.lock,
+              obscure: true,
+            ),
           ],
         ),
       ),
@@ -104,8 +105,11 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
   }
 
   Widget _field(
-      TextEditingController ctrl, String hint, IconData icon,
-      {bool obscure = false}) {
+    TextEditingController ctrl,
+    String hint,
+    IconData icon, {
+    bool obscure = false,
+  }) {
     return TextField(
       controller: ctrl,
       obscureText: obscure,
@@ -121,8 +125,10 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
           borderSide: BorderSide.none,
         ),
         isDense: true,
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 10,
+        ),
       ),
     );
   }

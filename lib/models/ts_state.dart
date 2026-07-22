@@ -80,31 +80,30 @@ class TsConnectionState {
     double? vadThreshold,
     double? micGain,
     double? micRms,
-  }) =>
-      TsConnectionState(
-        connected: connected ?? this.connected,
-        connecting: connecting ?? this.connecting,
-        serverName: serverName ?? this.serverName,
-        nickname: nickname ?? this.nickname,
-        ownClientId: ownClientId ?? this.ownClientId,
-        channels: channels ?? this.channels,
-        clients: clients ?? this.clients,
-        messages: messages ?? this.messages,
-        selectedChannelId: selectedChannelId == _sentinel
-            ? this.selectedChannelId
-            : selectedChannelId as int?,
-        error: error,
-        diagMessages: diagMessages ?? this.diagMessages,
-        voiceActive: voiceActive ?? this.voiceActive,
-        inputMuted: inputMuted ?? this.inputMuted,
-        outputMuted: outputMuted ?? this.outputMuted,
-        pttMode: pttMode ?? this.pttMode,
-        pttPressed: pttPressed ?? this.pttPressed,
-        vadEnabled: vadEnabled ?? this.vadEnabled,
-        vadThreshold: vadThreshold ?? this.vadThreshold,
-        micGain: micGain ?? this.micGain,
-        micRms: micRms ?? this.micRms,
-      );
+  }) => TsConnectionState(
+    connected: connected ?? this.connected,
+    connecting: connecting ?? this.connecting,
+    serverName: serverName ?? this.serverName,
+    nickname: nickname ?? this.nickname,
+    ownClientId: ownClientId ?? this.ownClientId,
+    channels: channels ?? this.channels,
+    clients: clients ?? this.clients,
+    messages: messages ?? this.messages,
+    selectedChannelId: selectedChannelId == _sentinel
+        ? this.selectedChannelId
+        : selectedChannelId as int?,
+    error: error,
+    diagMessages: diagMessages ?? this.diagMessages,
+    voiceActive: voiceActive ?? this.voiceActive,
+    inputMuted: inputMuted ?? this.inputMuted,
+    outputMuted: outputMuted ?? this.outputMuted,
+    pttMode: pttMode ?? this.pttMode,
+    pttPressed: pttPressed ?? this.pttPressed,
+    vadEnabled: vadEnabled ?? this.vadEnabled,
+    vadThreshold: vadThreshold ?? this.vadThreshold,
+    micGain: micGain ?? this.micGain,
+    micRms: micRms ?? this.micRms,
+  );
 }
 
 const _sentinel = Object();
@@ -130,7 +129,8 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   Timer? _pollTimer;
   AudioService? _audioService;
   bool _micEnabled = false;
-  bool _micGranted = false; // true only after enableMic() successfully completes
+  bool _micGranted =
+      false; // true only after enableMic() successfully completes
   SharedPreferences? _prefs; // cached for synchronous saves
 
   @override
@@ -186,7 +186,12 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     }
 
     // Call Rust FFI - starts async connection in background
-    final resultJson = TsNative.connect(address, nickname, channel: channel, password: password);
+    final resultJson = TsNative.connect(
+      address,
+      nickname,
+      channel: channel,
+      password: password,
+    );
     debugPrint('TS: connect result = $resultJson');
     final result = jsonDecode(resultJson) as Map<String, dynamic>;
 
@@ -282,7 +287,12 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         TsNative.setVadEnabled(true);
         TsNative.setVadThreshold(state.vadThreshold);
         _updateMicState();
-        ForegroundService.start(title: state.serverName, text: _currentChannelName, mic: false, inputMuted: state.inputMuted);
+        ForegroundService.start(
+          title: state.serverName,
+          text: _currentChannelName,
+          mic: false,
+          inputMuted: state.inputMuted,
+        );
         _saveIdentity();
 
         // Restore saved per-client volumes from SharedPreferences
@@ -290,7 +300,8 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         break;
 
       case 'disconnected':
-        if (state.connecting) break; // stale event from previous connection, ignore
+        if (state.connecting)
+          break; // stale event from previous connection, ignore
         _pollTimer?.cancel();
         _audioService?.stop();
         _audioService = null;
@@ -339,9 +350,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       case 'diag':
         final msg = event['msg'] as String;
         debugPrint('RUST: $msg');
-        state = state.copyWith(
-          diagMessages: [...state.diagMessages, msg],
-        );
+        state = state.copyWith(diagMessages: [...state.diagMessages, msg]);
         break;
 
         break;
@@ -378,7 +387,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
 
   Future<void> sendChannelMessage(String text) async {
     if (!state.connected || text.isEmpty) return;
-    debugPrint('TS: sendChannelMessage(cid=${state.selectedChannelId}, len=${text.length})');
+    debugPrint(
+      'TS: sendChannelMessage(cid=${state.selectedChannelId}, len=${text.length})',
+    );
     TsNative.sendChannelMessage(state.selectedChannelId ?? 0, text);
     // Don't add optimistically — server echoes back as a text_message event
   }
@@ -405,9 +416,15 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   // ─── Voice control flow ──────────────────────────────────────────
 
   String get _currentChannelName {
-    final own = state.clients.where((c) => c.id == state.ownClientId).firstOrNull;
+    final own = state.clients
+        .where((c) => c.id == state.ownClientId)
+        .firstOrNull;
     if (own == null) return '';
-    return state.channels.where((c) => c.id == own.channelId).firstOrNull?.name ?? '';
+    return state.channels
+            .where((c) => c.id == own.channelId)
+            .firstOrNull
+            ?.name ??
+        '';
   }
 
   void _refreshNotification({bool? mic}) {
@@ -416,7 +433,12 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     if (!state.inputMuted || state.voiceActive) {
       text = '$text \u2014 Speaking';
     }
-    ForegroundService.update(title: state.serverName, text: text, mic: hasMic, inputMuted: state.inputMuted);
+    ForegroundService.update(
+      title: state.serverName,
+      text: text,
+      mic: hasMic,
+      inputMuted: state.inputMuted,
+    );
   }
 
   /// Diagram: Start -> PTT? -> pushed? -> send : mute? -> send : nothing
@@ -528,7 +550,6 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       } catch (_) {}
     }
   }
-
 }
 
 // ─── Server List Notifier ───────────────────────────────────────────
@@ -583,10 +604,10 @@ class ServerListNotifier extends Notifier<ServerListState> {
 
 final tsConnectionProvider =
     NotifierProvider<TsConnectionNotifier, TsConnectionState>(
-  TsConnectionNotifier.new,
-);
+      TsConnectionNotifier.new,
+    );
 
 final serverListProvider =
     NotifierProvider<ServerListNotifier, ServerListState>(
-  ServerListNotifier.new,
-);
+      ServerListNotifier.new,
+    );

@@ -58,16 +58,22 @@ class _ChatPanelState extends ConsumerState<ChatPanel> {
         Expanded(
           child: messages.isEmpty
               ? const Center(
-                  child: Text('No messages yet',
-                      style: TextStyle(color: Colors.grey)))
+                  child: Text(
+                    'No messages yet',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                )
               : ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(8),
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
                     final msg = messages[index];
-                    final isOwn = msg.fromClientId == ref.read(
-                        tsConnectionProvider.select((s) => s.ownClientId));
+                    final isOwn =
+                        msg.fromClientId ==
+                        ref.read(
+                          tsConnectionProvider.select((s) => s.ownClientId),
+                        );
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 2),
                       child: RichText(
@@ -76,8 +82,7 @@ class _ChatPanelState extends ConsumerState<ChatPanel> {
                             TextSpan(
                               text: '${msg.fromClient}: ',
                               style: TextStyle(
-                                color:
-                                    isOwn ? Colors.blue : Colors.tealAccent,
+                                color: isOwn ? Colors.blue : Colors.tealAccent,
                                 fontWeight: FontWeight.bold,
                                 fontSize: 13,
                               ),
@@ -110,8 +115,10 @@ class _ChatPanelState extends ConsumerState<ChatPanel> {
                     hintStyle: TextStyle(color: Colors.grey),
                     border: InputBorder.none,
                     isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
                   ),
                   onSubmitted: (_) => _sendMessage(),
                 ),

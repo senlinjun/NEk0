@@ -16,20 +16,20 @@ class Server {
   });
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'address': address,
-        'nickname': nickname,
-        'channel': channel,
-        'password': password,
-      };
+    'id': id,
+    'name': name,
+    'address': address,
+    'nickname': nickname,
+    'channel': channel,
+    'password': password,
+  };
 
   factory Server.fromJson(Map<String, dynamic> json) => Server(
-        id: json['id'] as String,
-        name: json['name'] as String,
-        address: json['address'] as String,
-        nickname: json['nickname'] as String,
-        channel: json['channel'] as String?,
-        password: json['password'] as String?,
-      );
+    id: json['id'] as String,
+    name: json['name'] as String,
+    address: json['address'] as String,
+    nickname: json['nickname'] as String,
+    channel: json['channel'] as String?,
+    password: json['password'] as String?,
+  );
 }

@@ -15,14 +15,17 @@ class ClientList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final channelClients =
-        clients.where((c) => c.channelId == currentChannelId).toList();
+    final channelClients = clients
+        .where((c) => c.channelId == currentChannelId)
+        .toList();
 
     if (channelClients.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(16),
-        child: Text('No users in this channel',
-            style: TextStyle(color: Colors.grey)),
+        child: Text(
+          'No users in this channel',
+          style: TextStyle(color: Colors.grey),
+        ),
       );
     }
 

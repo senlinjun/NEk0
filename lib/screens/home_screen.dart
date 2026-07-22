@@ -30,16 +30,16 @@ class HomeScreen extends ConsumerWidget {
       ),
       body: SafeArea(
         child: serverState.loading
-          ? const Center(child: CircularProgressIndicator(color: Colors.blue))
-          : serverState.servers.isEmpty
-              ? _buildEmpty(context, ref)
-              : ListView.separated(
-                  padding: const EdgeInsets.all(8),
-                  itemCount: serverState.servers.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 4),
-                  itemBuilder: (context, index) =>
-                      _buildServerTile(context, ref, serverState.servers[index]),
-                ),
+            ? const Center(child: CircularProgressIndicator(color: Colors.blue))
+            : serverState.servers.isEmpty
+            ? _buildEmpty(context, ref)
+            : ListView.separated(
+                padding: const EdgeInsets.all(8),
+                itemCount: serverState.servers.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 4),
+                itemBuilder: (context, index) =>
+                    _buildServerTile(context, ref, serverState.servers[index]),
+              ),
       ),
     );
   }
@@ -51,8 +51,10 @@ class HomeScreen extends ConsumerWidget {
         children: [
           const Icon(Icons.dns, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
-          const Text('No servers added',
-              style: TextStyle(color: Colors.grey, fontSize: 16)),
+          const Text(
+            'No servers added',
+            style: TextStyle(color: Colors.grey, fontSize: 16),
+          ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
             onPressed: () => _addOrEditServer(context, ref),
@@ -71,10 +73,14 @@ class HomeScreen extends ConsumerWidget {
       margin: EdgeInsets.zero,
       child: ListTile(
         leading: const Icon(Icons.dns, color: Colors.blue),
-        title: Text(server.name,
-            style: const TextStyle(color: Colors.white, fontSize: 15)),
-        subtitle: Text('${server.address} (${server.nickname})',
-            style: const TextStyle(color: Colors.grey, fontSize: 12)),
+        title: Text(
+          server.name,
+          style: const TextStyle(color: Colors.white, fontSize: 15),
+        ),
+        subtitle: Text(
+          '${server.address} (${server.nickname})',
+          style: const TextStyle(color: Colors.grey, fontSize: 12),
+        ),
         trailing: PopupMenuButton<String>(
           icon: const Icon(Icons.more_vert, color: Colors.grey),
           onSelected: (action) {
@@ -97,8 +103,11 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
-  Future<void> _addOrEditServer(BuildContext context, WidgetRef ref,
-      {Server? existing}) async {
+  Future<void> _addOrEditServer(
+    BuildContext context,
+    WidgetRef ref, {
+    Server? existing,
+  }) async {
     final result = await showDialog<Server>(
       context: context,
       builder: (_) => ServerFormDialog(existing: existing),
@@ -113,15 +122,22 @@ class HomeScreen extends ConsumerWidget {
   }
 
   Future<void> _deleteServer(
-      BuildContext context, WidgetRef ref, Server server) async {
+    BuildContext context,
+    WidgetRef ref,
+    Server server,
+  ) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A2E),
-        title: const Text('Delete Server?',
-            style: TextStyle(color: Colors.white)),
-        content: Text('Remove "${server.name}" from bookmarks?',
-            style: const TextStyle(color: Colors.grey)),
+        title: const Text(
+          'Delete Server?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Text(
+          'Remove "${server.name}" from bookmarks?',
+          style: const TextStyle(color: Colors.grey),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -139,7 +155,10 @@ class HomeScreen extends ConsumerWidget {
   }
 
   Future<void> _connectTo(
-      BuildContext context, WidgetRef ref, Server server) async {
+    BuildContext context,
+    WidgetRef ref,
+    Server server,
+  ) async {
     final conn = ref.read(tsConnectionProvider.notifier);
     await conn.connect(
       address: server.address,
@@ -152,12 +171,12 @@ class HomeScreen extends ConsumerWidget {
       Navigator.of(context)
           .push(MaterialPageRoute(builder: (_) => const ServerScreen()))
           .then((error) {
-        if (error is String && error.isNotEmpty && context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(error), backgroundColor: Colors.red),
-          );
-        }
-      });
+            if (error is String && error.isNotEmpty && context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(error), backgroundColor: Colors.red),
+              );
+            }
+          });
     }
   }
 }

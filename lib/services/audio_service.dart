@@ -1,8 +1,7 @@
 import 'dart:async';
 import 'dart:ffi';
 import 'dart:math' show sqrt;
-import 'dart:typed_data'
-    show ByteData, Endian, Float, Float32List, Uint8List;
+import 'dart:typed_data' show ByteData, Endian, Float, Float32List, Uint8List;
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';

@@ -18,14 +18,14 @@ class TsChannel {
   });
 
   factory TsChannel.fromJson(Map<String, dynamic> json) => TsChannel(
-        id: json['id'] as int,
-        name: json['name'] as String,
-        parentId: json['parent_id'] as int,
-        topic: json['topic'] as String? ?? '',
-        hasPassword: json['has_password'] as bool? ?? false,
-        clientCount: json['client_count'] as int? ?? 0,
-        order: json['order'] as int? ?? 0,
-      );
+    id: json['id'] as int,
+    name: json['name'] as String,
+    parentId: json['parent_id'] as int,
+    topic: json['topic'] as String? ?? '',
+    hasPassword: json['has_password'] as bool? ?? false,
+    clientCount: json['client_count'] as int? ?? 0,
+    order: json['order'] as int? ?? 0,
+  );
 
   List<TsChannel> children(List<TsChannel> all) {
     return all.where((c) => c.parentId == id).toList()
