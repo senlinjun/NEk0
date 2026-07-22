@@ -28,7 +28,7 @@ jobs:
       id: ndk
       uses: nttld/setup-ndk@v1.6.0
       with: 
-        ndk-version: r29a
+        ndk-version: r27d
     - name: Check Rust
       env:
         ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
