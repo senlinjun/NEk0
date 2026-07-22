@@ -18,13 +18,17 @@ jobs:
       uses: subosito/flutter-action@v2.23.0
     - name: Setup Python
       uses: actions/setup-python@v7.0.0
-    # - name: Check Rust
-    #   run: |
-    #        cd native
-    #        cargo check
+    - name: Set target for rust
+      run: |
+        rustup target add aarch64-linux-android
+        rustup target add x86_64-linux-android
+    - name: Check Rust
+      run: |
+        cd native
+        cargo check
     - name: Prebuild
       run: python3 pre_build.py
     - name: Flutter check
       run: |
-           flutter format --set-exit-if-changed
-           flutter analyze
+        flutter format --set-exit-if-changed
+        flutter analyze
