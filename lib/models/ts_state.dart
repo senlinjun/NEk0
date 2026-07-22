@@ -353,8 +353,6 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         state = state.copyWith(diagMessages: [...state.diagMessages, msg]);
         break;
 
-        break;
-
       case 'channels_updated':
         // Re-fetch channels and clients from Rust cache
         final chJson = TsNative.getChannels();
