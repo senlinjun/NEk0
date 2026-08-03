@@ -15,11 +15,15 @@
 ## Features
 
 - **Voice chat** — real-time OpusVoice (48kHz mono) with VAD and PTT
+- **Full mute** — one-tap headset button (or the media card play/pause) silences
+  input + output and stops the mic
 - **Background keep-alive** — stays connected in the background like a music player,
   backed by a foreground service + media session with mute/disconnect notification controls
 - **Per-client volume** — adjust each user's volume locally, remembered by identity across sessions
 - **Channel chat** — send and receive text messages in channels
 - **Server bookmarks** — save and manage server addresses locally
+- **First-use guide** — interactive spotlight coach marks on the real UI
+  (re-viewable from the help icons)
 
 ## Architecture
 
