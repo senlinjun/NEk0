@@ -277,6 +277,18 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             onLongPress: () => _showVoiceSettings(conn, notifier),
             child: Icon(Icons.mic, color: micColor, size: 28),
           ),
+          const SizedBox(width: 24),
+          // --- Headset button (full mute: input + output + mic off) ---
+          GestureDetector(
+            onTap: () => notifier.toggleFullMute(),
+            child: Icon(
+              Icons.headset,
+              color: conn.inputMuted || conn.outputMuted
+                  ? Colors.red
+                  : Colors.green,
+              size: 28,
+            ),
+          ),
           // --- PTT button (only in PTT mode) ---
           if (conn.pttMode) ...[
             const SizedBox(width: 24),

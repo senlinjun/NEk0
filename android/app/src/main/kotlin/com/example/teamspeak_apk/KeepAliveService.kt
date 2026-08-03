@@ -14,6 +14,8 @@ import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import io.flutter.embedding.engine.FlutterEngineCache
+import io.flutter.plugin.common.MethodChannel
 
 class KeepAliveService : Service() {
 
@@ -154,16 +156,20 @@ class KeepAliveService : Service() {
         mediaSession = MediaSession(this, "NEk0").apply {
             setCallback(object : MediaSession.Callback() {
                 override fun onPlay() {
-                    // TeamSpeak is always "playing" while connected; ignore.
+                    // Media card "play" = restore: unmute input+output, mic on.
+                    invokeDart("set_full_mute", mapOf("muted" to false))
                 }
 
                 override fun onPause() {
-                    // Ignore pause — connection keeps running regardless.
+                    // Media card "pause" = full mute: input+output muted, mic off.
+                    invokeDart("set_full_mute", mapOf("muted" to true))
                 }
             })
             setPlaybackState(
                 PlaybackState.Builder()
                     .setState(PlaybackState.STATE_PLAYING, 0L, 1f)
+                    // Keep the play/pause action so the media card shows the
+                    // button that drives the full-mute toggle via onPlay/onPause.
                     .setActions(PlaybackState.ACTION_PLAY_PAUSE)
                     .build()
             )
@@ -188,6 +194,16 @@ class KeepAliveService : Service() {
             .putString(MediaMetadata.METADATA_KEY_TITLE, title)
             .putString(MediaMetadata.METADATA_KEY_ARTIST, text)
             .build()
+
+    /// Send a platform-channel call into the cached Flutter engine (same
+    /// mechanism as NotificationActionReceiver). No-op if the engine is gone.
+    private fun invokeDart(method: String, args: Map<String, Any>) {
+        val engine = FlutterEngineCache.getInstance().get("teamspeak_engine") ?: return
+        try {
+            MethodChannel(engine.dartExecutor.binaryMessenger, "com.senlinjun.nek0/service")
+                .invokeMethod(method, args)
+        } catch (_: Exception) {}
+    }
 
     private fun stopMediaSession() {
         mediaSession?.let {

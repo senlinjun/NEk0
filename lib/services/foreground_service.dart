@@ -6,6 +6,7 @@ class ForegroundService {
   /// Callbacks invoked by notification action buttons (BroadcastReceiver →
   /// FlutterEngine → MethodChannel → here). Wired in ts_state.dart.
   static void Function(bool inputMuted)? onToggleMute;
+  static void Function(bool muted)? onSetFullMute;
   static VoidCallback? onNotificationDisconnect;
 
   static void init() {
@@ -15,6 +16,11 @@ class ForegroundService {
           final args = call.arguments as Map?;
           final inputMuted = (args?['input_muted'] as bool?) ?? false;
           onToggleMute?.call(inputMuted);
+          break;
+        case 'set_full_mute':
+          final args = call.arguments as Map?;
+          final muted = (args?['muted'] as bool?) ?? false;
+          onSetFullMute?.call(muted);
           break;
         case 'disconnect':
           onNotificationDisconnect?.call();

@@ -141,6 +141,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         toggleInputMute();
       }
     };
+    ForegroundService.onSetFullMute = setFullMute;
     ForegroundService.onNotificationDisconnect = () {
       disconnect();
     };
@@ -148,6 +149,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     ref.onDispose(() {
       _pollTimer?.cancel();
       ForegroundService.onToggleMute = null;
+      ForegroundService.onSetFullMute = null;
       ForegroundService.onNotificationDisconnect = null;
     });
     return const TsConnectionState();
@@ -489,6 +491,20 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     state = state.copyWith(inputMuted: newMuted);
     TsNative.setMuted(input: newMuted, output: state.outputMuted);
     _updateMicState();
+  }
+
+  /// Full mute: input + output muted and mic capture stopped. Idempotent —
+  /// safe to call repeatedly (e.g. from the media card play/pause buttons).
+  void setFullMute(bool muted) {
+    if (state.inputMuted == muted && state.outputMuted == muted) return;
+    state = state.copyWith(inputMuted: muted, outputMuted: muted);
+    TsNative.setMuted(input: muted, output: muted);
+    _updateMicState();
+    _refreshNotification();
+  }
+
+  void toggleFullMute() {
+    setFullMute(!(state.inputMuted && state.outputMuted));
   }
 
   void toggleOutputMute() {
