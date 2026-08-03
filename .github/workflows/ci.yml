@@ -44,8 +44,8 @@ jobs:
     - name: Flutter build
       if: startsWith(github.ref, 'refs/tags/')
       run: |
-        flutter build apk
-        flutter build apk --split-per-abi
+        flutter build apk --build-name="${GITHUB_REF_NAME#v}" --build-number="$GITHUB_RUN_NUMBER"
+        flutter build apk --split-per-abi --build-name="${GITHUB_REF_NAME#v}" --build-number="$GITHUB_RUN_NUMBER"
     - name: Rename apk
       if: startsWith(github.ref, 'refs/tags/')
       run: |

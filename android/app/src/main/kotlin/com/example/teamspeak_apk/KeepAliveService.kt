@@ -222,7 +222,9 @@ class KeepAliveService : Service() {
         val notification = buildNotification(this, title, text, inputMuted)
         // Attach the session token so the notification renders as media
         // controls and the system recognizes the active playback.
-        mediaSession?.let { notification.mediaSession = it.sessionToken }
+        // Note: use setMediaSession() — setMediaSession returns Notification,
+        // so Kotlin does not synthesize a "mediaSession" property.
+        mediaSession?.let { notification.setMediaSession(it.sessionToken) }
         val hasMic = intent?.getBooleanExtra("mic", false) ?: false
         // Keep the session "playing" and metadata in sync on every update.
         mediaSession?.let {
