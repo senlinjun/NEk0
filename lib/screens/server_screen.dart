@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/client.dart';
 import '../models/ts_state.dart';
+import '../services/foreground_service.dart';
 import '../widgets/channel_tree.dart';
 import '../widgets/client_list.dart';
 import '../widgets/chat_panel.dart';
@@ -129,12 +130,14 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
 
   /// First-connect-only dialog guiding the user to whitelist the app in
   /// OEM battery/auto-start settings (MIUI/HyperOS/EMUI/ColorOS/OriginOS).
+  /// The battery-optimization exemption is requested only AFTER the user
+  /// acknowledges the dialog, so they know why the settings page opens.
   Future<void> _maybeShowOemGuide() async {
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool('oem_guide_shown') ?? false) return;
     await prefs.setBool('oem_guide_shown', true);
     if (!mounted) return;
-    await showDialog(
+    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A2E),
@@ -145,19 +148,23 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         content: const Text(
           'To stay online in the background like a music player, allow NEk0 '
           'to run in the background in system settings:\n'
-          '\u2022 Battery \u2192 ignore battery optimizations (requested automatically)\n'
+          '\u2022 Battery \u2192 ignore battery optimizations (we will open it)\n'
           '\u2022 Auto-start: allow NEk0 to auto-start\n'
           '\u2022 Background power management: allow background running',
           style: TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
+            onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Got it'),
           ),
         ],
       ),
     );
+    if (ok == true && mounted) {
+      // User acknowledged the dialog — now open the battery optimization page.
+      ForegroundService.requestBatteryOptimizationExemption();
+    }
   }
 
   void _showClientVolume(int clientId) {

@@ -295,9 +295,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           mic: false,
           inputMuted: state.inputMuted,
         );
-        // Music-player-grade persistence: ask the system to exempt us from
-        // battery optimization so the background connection isn't killed.
-        ForegroundService.requestBatteryOptimizationExemption();
+        // Battery-optimization exemption is requested AFTER the first-connect
+        // OEM guide dialog (server_screen._maybeShowOemGuide), so the user
+        // knows why the system settings page opens.
         _saveIdentity();
 
         // Restore saved per-client volumes from SharedPreferences
