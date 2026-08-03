@@ -1,9 +1,13 @@
 package com.senlinjun.nek0
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
@@ -61,9 +65,31 @@ class MainActivity : FlutterActivity() {
                         KeepAliveService.update(this, title, text, mic, inputMuted)
                         result.success(true)
                     }
+                    "request_battery_optimization_exemption" -> {
+                        result.success(requestBatteryOptimizationExemption())
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /// Music players stay alive partly because they're exempt from battery
+    /// optimization. Ask the system for the same exemption on first connect.
+    private fun requestBatteryOptimizationExemption(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val pkg = packageName
+        if (pm.isIgnoringBatteryOptimizations(pkg)) return true
+        return try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$pkg")
+                )
+            )
+            false
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun startMic(): Boolean {

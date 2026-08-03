@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/client.dart';
 import '../models/ts_state.dart';
@@ -23,6 +24,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     ref.listen(tsConnectionProvider.select((s) => s.connected), (prev, next) {
       if (prev == true && !next && mounted) {
         Navigator.of(context).popUntil((route) => route.isFirst);
+      }
+      if (prev == false && next && mounted) {
+        _maybeShowOemGuide();
       }
     });
     // Pop on connect failure (connecting finished without success)
@@ -118,6 +122,39 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                 onClientTap: (clientId) => _showClientVolume(clientId),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  /// First-connect-only dialog guiding the user to whitelist the app in
+  /// OEM battery/auto-start settings (MIUI/HyperOS/EMUI/ColorOS/OriginOS).
+  Future<void> _maybeShowOemGuide() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('oem_guide_shown') ?? false) return;
+    await prefs.setBool('oem_guide_shown', true);
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: const Text(
+          'Background Keep-Alive',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'To stay online in the background like a music player, allow NEk0 '
+          'to run in the background in system settings:\n'
+          '\u2022 Battery \u2192 ignore battery optimizations (requested automatically)\n'
+          '\u2022 Auto-start: allow NEk0 to auto-start\n'
+          '\u2022 Background power management: allow background running',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Got it'),
+          ),
         ],
       ),
     );

@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.MediaMetadata
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -15,6 +18,7 @@ import android.os.PowerManager
 class KeepAliveService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var mediaSession: MediaSession? = null
 
     companion object {
         const val CHANNEL_ID = "teamspeak_keepalive"
@@ -103,6 +107,7 @@ class KeepAliveService : Service() {
                     .setSmallIcon(android.R.drawable.ic_dialog_info)
                     .setOngoing(true)
                     .setContentIntent(pendingIntent)
+                    .setStyle(Notification.MediaStyle().setShowActionsInCompactView(0))
                     .addAction(muteIcon, muteLabel, mutePending)
                     .addAction(R.drawable.ic_disconnect, "Disconnect", discPending)
                     .build()
@@ -129,6 +134,29 @@ class KeepAliveService : Service() {
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "teamspeak:keepalive").apply {
             acquire()
         }
+        // Register a media session in the playing state so the system treats
+        // this app as a real media app. Without it, Android 14+ (especially
+        // Android 15's 6h/24h mediaPlayback limit) stops the foreground
+        // service after a while in the background, killing the process.
+        mediaSession = MediaSession(this, "NEk0").apply {
+            setCallback(object : MediaSession.Callback() {
+                override fun onPlay() {
+                    // TeamSpeak is always "playing" while connected; ignore.
+                }
+
+                override fun onPause() {
+                    // Ignore pause — connection keeps running regardless.
+                }
+            })
+            setPlaybackState(
+                PlaybackState.Builder()
+                    .setState(PlaybackState.STATE_PLAYING, 0L, 1f)
+                    .setActions(PlaybackState.ACTION_PLAY_PAUSE)
+                    .build()
+            )
+            setMetadata(buildMetadata(lastTitle, lastText))
+            setActive(true)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -142,7 +170,27 @@ class KeepAliveService : Service() {
         }
     }
 
+    private fun buildMetadata(title: String, text: String): MediaMetadata =
+        MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, text)
+            .build()
+
+    private fun stopMediaSession() {
+        mediaSession?.let {
+            it.setPlaybackState(
+                PlaybackState.Builder()
+                    .setState(PlaybackState.STATE_NONE, 0L, 0f)
+                    .build()
+            )
+            it.setActive(false)
+            it.release()
+        }
+        mediaSession = null
+    }
+
     override fun onDestroy() {
+        stopMediaSession()
         wakeLock?.let {
             if (it.isHeld) it.release()
         }
@@ -152,6 +200,7 @@ class KeepAliveService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         try { tsDisconnect() } catch (_: Exception) {}
+        stopMediaSession()
         // Don't tear down immediately — the Rust event loop needs time
         // to process the disconnect before Android kills the process.
         // Release builds kill the process much faster than debug builds,
@@ -171,7 +220,21 @@ class KeepAliveService : Service() {
         val text = intent?.getStringExtra("text") ?: "Connected"
         val inputMuted = intent?.getBooleanExtra("input_muted", false) ?: false
         val notification = buildNotification(this, title, text, inputMuted)
+        // Attach the session token so the notification renders as media
+        // controls and the system recognizes the active playback.
+        mediaSession?.let { notification.mediaSession = it.sessionToken }
         val hasMic = intent?.getBooleanExtra("mic", false) ?: false
+        // Keep the session "playing" and metadata in sync on every update.
+        mediaSession?.let {
+            it.setMetadata(buildMetadata(title, text))
+            it.setPlaybackState(
+                PlaybackState.Builder()
+                    .setState(PlaybackState.STATE_PLAYING, 0L, 1f)
+                    .setActions(PlaybackState.ACTION_PLAY_PAUSE)
+                    .build()
+            )
+            it.setActive(true)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             if (hasMic) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE

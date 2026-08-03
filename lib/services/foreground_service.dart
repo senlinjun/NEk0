@@ -69,4 +69,18 @@ class ForegroundService {
       return false;
     }
   }
+
+  /// Ask the system to exempt the app from battery optimization
+  /// (same trick music players use to stay alive in the background).
+  /// Returns true if already exempt.
+  static Future<bool> requestBatteryOptimizationExemption() async {
+    try {
+      final result = await _channel.invokeMethod(
+        'request_battery_optimization_exemption',
+      );
+      return result == true;
+    } catch (e) {
+      return false;
+    }
+  }
 }
