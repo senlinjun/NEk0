@@ -46,6 +46,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     await showSpotlightTour(context, [
       TourStep(
         targetKey: _micKey,
+        padding: 4,
         title: 'Mic',
         description:
             'Tap to mute your mic. Long-press for voice settings '
@@ -53,6 +54,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       ),
       TourStep(
         targetKey: _headsetKey,
+        padding: 4,
         title: 'Headset',
         description:
             'Full mute: silences your mic and the audio of everyone '
@@ -60,11 +62,13 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       ),
       TourStep(
         targetKey: _speakerKey,
+        padding: 4,
         title: 'Speaker',
         description: "Mute everyone's audio (output).",
       ),
       TourStep(
         targetKey: _chatKey,
+        padding: 4,
         title: 'Chat',
         description: 'Tap the chat bar to send messages in your channel.',
       ),
