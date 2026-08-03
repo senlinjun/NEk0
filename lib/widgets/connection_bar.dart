@@ -4,12 +4,14 @@ class ConnectionBar extends StatelessWidget {
   final String serverName;
   final bool connected;
   final VoidCallback onDisconnect;
+  final VoidCallback? onShowGuide;
 
   const ConnectionBar({
     super.key,
     required this.serverName,
     required this.connected,
     required this.onDisconnect,
+    this.onShowGuide,
   });
 
   @override
@@ -37,6 +39,19 @@ class ConnectionBar extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          if (onShowGuide != null)
+            IconButton(
+              icon: const Icon(
+                Icons.help_outline,
+                color: Colors.white70,
+                size: 18,
+              ),
+              onPressed: onShowGuide,
+              tooltip: 'Guide',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
+          const SizedBox(width: 12),
           if (connected)
             IconButton(
               icon: const Icon(Icons.logout, color: Colors.red, size: 18),

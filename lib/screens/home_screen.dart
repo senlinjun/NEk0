@@ -1,16 +1,55 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/server.dart';
 import '../models/ts_state.dart';
 import '../widgets/server_form_dialog.dart';
+import '../widgets/spotlight_tour.dart';
 import 'server_screen.dart';
 
-class HomeScreen extends ConsumerWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  final GlobalKey _addServerKey = GlobalKey();
+  bool _guideChecked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoShowGuide());
+  }
+
+  /// Show the one-step "Add server" guide on first launch only.
+  Future<void> _maybeAutoShowGuide() async {
+    if (_guideChecked) return;
+    _guideChecked = true;
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool('tour_home_shown') ?? false) return;
+    await prefs.setBool('tour_home_shown', true);
+    if (!mounted) return;
+    await showSpotlightTour(context, [_homeStep()]);
+  }
+
+  Future<void> _showGuide() async {
+    await showSpotlightTour(context, [_homeStep()]);
+  }
+
+  TourStep _homeStep() => TourStep(
+    title: 'Add your server',
+    description:
+        'Tap + to add a TeamSpeak server, then tap it to '
+        'connect and start talking.',
+    targetKey: _addServerKey,
+  );
+
+  @override
+  Widget build(BuildContext context) {
     final serverState = ref.watch(serverListProvider);
 
     return Scaffold(
@@ -22,6 +61,12 @@ class HomeScreen extends ConsumerWidget {
         elevation: 0,
         actions: [
           IconButton(
+            icon: const Icon(Icons.help_outline, color: Colors.white70),
+            tooltip: 'Guide',
+            onPressed: _showGuide,
+          ),
+          IconButton(
+            key: _addServerKey,
             icon: const Icon(Icons.add),
             tooltip: 'Add Server',
             onPressed: () => _addOrEditServer(context, ref),
