@@ -63,3 +63,31 @@ jobs:
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_arm64-v8a.apk
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_universal.apk
+  
+    - name: Create Release
+      uses: nicennnnnnnlee/action-gitee-release@master
+      with:
+        gitee_action: create_release
+        gitee_owner: senlinjun
+        gitee_repo: Nek0
+        gitee_token: ${{ secrets.GITEE_TOKEN }}
+        gitee_tag_name: ${{ github.ref_name }}
+        gitee_release_name: ${{ github.ref_name }}
+        gitee_release_body: "Release ${{ github.ref_name }}"
+        gitee_target_commitish: main
+    - name: Release to Gitee
+          uses: nicennnnnnnlee/action-gitee-release@master
+          with:
+            gitee_action: upload_asset
+            gitee_owner: senlinjun
+            gitee_repo: Nek0
+            gitee_token: ${{ secrets.GITEE_TOKEN }}
+            gitee_tag_name: ${{ github.ref_name }}
+            gitee_upload_retry_times: 3
+            gitee_files: |
+              build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_armeabi-v7a.apk
+              build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_arm64-v8a.apk
+              build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
+              build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_universal.apk
+
+# ee45bc0ae937078d6bc13ea70a49b28b
