@@ -24,6 +24,11 @@
 - **Server bookmarks** — save and manage server addresses locally
 - **First-use guide** — interactive spotlight coach marks on the real UI
   (re-viewable from the help icons)
+- **Voice settings** — VAD / PTT / mic gain / threshold tuning from the settings
+  screen or by long-pressing the mic button, with a live mic level + mic test
+- **OTA updates** — checks GitHub/Gitee releases (tag format `vx.y.z`) on launch,
+  downloads the ABI-matched APK and installs it; check can be disabled and the
+  source chosen in settings
 
 ## Architecture
 
@@ -104,6 +109,8 @@ adb shell dumpsys activity services com.senlinjun.nek0  # Foreground service sta
 | `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK` / `FOREGROUND_SERVICE_MICROPHONE` | Background keep-alive service |
 | `POST_NOTIFICATIONS` | Service notification (Android 13+) |
 | `WAKE_LOCK` | Keep the CPU awake for audio while connected |
+| `REQUEST_INSTALL_PACKAGES` | OTA update APK installation |
+| `WRITE_EXTERNAL_STORAGE` | OTA download (API <= 28) |
 
 ## Project Structure
 
@@ -114,12 +121,13 @@ Nek0/
 │   ├── kotlin/.../MainActivity.kt  # Mic capture (AudioRecord), platform channels
 │   ├── kotlin/.../KeepAliveService.kt      # Foreground service + MediaSession
 │   ├── kotlin/.../NotificationActionReceiver.kt  # Notification button actions
+│   ├── res/xml/filepaths.xml       # OTA update file provider paths
 │   └── AndroidManifest.xml
 ├── lib/                            # Flutter
 │   ├── models/                     # Data models + Riverpod state
-│   ├── screens/                    # Screens
-│   ├── services/                   # FFI bindings + audio + foreground service
-│   └── widgets/                    # UI components
+│   ├── screens/                    # Home / server / settings screens
+│   ├── services/                   # FFI bindings, audio, foreground service, OTA
+│   └── widgets/                    # UI components (spotlight tour, voice panel, ...)
 ├── native/                         # Rust
 │   ├── Cargo.toml                  # Patches tsclientlib/tsproto → local_tsclientlib/
 │   ├── local_tsclientlib/          # Vendored tsclientlib/tsproto sources

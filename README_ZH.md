@@ -22,6 +22,10 @@
 - **频道聊天** — 在频道内收发文字消息
 - **服务器书签** — 本地保存和管理服务器地址
 - **初次使用引导** — 在真实界面上聚光高亮讲解主要功能（可通过帮助图标随时重看）
+- **语音设置** — 设置页或长按麦克风按钮可调 VAD / PTT / 麦克风增益 / 阈值，
+  带实时麦克风电平与麦克风测试
+- **OTA 更新** — 启动时自动检查 GitHub/Gitee 的 release（版本号格式 `vx.y.z`），
+  按设备 ABI 下载对应 APK 并安装；可在设置中关闭检查或切换更新源
 
 ## 架构
 
@@ -102,6 +106,8 @@ adb shell dumpsys activity services com.senlinjun.nek0  # 前台服务状态
 | `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK` / `FOREGROUND_SERVICE_MICROPHONE` | 后台保活服务 |
 | `POST_NOTIFICATIONS` | 服务通知（Android 13+） |
 | `WAKE_LOCK` | 连接期间保持 CPU 唤醒以处理音频 |
+| `REQUEST_INSTALL_PACKAGES` | OTA 更新安装 APK |
+| `WRITE_EXTERNAL_STORAGE` | OTA 下载（API <= 28） |
 
 ## 项目结构
 
@@ -112,12 +118,13 @@ Nek0/
 │   ├── kotlin/.../MainActivity.kt  # 麦克风采集 (AudioRecord)、平台通道
 │   ├── kotlin/.../KeepAliveService.kt      # 前台服务 + MediaSession
 │   ├── kotlin/.../NotificationActionReceiver.kt  # 通知栏按钮动作
+│   ├── res/xml/filepaths.xml       # OTA 更新的 FileProvider 路径
 │   └── AndroidManifest.xml
 ├── lib/                            # Flutter
 │   ├── models/                     # 数据模型 + Riverpod 状态
-│   ├── screens/                    # 页面
-│   ├── services/                   # FFI 绑定 + 音频 + 前台服务
-│   └── widgets/                    # UI 组件
+│   ├── screens/                    # 首页 / 服务器 / 设置页
+│   ├── services/                   # FFI 绑定、音频、前台服务、OTA
+│   └── widgets/                    # UI 组件（聚光引导、语音面板等）
 ├── native/                         # Rust
 │   ├── Cargo.toml                  # 将 tsclientlib/tsproto patch 到 local_tsclientlib/
 │   ├── local_tsclientlib/          # 内置的 tsclientlib/tsproto 源码
