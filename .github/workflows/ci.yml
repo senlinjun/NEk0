@@ -74,7 +74,7 @@ jobs:
         gitee_tag_name: ${{ github.ref_name }}
         gitee_release_name: ${{ github.ref_name }}
         gitee_release_body: "Release ${{ github.ref_name }}"
-        gitee_target_commitish: main
+        gitee_target_commitish: master
     - name: Release to Gitee
       if: startsWith(github.ref, 'refs/tags/')
       uses: nicennnnnnnlee/action-gitee-release@master
