@@ -4,9 +4,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/server.dart';
 import '../models/ts_state.dart';
+import '../services/ota_service.dart';
 import '../widgets/server_form_dialog.dart';
 import '../widgets/spotlight_tour.dart';
 import 'server_screen.dart';
+import 'settings_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -18,11 +20,15 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final GlobalKey _addServerKey = GlobalKey();
   bool _guideChecked = false;
+  bool _otaChecked = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoShowGuide());
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _maybeAutoCheckUpdate(),
+    );
   }
 
   /// Show the one-step "Add server" guide on first launch only.
@@ -36,8 +42,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     await showSpotlightTour(context, [_homeStep()]);
   }
 
+  /// Silent OTA check on launch (once per session, only if enabled).
+  Future<void> _maybeAutoCheckUpdate() async {
+    if (_otaChecked) return;
+    _otaChecked = true;
+    final settings = OtaSettings();
+    await settings.load();
+    if (!settings.enabled || !mounted) return;
+    final info = await OtaService.checkForUpdate(settings.source);
+    if (info == null || !mounted) return;
+    await showUpdateDialog(context, info);
+  }
+
   Future<void> _showGuide() async {
     await showSpotlightTour(context, [_homeStep()]);
+  }
+
+  void _openSettings() {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
   }
 
   TourStep _homeStep() => TourStep(
@@ -60,6 +84,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.settings_outlined, color: Colors.white70),
+            tooltip: 'Settings',
+            onPressed: _openSettings,
+          ),
           IconButton(
             icon: const Icon(Icons.help_outline, color: Colors.white70),
             tooltip: 'Guide',
