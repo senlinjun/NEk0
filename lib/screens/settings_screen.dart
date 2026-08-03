@@ -97,12 +97,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final notifier = ref.read(tsConnectionProvider.notifier);
     final connected = conn.connected;
 
-    // Level shown next to the mic test button: live state when connected,
-    // otherwise the local test capture.
-    final level = _micTest
-        ? _testRms
-        : (connected && !conn.inputMuted ? conn.micRms : 0.0);
-
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F23),
       appBar: AppBar(
@@ -126,11 +120,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   conn: conn,
                   notifier: notifier,
                   showTitle: false,
+                  // Draw the mic test level onto the threshold slider, just
+                  // like the server screen's long-press-mic sheet.
+                  levelOverride: _micTest ? _testRms : null,
                 ),
               ),
             ),
             const SizedBox(height: 12),
-            // Mic level + test capture
+            // Mic test capture control (level is drawn on the threshold
+            // slider in the VoiceSettingsPanel above, like the server screen)
             Card(
               color: const Color(0xFF1A1A2E),
               margin: EdgeInsets.zero,
@@ -142,7 +140,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     Row(
                       children: [
                         const Text(
-                          'Mic Level',
+                          'Mic Test',
                           style: TextStyle(color: Colors.grey, fontSize: 12),
                         ),
                         const Spacer(),
@@ -162,16 +160,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           ),
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 10),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value: level.clamp(0.0, 1.0),
-                        backgroundColor: Colors.grey[800],
-                        color: Colors.blue,
-                        minHeight: 6,
-                      ),
                     ),
                     if (connected) ...[
                       const SizedBox(height: 8),

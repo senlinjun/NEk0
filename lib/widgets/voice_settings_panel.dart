@@ -11,11 +11,16 @@ class VoiceSettingsPanel extends StatefulWidget {
     required this.conn,
     required this.notifier,
     this.showTitle = true,
+    this.levelOverride,
   });
 
   final TsConnectionState conn;
   final TsConnectionNotifier notifier;
   final bool showTitle;
+
+  /// External mic level (e.g. from the settings mic test). When null the
+  /// panel falls back to the live [conn.micRms].
+  final double? levelOverride;
 
   @override
   State<VoiceSettingsPanel> createState() => _VoiceSettingsPanelState();
@@ -100,7 +105,7 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
           builder: (_) {
             final s = widget.conn;
             final micActive = !s.inputMuted && (!s.pttMode || s.pttPressed);
-            final rms = micActive ? s.micRms : 0.0;
+            final rms = widget.levelOverride ?? (micActive ? s.micRms : 0.0);
             final fill = rms.clamp(0.0, 1.0);
             final over = rms >= _vadThreshold && _vadThreshold > 0.0;
             return Row(
