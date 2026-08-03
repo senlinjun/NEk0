@@ -15,6 +15,8 @@
 ## 功能
 
 - **语音通话** — 实时 OpusVoice（48kHz 单声道），支持 VAD 和 PTT
+- **后台保活** — 像音乐播放器一样在后台保持在线，依托前台服务 + 媒体会话，
+  通知栏提供静音/断开按钮
 - **独立音量控制** — 本地调节每位用户的音量，基于身份跨会话记忆
 - **频道聊天** — 在频道内收发文字消息
 - **服务器书签** — 本地保存和管理服务器地址
@@ -24,9 +26,10 @@
 | 层 | 技术栈 |
 |---|---|
 | UI | Flutter (Dart) + Riverpod |
-| 音频 I/O | Rust (`opus-rs`) + Kotlin (`AudioRecord`) |
-| 协议 | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib)) |
-| 播放 | `flutter_pcm_sound` → Android `AudioTrack` |
+| 协议与编解码 | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib), `opus-rs`) |
+| 播放 | Rust（`cpal` — 持续输出流，空闲时输出静音） |
+| 麦克风采集 | Kotlin（`AudioRecord`）→ EventChannel → Dart → FFI → Rust |
+| 后台保活 | `KeepAliveService`（前台服务 + `MediaSession`） |
 
 ```
 Flutter (Dart)                  Rust (Native .so)
@@ -37,7 +40,9 @@ lib/models/ts_state.dart         (tsclientlib + opus-rs + tokio)
 
 Kotlin (Android)
 ────────────────
-MainActivity.kt  ←EventChannel→  audio_service.dart  (AudioRecord 采集麦克风)
+MainActivity.kt         ←EventChannel→  audio_service.dart   (AudioRecord 采集麦克风)
+KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (前台服务
+                         + MediaSession + 通知栏按钮)
 ```
 
 ## 环境要求
@@ -51,44 +56,39 @@ MainActivity.kt  ←EventChannel→  audio_service.dart  (AudioRecord 采集麦�
 
 ## 构建与运行
 
+一键方式 — 同时构建两种 ABI 并复制 `.so` 文件：
+
 ```bash
 # 1. 安装 Rust Android 编译目标
 rustup target add aarch64-linux-android x86_64-linux-android
 
-# 2. 配置 NDK 链接器（编辑 native/.cargo/config.toml，见下方）
+# 2. 构建原生库（需将 ANDROID_NDK_HOME 指向已安装的 NDK）
+python3 pre_build.py
 
-# 3. 构建原生库
+# 3. 运行
+flutter run
+```
+
+手动方式（同样的结果，分步执行）：
+
+```bash
 cd native
 cargo build --release --target aarch64-linux-android
 cargo build --release --target x86_64-linux-android
-
-# 4. 复制 .so 文件
 cp target/aarch64-linux-android/release/libtsclient.so ../android/app/src/main/jniLibs/arm64-v8a/
 cp target/x86_64-linux-android/release/libtsclient.so ../android/app/src/main/jniLibs/x86_64/
-
-# 5. 运行
-cd .. && flutter run
 ```
 
-<details>
-<summary>native/.cargo/config.toml</summary>
-
-```toml
-[target.aarch64-linux-android]
-linker = "<ndk>/toolchains/llvm/prebuilt/<host>/bin/aarch64-linux-android21-clang"
-
-[target.x86_64-linux-android]
-linker = "<ndk>/toolchains/llvm/prebuilt/<host>/bin/x86_64-linux-android21-clang"
-```
-
-</details>
+`libtsclient.so` 已被 gitignore —— 必须先构建并复制后应用才能运行。
 
 ## 调试
 
 ```bash
 adb logcat | grep flutter          # Flutter 日志
 adb logcat | grep RustStdouterr    # Rust 日志
-adb logcat | grep -E "opus|audio"  # 音频日志
+adb logcat | grep -E "cpal|opus"   # 音频日志
+adb shell dumpsys media_session    # 媒体会话状态（后台保活）
+adb shell dumpsys activity services com.senlinjun.nek0  # 前台服务状态
 ```
 
 ## 权限
@@ -97,31 +97,43 @@ adb logcat | grep -E "opus|audio"  # 音频日志
 |------|------|
 | `INTERNET` | 连接 TeamSpeak 服务器 |
 | `RECORD_AUDIO` | 麦克风采集（运行时申请） |
+| `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK` / `FOREGROUND_SERVICE_MICROPHONE` | 后台保活服务 |
+| `POST_NOTIFICATIONS` | 服务通知（Android 13+） |
+| `WAKE_LOCK` | 连接期间保持 CPU 唤醒以处理音频 |
 
 ## 项目结构
 
 ```
-teamspeak_apk/
+Nek0/
 ├── android/app/src/main/
-│   ├── jniLibs/                    # 预编译 .so 文件
-│   ├── kotlin/.../MainActivity.kt  # 麦克风采集 (AudioRecord)
+│   ├── jniLibs/                    # 预编译 .so（gitignore，由 pre_build.py 构建）
+│   ├── kotlin/.../MainActivity.kt  # 麦克风采集 (AudioRecord)、平台通道
+│   ├── kotlin/.../KeepAliveService.kt      # 前台服务 + MediaSession
+│   ├── kotlin/.../NotificationActionReceiver.kt  # 通知栏按钮动作
 │   └── AndroidManifest.xml
 ├── lib/                            # Flutter
-│   ├── models/                     # 数据模型
+│   ├── models/                     # 数据模型 + Riverpod 状态
 │   ├── screens/                    # 页面
-│   ├── services/                   # FFI 绑定 + 音频服务
+│   ├── services/                   # FFI 绑定 + 音频 + 前台服务
 │   └── widgets/                    # UI 组件
 ├── native/                         # Rust
-│   ├── Cargo.toml
+│   ├── Cargo.toml                  # 将 tsclientlib/tsproto patch 到 local_tsclientlib/
+│   ├── local_tsclientlib/          # 内置的 tsclientlib/tsproto 源码
 │   └── src/
 │       ├── lib.rs                  # 状态、类型、命令队列
 │       └── api.rs                  # FFI 函数、事件循环、音频编解码
 ├── resource/
 │   └── logo.png
+├── AGENTS.md                       # 面向 AI 代理的架构与构建指南
 ├── README.md
 ├── README_ZH.md
+├── CONTRIBUTING.md
 └── pubspec.yaml
 ```
+
+## 参与贡献
+
+参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

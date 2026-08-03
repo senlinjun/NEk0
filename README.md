@@ -15,6 +15,8 @@
 ## Features
 
 - **Voice chat** — real-time OpusVoice (48kHz mono) with VAD and PTT
+- **Background keep-alive** — stays connected in the background like a music player,
+  backed by a foreground service + media session with mute/disconnect notification controls
 - **Per-client volume** — adjust each user's volume locally, remembered by identity across sessions
 - **Channel chat** — send and receive text messages in channels
 - **Server bookmarks** — save and manage server addresses locally
@@ -24,9 +26,10 @@
 | Layer | Stack |
 |---|---|
 | UI | Flutter (Dart) + Riverpod |
-| Audio I/O | Rust (`opus-rs`) + Kotlin (`AudioRecord`) |
-| Protocol | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib)) |
-| Playback | `flutter_pcm_sound` → Android `AudioTrack` |
+| Protocol & codec | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib), `opus-rs`) |
+| Playback | Rust (`cpal` — continuous output stream, silence when idle) |
+| Mic capture | Kotlin (`AudioRecord`) → EventChannel → Dart → FFI → Rust |
+| Background persistence | `KeepAliveService` (foreground service + `MediaSession`) |
 
 ```
 Flutter (Dart)                  Rust (Native .so)
@@ -37,7 +40,9 @@ lib/models/ts_state.dart         (tsclientlib + opus-rs + tokio)
 
 Kotlin (Android)
 ────────────────
-MainActivity.kt  ←EventChannel→  audio_service.dart  (mic via AudioRecord)
+MainActivity.kt         ←EventChannel→  audio_service.dart   (mic via AudioRecord)
+KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (foreground service
+                         + MediaSession + notification controls)
 ```
 
 ## Prerequisites
@@ -51,44 +56,39 @@ MainActivity.kt  ←EventChannel→  audio_service.dart  (mic via AudioRecord)
 
 ## Build & Run
 
+Quick way — builds both ABIs and copies the `.so` files in one step:
+
 ```bash
 # 1. Install Rust Android targets
 rustup target add aarch64-linux-android x86_64-linux-android
 
-# 2. Configure NDK linker (edit native/.cargo/config.toml, see below)
+# 2. Build the native library (requires ANDROID_NDK_HOME pointing at an installed NDK)
+python3 pre_build.py
 
-# 3. Build native library
+# 3. Run
+flutter run
+```
+
+Manual alternative (same result, step by step):
+
+```bash
 cd native
 cargo build --release --target aarch64-linux-android
 cargo build --release --target x86_64-linux-android
-
-# 4. Copy .so files
 cp target/aarch64-linux-android/release/libtsclient.so ../android/app/src/main/jniLibs/arm64-v8a/
 cp target/x86_64-linux-android/release/libtsclient.so ../android/app/src/main/jniLibs/x86_64/
-
-# 5. Run
-cd .. && flutter run
 ```
 
-<details>
-<summary>native/.cargo/config.toml</summary>
-
-```toml
-[target.aarch64-linux-android]
-linker = "<ndk>/toolchains/llvm/prebuilt/<host>/bin/aarch64-linux-android21-clang"
-
-[target.x86_64-linux-android]
-linker = "<ndk>/toolchains/llvm/prebuilt/<host>/bin/x86_64-linux-android21-clang"
-```
-
-</details>
+`libtsclient.so` is gitignored — the app runs only after it has been built and copied.
 
 ## Debug
 
 ```bash
 adb logcat | grep flutter          # Flutter logs
 adb logcat | grep RustStdouterr    # Rust logs
-adb logcat | grep -E "opus|audio"  # Audio logs
+adb logcat | grep -E "cpal|opus"   # Audio logs
+adb shell dumpsys media_session    # Media session active/playing (keep-alive)
+adb shell dumpsys activity services com.senlinjun.nek0  # Foreground service state
 ```
 
 ## Permissions
@@ -97,31 +97,43 @@ adb logcat | grep -E "opus|audio"  # Audio logs
 |------------|---------|
 | `INTERNET` | Connect to TeamSpeak servers |
 | `RECORD_AUDIO` | Microphone capture (requested at runtime) |
+| `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK` / `FOREGROUND_SERVICE_MICROPHONE` | Background keep-alive service |
+| `POST_NOTIFICATIONS` | Service notification (Android 13+) |
+| `WAKE_LOCK` | Keep the CPU awake for audio while connected |
 
 ## Project Structure
 
 ```
-teamspeak_apk/
+Nek0/
 ├── android/app/src/main/
-│   ├── jniLibs/                    # Pre-built .so files
-│   ├── kotlin/.../MainActivity.kt  # Mic capture (AudioRecord)
+│   ├── jniLibs/                    # Pre-built .so files (gitignored, built by pre_build.py)
+│   ├── kotlin/.../MainActivity.kt  # Mic capture (AudioRecord), platform channels
+│   ├── kotlin/.../KeepAliveService.kt      # Foreground service + MediaSession
+│   ├── kotlin/.../NotificationActionReceiver.kt  # Notification button actions
 │   └── AndroidManifest.xml
 ├── lib/                            # Flutter
-│   ├── models/                     # Data models
+│   ├── models/                     # Data models + Riverpod state
 │   ├── screens/                    # Screens
-│   ├── services/                   # FFI bindings + audio service
+│   ├── services/                   # FFI bindings + audio + foreground service
 │   └── widgets/                    # UI components
 ├── native/                         # Rust
-│   ├── Cargo.toml
+│   ├── Cargo.toml                  # Patches tsclientlib/tsproto → local_tsclientlib/
+│   ├── local_tsclientlib/          # Vendored tsclientlib/tsproto sources
 │   └── src/
 │       ├── lib.rs                  # State, types, command queue
 │       └── api.rs                  # FFI functions, event loop, audio codec
 ├── resource/
 │   └── logo.png
+├── AGENTS.md                       # Architecture & build guide for AI agents
 ├── README.md
 ├── README_ZH.md
+├── CONTRIBUTING.md
 └── pubspec.yaml
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

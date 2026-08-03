@@ -74,7 +74,13 @@ class KeepAliveService : Service() {
         }
 
         @JvmStatic
-        fun buildNotification(context: Context, title: String, text: String, inputMuted: Boolean = false): Notification {
+        fun buildNotification(
+            context: Context,
+            title: String,
+            text: String,
+            inputMuted: Boolean = false,
+            sessionToken: MediaSession.Token? = null
+        ): Notification {
             val launchIntent = context.packageManager
                 .getLaunchIntentForPackage(context.packageName)
             val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -100,6 +106,13 @@ class KeepAliveService : Service() {
             val muteIcon = if (inputMuted) R.drawable.ic_mic_off else R.drawable.ic_mic
             val muteLabel = if (inputMuted) "Unmute" else "Mute"
 
+            val mediaStyle = Notification.MediaStyle().setShowActionsInCompactView(0)
+            // Attach the media session token so the notification renders as media
+            // controls and the system recognizes the active playback. Note:
+            // Notification has no setMediaSession() — the token only attaches
+            // via MediaStyle.setMediaSession() on the Builder.
+            if (sessionToken != null) mediaStyle.setMediaSession(sessionToken)
+
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(context, CHANNEL_ID)
                     .setContentTitle(title)
@@ -107,7 +120,7 @@ class KeepAliveService : Service() {
                     .setSmallIcon(android.R.drawable.ic_dialog_info)
                     .setOngoing(true)
                     .setContentIntent(pendingIntent)
-                    .setStyle(Notification.MediaStyle().setShowActionsInCompactView(0))
+                    .setStyle(mediaStyle)
                     .addAction(muteIcon, muteLabel, mutePending)
                     .addAction(R.drawable.ic_disconnect, "Disconnect", discPending)
                     .build()
@@ -219,12 +232,7 @@ class KeepAliveService : Service() {
         val title = intent?.getStringExtra("title") ?: "TeamSpeak"
         val text = intent?.getStringExtra("text") ?: "Connected"
         val inputMuted = intent?.getBooleanExtra("input_muted", false) ?: false
-        val notification = buildNotification(this, title, text, inputMuted)
-        // Attach the session token so the notification renders as media
-        // controls and the system recognizes the active playback.
-        // Note: use setMediaSession() — setMediaSession returns Notification,
-        // so Kotlin does not synthesize a "mediaSession" property.
-        mediaSession?.let { notification.setMediaSession(it.sessionToken) }
+        val notification = buildNotification(this, title, text, inputMuted, mediaSession?.sessionToken)
         val hasMic = intent?.getBooleanExtra("mic", false) ?: false
         // Keep the session "playing" and metadata in sync on every update.
         mediaSession?.let {

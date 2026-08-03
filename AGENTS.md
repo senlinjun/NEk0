@@ -51,8 +51,9 @@ A missing `libtsclient.so` does NOT fail the Gradle build — it crashes at runt
   without an active media session). Changes here must keep that design intact.
 - **Swipe-away disconnect is intentional**: `onTaskRemoved` calls `tsDisconnect()` and
   tears down the service — do not change it.
-- Kotlin gotcha: `Notification.setMediaSession()` returns `Notification` (fluent API), so
-  no synthetic `notification.mediaSession` property exists — call `setMediaSession(...)`.
+- Kotlin gotcha: `android.app.Notification` has NO `setMediaSession()`/`mediaSession` member
+  (verified via javap on the SDK jar). The session token attaches only through
+  `Notification.MediaStyle().setMediaSession(token)` on the Builder (`buildNotification`).
 - Kotlin sources live under `kotlin/com/example/teamspeak_apk/` but declare
   `package com.senlinjun.nek0` (the applicationId). Keep the package, not the directory.
 
