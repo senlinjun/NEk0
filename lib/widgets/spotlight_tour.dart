@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../l10n/generated/app_localizations.dart';
+
 /// One step of the spotlight guide: highlights the widget bound to
 /// [targetKey] with a cutout in the scrim and shows a tooltip bubble.
 class TourStep {
@@ -210,7 +212,10 @@ class _SpotlightTourState extends State<_SpotlightTour>
               const Spacer(),
               TextButton(
                 onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Skip', style: TextStyle(color: Colors.grey)),
+                child: Text(
+                  AppLocalizations.of(context).skip,
+                  style: const TextStyle(color: Colors.grey),
+                ),
               ),
               const SizedBox(width: 8),
               FilledButton(
@@ -220,7 +225,9 @@ class _SpotlightTourState extends State<_SpotlightTour>
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                 ),
                 child: Text(
-                  _index == widget.steps.length - 1 ? 'Done' : 'Next',
+                  _index == widget.steps.length - 1
+                      ? AppLocalizations.of(context).done
+                      : AppLocalizations.of(context).next,
                 ),
               ),
             ],

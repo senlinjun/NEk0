@@ -50,7 +50,13 @@ class MainActivity : FlutterActivity() {
                         val text = call.argument<String>("text") ?: "Connected"
                         val mic = call.argument<Boolean>("mic") ?: false
                         val inputMuted = call.argument<Boolean>("input_muted") ?: false
-                        KeepAliveService.start(this, title, text, mic, inputMuted)
+                        val muteLabel = call.argument<String>("mute_label") ?: "Mute"
+                        val unmuteLabel = call.argument<String>("unmute_label") ?: "Unmute"
+                        val disconnectLabel = call.argument<String>("disconnect_label") ?: "Disconnect"
+                        KeepAliveService.start(
+                            this, title, text, mic, inputMuted,
+                            muteLabel, unmuteLabel, disconnectLabel,
+                        )
                         result.success(true)
                     }
                     "stop" -> {
@@ -62,7 +68,13 @@ class MainActivity : FlutterActivity() {
                         val text = call.argument<String>("text") ?: "Connected"
                         val mic = call.argument<Boolean>("mic") ?: false
                         val inputMuted = call.argument<Boolean>("input_muted") ?: false
-                        KeepAliveService.update(this, title, text, mic, inputMuted)
+                        val muteLabel = call.argument<String>("mute_label") ?: "Mute"
+                        val unmuteLabel = call.argument<String>("unmute_label") ?: "Unmute"
+                        val disconnectLabel = call.argument<String>("disconnect_label") ?: "Disconnect"
+                        KeepAliveService.update(
+                            this, title, text, mic, inputMuted,
+                            muteLabel, unmuteLabel, disconnectLabel,
+                        )
                         result.success(true)
                     }
                     "request_battery_optimization_exemption" -> {

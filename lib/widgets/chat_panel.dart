@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../l10n/generated/app_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/ts_state.dart';
@@ -57,10 +59,10 @@ class _ChatPanelState extends ConsumerState<ChatPanel> {
       children: [
         Expanded(
           child: messages.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text(
-                    'No messages yet',
-                    style: TextStyle(color: Colors.grey),
+                    AppLocalizations.of(context).noMessagesYet,
+                    style: const TextStyle(color: Colors.grey),
                   ),
                 )
               : ListView.builder(
@@ -110,9 +112,9 @@ class _ChatPanelState extends ConsumerState<ChatPanel> {
                 child: TextField(
                   controller: _controller,
                   style: const TextStyle(color: Colors.white, fontSize: 14),
-                  decoration: const InputDecoration(
-                    hintText: 'Send a message...',
-                    hintStyle: TextStyle(color: Colors.grey),
+                  decoration: InputDecoration(
+                    hintText: AppLocalizations.of(context).sendMessageHint,
+                    hintStyle: const TextStyle(color: Colors.grey),
                     border: InputBorder.none,
                     isDense: true,
                     contentPadding: EdgeInsets.symmetric(

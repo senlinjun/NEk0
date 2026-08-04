@@ -62,3 +62,8 @@ A missing `libtsclient.so` does NOT fail the Gradle build — it crashes at runt
 - No Dart/Rust tests exist in this repo; verification is `dart format` + `flutter analyze`
   (+ `cargo check` for Rust changes).
 - Keep all code and comments in English.
+- i18n: all UI strings go through `AppLocalizations` (gen-l10n). After editing
+  `lib/l10n/*.arb`, run `flutter gen-l10n` — generated files in `lib/l10n/generated/`
+  ARE committed (CI's `dart format`/`analyze` depend on them). Notification-button
+  labels are localized in Dart and passed to `KeepAliveService` via the service
+  channel (`mute_label`/`unmute_label`/`disconnect_label`).

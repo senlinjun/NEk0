@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../l10n/generated/app_localizations.dart';
+import '../models/app_locale.dart';
 import '../models/ts_state.dart';
 import '../services/audio_service.dart';
 import '../services/ota_service.dart';
@@ -14,8 +17,11 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  static const _languageOptions = ['system', 'en', 'zh'];
+
   final OtaSettings _ota = OtaSettings();
   bool _otaLoaded = false;
+  String _languageCode = 'system';
 
   AudioService? _testAudio;
   bool _micTest = false;
@@ -27,6 +33,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _ota.load().then((_) {
       if (mounted) setState(() => _otaLoaded = true);
     });
+    _loadLanguage();
+  }
+
+  Future<void> _loadLanguage() async {
+    final prefs = await SharedPreferences.getInstance();
+    final code = prefs.getString('locale') ?? 'system';
+    if (mounted) setState(() => _languageCode = code);
+  }
+
+  String _languageLabel(BuildContext context, String code) {
+    final al = AppLocalizations.of(context);
+    return switch (code) {
+      'en' => al.languageEnglish,
+      'zh' => al.languageChinese,
+      _ => al.languageSystem,
+    };
   }
 
   @override
@@ -58,7 +80,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       a.stop();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Microphone permission denied')),
+          SnackBar(
+            content: Text(AppLocalizations.of(context).micPermissionDenied),
+          ),
         );
       }
       return;
@@ -75,16 +99,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final source = _ota.source;
     final messenger = ScaffoldMessenger.of(context);
     messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Checking for updates…'),
-        duration: Duration(seconds: 2),
+      SnackBar(
+        content: Text(AppLocalizations.of(context).checkingForUpdates),
+        duration: const Duration(seconds: 2),
       ),
     );
     final info = await OtaService.checkForUpdate(source);
     if (!mounted) return;
     if (info == null) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('No update available')),
+        SnackBar(content: Text(AppLocalizations.of(context).noUpdateAvailable)),
       );
     } else {
       await showUpdateDialog(context, info);
@@ -100,7 +124,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F23),
       appBar: AppBar(
-        title: const Text('Settings'),
+        title: Text(AppLocalizations.of(context).settingsTitle),
         backgroundColor: const Color(0xFF16213E),
         foregroundColor: Colors.white,
         elevation: 0,
@@ -109,7 +133,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            const _SectionHeader('Voice'),
+            _SectionHeader(AppLocalizations.of(context).voice),
             const SizedBox(height: 8),
             Card(
               color: const Color(0xFF1A1A2E),
@@ -139,9 +163,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   children: [
                     Row(
                       children: [
-                        const Text(
-                          'Mic Test',
-                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        Text(
+                          AppLocalizations.of(context).micTest,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
                         ),
                         const Spacer(),
                         FilledButton.tonalIcon(
@@ -151,7 +178,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             size: 18,
                           ),
                           label: Text(
-                            _micTest ? 'Stop test' : 'Start mic test',
+                            _micTest
+                                ? AppLocalizations.of(context).stopMicTest
+                                : AppLocalizations.of(context).startMicTest,
                           ),
                           style: FilledButton.styleFrom(
                             backgroundColor: const Color(0xFF2A2A4A),
@@ -163,9 +192,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                     if (connected) ...[
                       const SizedBox(height: 8),
-                      const Text(
-                        'Mic is in use while connected — test is disabled.',
-                        style: TextStyle(color: Colors.grey, fontSize: 11),
+                      Text(
+                        AppLocalizations.of(context).micInUseWhileConnected,
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 11,
+                        ),
                       ),
                     ],
                   ],
@@ -173,7 +205,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
             const SizedBox(height: 24),
-            const _SectionHeader('Update'),
+            _SectionHeader(AppLocalizations.of(context).language),
+            const SizedBox(height: 8),
+            Card(
+              color: const Color(0xFF1A1A2E),
+              margin: EdgeInsets.zero,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: RadioGroup<String>(
+                  groupValue: _languageCode,
+                  onChanged: (code) {
+                    if (code == null) return;
+                    setState(() => _languageCode = code);
+                    ref.read(localeProvider.notifier).setLanguage(code);
+                  },
+                  child: Column(
+                    children: [
+                      for (final code in _languageOptions)
+                        RadioListTile<String>(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          activeColor: Colors.blue,
+                          title: Text(
+                            _languageLabel(context, code),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                            ),
+                          ),
+                          value: code,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            _SectionHeader(AppLocalizations.of(context).updateSection),
             const SizedBox(height: 8),
             Card(
               color: const Color(0xFF1A1A2E),
@@ -185,9 +253,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text(
-                          'Check for updates',
-                          style: TextStyle(color: Colors.white, fontSize: 14),
+                        Text(
+                          AppLocalizations.of(context).checkForUpdates,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                          ),
                         ),
                         Switch(
                           value: _ota.enabled,
@@ -200,11 +271,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       ],
                     ),
                     const Divider(height: 20, color: Color(0xFF2A2A4A)),
-                    const Align(
+                    Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Update source',
-                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                        AppLocalizations.of(context).updateSource,
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
                       ),
                     ),
                     RadioGroup<OtaSource>(
@@ -239,7 +313,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       child: FilledButton.icon(
                         onPressed: _otaLoaded ? _checkNow : null,
                         icon: const Icon(Icons.system_update_alt, size: 18),
-                        label: const Text('Check now'),
+                        label: Text(AppLocalizations.of(context).checkNow),
                         style: FilledButton.styleFrom(
                           backgroundColor: Colors.blue,
                         ),

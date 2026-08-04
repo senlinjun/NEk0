@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../l10n/generated/app_localizations.dart';
 import 'package:uuid/uuid.dart';
 import '../models/server.dart';
 
@@ -66,24 +68,42 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
     return AlertDialog(
       backgroundColor: const Color(0xFF1A1A2E),
       title: Text(
-        widget.existing != null ? 'Edit Server' : 'Add Server',
+        widget.existing != null
+            ? AppLocalizations.of(context).editServerTitle
+            : AppLocalizations.of(context).addServerTitle,
         style: const TextStyle(color: Colors.white),
       ),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _field(_nameCtrl, 'Server Name', Icons.label),
+            _field(
+              _nameCtrl,
+              AppLocalizations.of(context).serverName,
+              Icons.label,
+            ),
             const SizedBox(height: 12),
-            _field(_addressCtrl, 'Address (e.g. ts.example.com)', Icons.dns),
+            _field(
+              _addressCtrl,
+              AppLocalizations.of(context).addressHint,
+              Icons.dns,
+            ),
             const SizedBox(height: 12),
-            _field(_nicknameCtrl, 'Nickname', Icons.person),
+            _field(
+              _nicknameCtrl,
+              AppLocalizations.of(context).nickname,
+              Icons.person,
+            ),
             const SizedBox(height: 12),
-            _field(_channelCtrl, 'Channel (optional)', Icons.tag),
+            _field(
+              _channelCtrl,
+              AppLocalizations.of(context).channelOptional,
+              Icons.tag,
+            ),
             const SizedBox(height: 12),
             _field(
               _passwordCtrl,
-              'Password (optional)',
+              AppLocalizations.of(context).passwordOptional,
               Icons.lock,
               obscure: true,
             ),
@@ -93,12 +113,15 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          child: Text(
+            AppLocalizations.of(context).cancel,
+            style: const TextStyle(color: Colors.grey),
+          ),
         ),
         ElevatedButton(
           onPressed: _submit,
           style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
-          child: const Text('Save'),
+          child: Text(AppLocalizations.of(context).save),
         ),
       ],
     );

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../l10n/generated/app_localizations.dart';
 import '../models/server.dart';
 import '../models/ts_state.dart';
 import '../services/ota_service.dart';
@@ -64,13 +65,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     ).push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
   }
 
-  TourStep _homeStep() => TourStep(
-    title: 'Add your server',
-    description:
-        'Tap + to add a TeamSpeak server, then tap it to '
-        'connect and start talking.',
-    targetKey: _addServerKey,
-  );
+  TourStep _homeStep() {
+    final al = AppLocalizations.of(context);
+    return TourStep(
+      title: al.guideAddTitle,
+      description: al.guideAddDesc,
+      targetKey: _addServerKey,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -86,18 +88,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings_outlined, color: Colors.white70),
-            tooltip: 'Settings',
+            tooltip: AppLocalizations.of(context).settings,
             onPressed: _openSettings,
           ),
           IconButton(
             icon: const Icon(Icons.help_outline, color: Colors.white70),
-            tooltip: 'Guide',
+            tooltip: AppLocalizations.of(context).guide,
             onPressed: _showGuide,
           ),
           IconButton(
             key: _addServerKey,
             icon: const Icon(Icons.add),
-            tooltip: 'Add Server',
+            tooltip: AppLocalizations.of(context).addServer,
             onPressed: () => _addOrEditServer(context, ref),
           ),
         ],
@@ -125,15 +127,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         children: [
           const Icon(Icons.dns, size: 64, color: Colors.grey),
           const SizedBox(height: 16),
-          const Text(
-            'No servers added',
-            style: TextStyle(color: Colors.grey, fontSize: 16),
+          Text(
+            AppLocalizations.of(context).noServersAdded,
+            style: const TextStyle(color: Colors.grey, fontSize: 16),
           ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
             onPressed: () => _addOrEditServer(context, ref),
             icon: const Icon(Icons.add),
-            label: const Text('Add Server'),
+            label: Text(AppLocalizations.of(context).addServer),
             style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
           ),
         ],
@@ -168,8 +170,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             }
           },
           itemBuilder: (_) => [
-            const PopupMenuItem(value: 'edit', child: Text('Edit')),
-            const PopupMenuItem(value: 'delete', child: Text('Delete')),
+            PopupMenuItem(
+              value: 'edit',
+              child: Text(AppLocalizations.of(context).edit),
+            ),
+            PopupMenuItem(
+              value: 'delete',
+              child: Text(AppLocalizations.of(context).delete),
+            ),
           ],
         ),
         onTap: () => _connectTo(context, ref, server),
@@ -204,22 +212,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A2E),
-        title: const Text(
-          'Delete Server?',
-          style: TextStyle(color: Colors.white),
+        title: Text(
+          AppLocalizations.of(ctx).deleteServerTitle,
+          style: const TextStyle(color: Colors.white),
         ),
         content: Text(
-          'Remove "${server.name}" from bookmarks?',
+          AppLocalizations.of(ctx).deleteServerBody(server.name),
           style: const TextStyle(color: Colors.grey),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            child: Text(
+              AppLocalizations.of(ctx).cancel,
+              style: const TextStyle(color: Colors.grey),
+            ),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+            child: Text(
+              AppLocalizations.of(ctx).delete,
+              style: const TextStyle(color: Colors.red),
+            ),
           ),
         ],
       ),

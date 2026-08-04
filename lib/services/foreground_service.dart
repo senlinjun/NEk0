@@ -34,6 +34,9 @@ class ForegroundService {
     String text = 'Connected',
     bool mic = false,
     bool inputMuted = false,
+    String muteLabel = 'Mute',
+    String unmuteLabel = 'Unmute',
+    String disconnectLabel = 'Disconnect',
   }) async {
     try {
       final result = await _channel.invokeMethod('start', {
@@ -41,6 +44,9 @@ class ForegroundService {
         'text': text,
         'mic': mic,
         'input_muted': inputMuted,
+        'mute_label': muteLabel,
+        'unmute_label': unmuteLabel,
+        'disconnect_label': disconnectLabel,
       });
       return result == true;
     } catch (e) {
@@ -53,6 +59,9 @@ class ForegroundService {
     String text = 'Connected',
     bool mic = false,
     bool inputMuted = false,
+    String muteLabel = 'Mute',
+    String unmuteLabel = 'Unmute',
+    String disconnectLabel = 'Disconnect',
   }) async {
     try {
       final result = await _channel.invokeMethod('update', {
@@ -60,6 +69,9 @@ class ForegroundService {
         'text': text,
         'mic': mic,
         'input_muted': inputMuted,
+        'mute_label': muteLabel,
+        'unmute_label': unmuteLabel,
+        'disconnect_label': disconnectLabel,
       });
       return result == true;
     } catch (e) {

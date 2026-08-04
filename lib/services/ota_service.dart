@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+
+import '../l10n/generated/app_localizations.dart';
 import 'package:http/http.dart' as http;
 import 'package:ota_update/ota_update.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -153,24 +155,26 @@ Future<void> showUpdateDialog(BuildContext context, OtaUpdateInfo info) async {
     context: context,
     builder: (ctx) => AlertDialog(
       backgroundColor: const Color(0xFF1A1A2E),
-      title: const Text(
-        'Update available',
-        style: TextStyle(color: Colors.white),
+      title: Text(
+        AppLocalizations.of(ctx).updateAvailable,
+        style: const TextStyle(color: Colors.white),
       ),
       content: Text(
-        'NEk0 ${info.version} is available.\n\n'
-        'Download and install it now?',
+        AppLocalizations.of(ctx).updateAvailableBody(info.version),
         style: const TextStyle(color: Colors.white70),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('Later', style: TextStyle(color: Colors.grey)),
+          child: Text(
+            AppLocalizations.of(ctx).later,
+            style: const TextStyle(color: Colors.grey),
+          ),
         ),
         FilledButton(
           onPressed: () => Navigator.of(ctx).pop(true),
           style: FilledButton.styleFrom(backgroundColor: Colors.blue),
-          child: const Text('Update'),
+          child: Text(AppLocalizations.of(ctx).update),
         ),
       ],
     ),
@@ -205,8 +209,11 @@ class _DownloadProgressDialog extends StatefulWidget {
 class _DownloadProgressDialogState extends State<_DownloadProgressDialog> {
   StreamSubscription<OtaEvent>? _sub;
   double _progress = 0;
-  String _status = 'Downloading…';
+  String _status = '';
+  bool _statusInitialized = false;
   bool _done = false;
+
+  AppLocalizations get _al => AppLocalizations.of(context);
 
   @override
   void initState() {
@@ -219,11 +226,11 @@ class _DownloadProgressDialogState extends State<_DownloadProgressDialog> {
             final v = double.tryParse(event.value ?? '') ?? 0;
             setState(() {
               _progress = v;
-              _status = 'Downloading… ${v.toStringAsFixed(0)}%';
+              _status = _al.downloading(v.toStringAsFixed(0));
             });
           case OtaStatus.INSTALLING:
             setState(() {
-              _status = 'Installing…';
+              _status = _al.installing;
               _done = true;
             });
             Future<void>.delayed(const Duration(milliseconds: 800), () {
@@ -239,7 +246,8 @@ class _DownloadProgressDialogState extends State<_DownloadProgressDialog> {
           case OtaStatus.INSTALLATION_ERROR:
           case OtaStatus.CANCELED:
             setState(
-              () => _status = 'Update failed: ${event.value ?? event.status}',
+              () =>
+                  _status = _al.updateFailed('${event.value ?? event.status}'),
             );
             Future<void>.delayed(const Duration(seconds: 2), () {
               if (mounted) Navigator.of(context).pop();
@@ -248,7 +256,7 @@ class _DownloadProgressDialogState extends State<_DownloadProgressDialog> {
       },
       onError: (Object _) {
         if (!mounted) return;
-        setState(() => _status = 'Update failed');
+        setState(() => _status = _al.updateFailed(''));
         Future<void>.delayed(const Duration(seconds: 2), () {
           if (mounted) Navigator.of(context).pop();
         });
@@ -264,9 +272,18 @@ class _DownloadProgressDialogState extends State<_DownloadProgressDialog> {
 
   @override
   Widget build(BuildContext context) {
+    // Localized strings need the inherited Localizations scope, so they can
+    // only be read here (not in initState).
+    if (!_statusInitialized) {
+      _statusInitialized = true;
+      _status = AppLocalizations.of(context).downloading('0');
+    }
     return AlertDialog(
       backgroundColor: const Color(0xFF1A1A2E),
-      title: const Text('Updating NEk0', style: TextStyle(color: Colors.white)),
+      title: Text(
+        AppLocalizations.of(context).updatingNek0,
+        style: const TextStyle(color: Colors.white),
+      ),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

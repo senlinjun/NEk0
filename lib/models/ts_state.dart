@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/app_locale.dart';
 import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/chat_message.dart';
@@ -294,6 +295,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           text: _currentChannelName,
           mic: false,
           inputMuted: state.inputMuted,
+          muteLabel: _notifMuteLabel,
+          unmuteLabel: _notifUnmuteLabel,
+          disconnectLabel: _notifDisconnectLabel,
         );
         // Battery-optimization exemption is requested AFTER the first-connect
         // OEM guide dialog (server_screen._maybeShowOemGuide), so the user
@@ -430,6 +434,19 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         '';
   }
 
+  // ─── Localized notification labels (no BuildContext here — read the
+  // cached AppLocalizations from the locale provider) ───────────────────
+
+  String get _notifMuteLabel =>
+      ref.read(localeProvider.notifier).localizations?.notifMute ?? 'Mute';
+
+  String get _notifUnmuteLabel =>
+      ref.read(localeProvider.notifier).localizations?.notifUnmute ?? 'Unmute';
+
+  String get _notifDisconnectLabel =>
+      ref.read(localeProvider.notifier).localizations?.notifDisconnect ??
+      'Disconnect';
+
   void _refreshNotification({bool? mic}) {
     final hasMic = mic ?? _micGranted;
     var text = _currentChannelName;
@@ -441,6 +458,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       text: text,
       mic: hasMic,
       inputMuted: state.inputMuted,
+      muteLabel: _notifMuteLabel,
+      unmuteLabel: _notifUnmuteLabel,
+      disconnectLabel: _notifDisconnectLabel,
     );
   }
 

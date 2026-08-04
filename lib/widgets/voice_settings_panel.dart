@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../l10n/generated/app_localizations.dart';
+
 import '../models/ts_state.dart';
 
 /// Shared mic voice settings panel (PTT mode, VAD, threshold + level meter,
@@ -47,9 +49,9 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (widget.showTitle) ...[
-          const Text(
-            'Voice Settings',
-            style: TextStyle(
+          Text(
+            AppLocalizations.of(context).voiceSettings,
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 16,
               fontWeight: FontWeight.bold,
@@ -61,9 +63,9 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
-              'PTT Mode',
-              style: TextStyle(color: Colors.white, fontSize: 14),
+            Text(
+              AppLocalizations.of(context).pttMode,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
             ),
             Switch(
               value: _pttMode,
@@ -81,7 +83,7 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(
-              'Voice Activation',
+              AppLocalizations.of(context).voiceActivation,
               style: TextStyle(
                 color: _pttMode ? Colors.grey : Colors.white,
                 fontSize: 14,
@@ -110,11 +112,11 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
             final over = rms >= _vadThreshold && _vadThreshold > 0.0;
             return Row(
               children: [
-                const SizedBox(
+                SizedBox(
                   width: 60,
                   child: Text(
-                    'Level',
-                    style: TextStyle(color: Colors.grey, fontSize: 11),
+                    AppLocalizations.of(context).level,
+                    style: const TextStyle(color: Colors.grey, fontSize: 11),
                   ),
                 ),
                 Expanded(
@@ -168,9 +170,9 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
         // Mic gain slider
         Row(
           children: [
-            const Text(
-              'Mic Gain',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+            Text(
+              AppLocalizations.of(context).micGain,
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
             Expanded(
               child: Slider(

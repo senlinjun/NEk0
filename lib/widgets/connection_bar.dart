@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../l10n/generated/app_localizations.dart';
+
 class ConnectionBar extends StatelessWidget {
   final String serverName;
   final bool connected;
@@ -30,7 +32,9 @@ class ConnectionBar extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              connected ? serverName : 'Disconnected',
+              connected
+                  ? serverName
+                  : AppLocalizations.of(context).disconnected,
               style: TextStyle(
                 color: connected ? Colors.white : Colors.grey,
                 fontSize: 14,
@@ -47,7 +51,7 @@ class ConnectionBar extends StatelessWidget {
                 size: 18,
               ),
               onPressed: onShowGuide,
-              tooltip: 'Guide',
+              tooltip: AppLocalizations.of(context).guide,
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
             ),
@@ -56,7 +60,7 @@ class ConnectionBar extends StatelessWidget {
             IconButton(
               icon: const Icon(Icons.logout, color: Colors.red, size: 18),
               onPressed: onDisconnect,
-              tooltip: 'Disconnect',
+              tooltip: AppLocalizations.of(context).disconnect,
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
             ),

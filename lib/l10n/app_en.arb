@@ -1,0 +1,111 @@
+{
+  "@@locale": "en",
+  "cancel": "Cancel",
+  "save": "Save",
+  "delete": "Delete",
+  "edit": "Edit",
+  "later": "Later",
+  "update": "Update",
+  "skip": "Skip",
+  "next": "Next",
+  "done": "Done",
+  "gotIt": "Got it",
+  "guide": "Guide",
+  "settings": "Settings",
+
+  "addServer": "Add Server",
+  "noServersAdded": "No servers added",
+  "deleteServerTitle": "Delete Server?",
+  "deleteServerBody": "Remove \"{name}\" from bookmarks?",
+  "@deleteServerBody": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "guideAddTitle": "Add your server",
+  "guideAddDesc": "Tap + to add a TeamSpeak server, then tap it to connect and start talking.",
+
+  "channels": "Channels",
+  "users": "Users",
+  "chat": "Chat",
+  "guideMicTitle": "Mic",
+  "guideMicDesc": "Tap to mute your mic. Long-press for voice settings (VAD, PTT, mic gain).",
+  "guideHeadsetTitle": "Headset",
+  "guideHeadsetDesc": "Full mute: silences your mic and the audio of everyone else. The media card play/pause does the same.",
+  "guideSpeakerTitle": "Speaker",
+  "guideSpeakerDesc": "Mute everyone's audio (output).",
+  "guideChatTitle": "Chat",
+  "guideChatDesc": "Tap the chat bar to send messages in your channel.",
+  "keepAliveTitle": "Background Keep-Alive",
+  "keepAliveBody": "To stay online in the background like a music player, allow NEk0 to run in the background in system settings:\n\u2022 Battery \u2192 ignore battery optimizations (we will open it)\n\u2022 Auto-start: allow NEk0 to auto-start\n\u2022 Background power management: allow background running",
+  "talking": "Talking",
+  "volume": "Volume",
+
+  "settingsTitle": "Settings",
+  "voice": "Voice",
+  "micTest": "Mic Test",
+  "startMicTest": "Start mic test",
+  "stopMicTest": "Stop test",
+  "micInUseWhileConnected": "Mic is in use while connected \u2014 test is disabled.",
+  "micPermissionDenied": "Microphone permission denied",
+  "updateSection": "Update",
+  "checkForUpdates": "Check for updates",
+  "updateSource": "Update source",
+  "checkNow": "Check now",
+  "checkingForUpdates": "Checking for updates\u2026",
+  "noUpdateAvailable": "No update available",
+  "language": "Language",
+  "languageSystem": "System",
+  "languageEnglish": "English",
+  "languageChinese": "中文",
+
+  "voiceSettings": "Voice Settings",
+  "pttMode": "PTT Mode",
+  "voiceActivation": "Voice Activation",
+  "level": "Level",
+  "micGain": "Mic Gain",
+
+  "disconnected": "Disconnected",
+  "disconnect": "Disconnect",
+
+  "noUsersInChannel": "No users in this channel",
+  "noMessagesYet": "No messages yet",
+  "sendMessageHint": "Send a message...",
+
+  "addServerTitle": "Add Server",
+  "editServerTitle": "Edit Server",
+  "serverName": "Server Name",
+  "addressHint": "Address (e.g. ts.example.com)",
+  "nickname": "Nickname",
+  "channelOptional": "Channel (optional)",
+  "passwordOptional": "Password (optional)",
+  "teamSpeakUserDefault": "TeamSpeakUser",
+
+  "updateAvailable": "Update available",
+  "updateAvailableBody": "NEk0 {version} is available.\n\nDownload and install it now?",
+  "@updateAvailableBody": {
+    "placeholders": {
+      "version": { "type": "String" }
+    }
+  },
+  "updatingNek0": "Updating NEk0",
+  "downloading": "Downloading\u2026 {percent}%",
+  "@downloading": {
+    "placeholders": {
+      "percent": { "type": "String" }
+    }
+  },
+  "installing": "Installing\u2026",
+  "updateFailed": "Update failed: {detail}",
+  "@updateFailed": {
+    "placeholders": {
+      "detail": { "type": "String" }
+    }
+  },
+
+  "notifMute": "Mute",
+  "notifUnmute": "Unmute",
+  "notifDisconnect": "Disconnect",
+  "notifConnected": "Connected",
+  "noChannels": "No channels"
+}

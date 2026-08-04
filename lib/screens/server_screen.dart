@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../l10n/generated/app_localizations.dart';
+
 import '../models/client.dart';
 import '../models/ts_state.dart';
 import '../services/foreground_service.dart';
@@ -44,34 +46,31 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   }
 
   Future<void> _showGuide() async {
+    final al = AppLocalizations.of(context);
     await showSpotlightTour(context, [
       TourStep(
         targetKey: _micKey,
         padding: 4,
-        title: 'Mic',
-        description:
-            'Tap to mute your mic. Long-press for voice settings '
-            '(VAD, PTT, mic gain).',
+        title: al.guideMicTitle,
+        description: al.guideMicDesc,
       ),
       TourStep(
         targetKey: _headsetKey,
         padding: 4,
-        title: 'Headset',
-        description:
-            'Full mute: silences your mic and the audio of everyone '
-            'else. The media card play/pause does the same.',
+        title: al.guideHeadsetTitle,
+        description: al.guideHeadsetDesc,
       ),
       TourStep(
         targetKey: _speakerKey,
         padding: 4,
-        title: 'Speaker',
-        description: "Mute everyone's audio (output).",
+        title: al.guideSpeakerTitle,
+        description: al.guideSpeakerDesc,
       ),
       TourStep(
         targetKey: _chatKey,
         padding: 4,
-        title: 'Chat',
-        description: 'Tap the chat bar to send messages in your channel.',
+        title: al.guideChatTitle,
+        description: al.guideChatDesc,
       ),
     ]);
   }
@@ -138,9 +137,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             padding: const EdgeInsets.all(8),
             color: const Color(0xFF16213E),
             width: double.infinity,
-            child: const Text(
-              'Channels',
-              style: TextStyle(
+            child: Text(
+              AppLocalizations.of(context).channels,
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 13,
                 fontWeight: FontWeight.bold,
@@ -160,9 +159,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             padding: const EdgeInsets.all(8),
             color: const Color(0xFF16213E),
             width: double.infinity,
-            child: const Text(
-              'Users',
-              style: TextStyle(
+            child: Text(
+              AppLocalizations.of(context).users,
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 13,
                 fontWeight: FontWeight.bold,
@@ -198,22 +197,18 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A2E),
-        title: const Text(
-          'Background Keep-Alive',
-          style: TextStyle(color: Colors.white),
+        title: Text(
+          AppLocalizations.of(ctx).keepAliveTitle,
+          style: const TextStyle(color: Colors.white),
         ),
-        content: const Text(
-          'To stay online in the background like a music player, allow NEk0 '
-          'to run in the background in system settings:\n'
-          '\u2022 Battery \u2192 ignore battery optimizations (we will open it)\n'
-          '\u2022 Auto-start: allow NEk0 to auto-start\n'
-          '\u2022 Background power management: allow background running',
-          style: TextStyle(color: Colors.white70),
+        content: Text(
+          AppLocalizations.of(ctx).keepAliveBody,
+          style: const TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Got it'),
+            child: Text(AppLocalizations.of(ctx).gotIt),
           ),
         ],
       ),
@@ -279,9 +274,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
           children: [
             const Icon(Icons.chat_bubble_outline, color: Colors.grey, size: 16),
             const SizedBox(width: 8),
-            const Text(
-              'Chat',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+            Text(
+              AppLocalizations.of(context).chat,
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const Spacer(),
             if (lastMsg != null)
@@ -488,9 +483,9 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
                     color: Colors.blue.withValues(alpha: 0.3),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: const Text(
-                    'Talking',
-                    style: TextStyle(color: Colors.blue, fontSize: 11),
+                  child: Text(
+                    AppLocalizations.of(context).talking,
+                    style: const TextStyle(color: Colors.blue, fontSize: 11),
                   ),
                 ),
             ],
@@ -498,9 +493,9 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
           const SizedBox(height: 16),
           Row(
             children: [
-              const Text(
-                'Volume',
-                style: TextStyle(color: Colors.grey, fontSize: 12),
+              Text(
+                AppLocalizations.of(context).volume,
+                style: const TextStyle(color: Colors.grey, fontSize: 12),
               ),
               Expanded(
                 child: Slider(

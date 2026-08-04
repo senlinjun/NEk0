@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../l10n/generated/app_localizations.dart';
 import '../models/channel.dart';
 
 class ChannelTree extends StatefulWidget {
@@ -27,10 +29,10 @@ class _ChannelTreeState extends State<ChannelTree> {
   @override
   Widget build(BuildContext context) {
     if (widget.channels.isEmpty) {
-      return const Center(
+      return Center(
         child: Text(
-          'No channels',
-          style: TextStyle(color: Colors.grey, fontSize: 13),
+          AppLocalizations.of(context).noChannels,
+          style: const TextStyle(color: Colors.grey, fontSize: 13),
         ),
       );
     }

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../l10n/generated/app_localizations.dart';
 import '../models/client.dart';
 
 class ClientList extends StatelessWidget {
@@ -20,11 +22,11 @@ class ClientList extends StatelessWidget {
         .toList();
 
     if (channelClients.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.all(16),
+      return Padding(
+        padding: const EdgeInsets.all(16),
         child: Text(
-          'No users in this channel',
-          style: TextStyle(color: Colors.grey),
+          AppLocalizations.of(context).noUsersInChannel,
+          style: const TextStyle(color: Colors.grey),
         ),
       );
     }
