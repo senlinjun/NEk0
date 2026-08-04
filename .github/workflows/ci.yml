@@ -70,7 +70,7 @@ jobs:
     - name: Gitee Release
       if: startsWith(github.ref, 'refs/tags/')
       run: |
-          apt install python3-requests
+          sudo apt install python3-requests
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_armeabi-v7a.apk
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_arm64-v8a.apk
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
