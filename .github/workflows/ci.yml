@@ -2,6 +2,7 @@ name: Ci
 
 on:
   push:
+    branches: [ "**" ]
     tags: [ "**" ]
 
 env:
@@ -42,6 +43,7 @@ jobs:
         dart format . --set-exit-if-changed
         flutter analyze
     - name: Generate key
+      if: startsWith(github.ref, 'refs/tags/')
       run: echo "${{ secrets.KEY_STORE }}" | base64 --decode > android/app/key.jks  && echo "${{ secrets.KEY_PROPERTIES }}" > android/app/key.properties
     - name: Flutter build
       if: startsWith(github.ref, 'refs/tags/')
