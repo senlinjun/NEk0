@@ -43,22 +43,22 @@ jobs:
         dart format . --set-exit-if-changed
         flutter analyze
     - name: Generate key
-      if: github.ref_type == 'tag'
+      if: startsWith(github.ref, 'refs/tags/')
       run: echo "${{ secrets.KEY_STORE }}" | base64 --decode > android/app/key.jks  && echo "${{ secrets.KEY_PROPERTIES }}" > android/app/key.properties
     - name: Flutter build
-      if: github.ref_type == 'tag'
+      if: startsWith(github.ref, 'refs/tags/')
       run: |
         flutter build apk --build-name="${GITHUB_REF_NAME#v}" --build-number="$GITHUB_RUN_NUMBER" -PuseReleaseSigning=true
         flutter build apk --split-per-abi --build-name="${GITHUB_REF_NAME#v}" --build-number="$GITHUB_RUN_NUMBER" -PuseReleaseSigning=true
     - name: Rename apk
-      if: github.ref_type == 'tag'
+      if: startsWith(github.ref, 'refs/tags/')
       run: |
         mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_armeabi-v7a.apk
         mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_arm64-v8a.apk
         mv build/app/outputs/flutter-apk/app-x86_64-release.apk  build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
         mv build/app/outputs/flutter-apk/app-release.apk  build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_universal.apk
     - name: GH Release
-      if: github.ref_type == 'tag'
+      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v3.0.2
       with:
           token: ${{ secrets.TOKEN }}
@@ -68,10 +68,11 @@ jobs:
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_universal.apk
     - name: Gitee Release
-      if: github.ref_type == 'tag'
+      if: startsWith(github.ref, 'refs/tags/')
       run: |
           apt install python3-requests
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_armeabi-v7a.apk
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_arm64-v8a.apk
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_universal.apk
+      
