@@ -236,10 +236,12 @@ class KeepAliveService : Service() {
             .putString(MediaMetadata.METADATA_KEY_ARTIST, text)
             .apply {
                 cachedArtwork?.let {
-                    // ARTWORK: card art on older Android; DISPLAY_ICON:
+                    // ART: card art on older Android; DISPLAY_ICON:
                     // the icon slot of the Android 13+ media card. Both are
                     // needed so the card is never an empty placeholder.
-                    putBitmap(MediaMetadata.METADATA_KEY_ARTWORK, it)
+                    // (METADATA_KEY_ARTWORK is deprecated and missing from
+                    // the SDK jar — METADATA_KEY_ART is its successor.)
+                    putBitmap(MediaMetadata.METADATA_KEY_ART, it)
                     putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, it)
                 }
             }
