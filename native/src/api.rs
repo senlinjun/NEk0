@@ -932,255 +932,321 @@ fn positional_gains(vol: f32, x: f32, y: f32) -> (f32, f32) {
     let atten = vol / (1.0 + (d / POS_ATTEN_REF).powi(2));
     let pan = (x / POS_PAN_RANGE).clamp(-1.0, 1.0);
     let l = atten * if pan <= 0.0 { 1.0 } else { 1.0 - pan };
-    let r = atten * if pan >= 0.0 { 1.0 } else { 1.0 + pan };
+    let r = atten * if pan >= 0.0 { 1.0 + pan } else { 1.0 };
     (l, r)
 }
 
-/// Build the cpal mixing callback for the given output channel count (1 or 2).
-/// All playback state (mix buffers, SFX slots) is owned by the closure.
-///
-/// Frames come out of the jitter buffers in two lengths: 960 (mono —
-/// duplicated into both mix channels) and 1920 (stereo interleaved — L/R kept
-/// separate so stereo sources like music bots survive end-to-end).
-///
-/// Playback is driven by PLAYED_SAMPLES, which counts PER-CHANNEL samples:
-/// the logical frame number = PLAYED_SAMPLES / FRAME_SIZE advances at 50/s
-/// regardless of the output channel count.
-fn make_output_callback(
-    out_channels: usize,
-) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) {
-    let current_mix_slot = std::cell::Cell::new(u64::MAX);
-    let current_mix_l = std::cell::RefCell::new([0.0f32; FRAME_SIZE as usize]);
-    let current_mix_r = std::cell::RefCell::new([0.0f32; FRAME_SIZE as usize]);
-    let sfx_slots = std::cell::RefCell::new([SfxSlot::default(); 2]);
-    let cb_seq = std::cell::Cell::new(0u64);
+/// Fixed-capacity FIFO of generated 48 kHz mix positions, each holding an
+/// interleaved [left, right] pair. Decouples the frame-based mixing clock
+/// (PLAYED_SAMPLES) from the hardware callback's arbitrary buffer length /
+/// sample rate / channel count.
+struct OutRing {
+    buf: Vec<[f32; 2]>,
+    head: usize,
+    len: usize,
+}
 
-    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-        // ── diagnostics: first 3 callbacks print liveness ──────────
-        let seq = cb_seq.get();
-        if seq < 3 {
-            eprintln!("[cpal-stats] cb#{} ch={} data.len={} played_before={}",
-                seq, out_channels, data.len(), PLAYED_SAMPLES.load(Ordering::Relaxed));
-            cb_seq.set(seq + 1);
+/// ~170ms at 48 kHz (positions) — far above any single callback request.
+const OUT_RING_CAP: usize = 8192;
+
+impl OutRing {
+    fn new() -> Self {
+        Self {
+            buf: vec![[0.0, 0.0]; OUT_RING_CAP],
+            head: 0,
+            len: 0,
         }
-        // ── diagnostics: entry timing ────────────────────────────
-        let cb_entry = std::time::Instant::now();
-        let played = PLAYED_SAMPLES.load(Ordering::Relaxed);
-        let played_before = played;
-        // Consistency: next-callback expects this value
-        let expected = CB_STATS.expected_next_played.load(Ordering::Relaxed);
-        if expected != 0 && played_before != expected {
-            CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn push(&mut self, lr: [f32; 2]) {
+        if self.len == self.buf.len() {
+            // Defensive: drop the oldest position rather than clobber memory.
+            // Unreachable with on-demand generation (len peaks ~1 frame + slack).
+            self.head = (self.head + 1) % self.buf.len();
+            self.len -= 1;
         }
-        let cb_elapsed_ns = cb_entry.elapsed().as_nanos() as u64;
-        let last_ns = CB_STATS.last_cb_entry_ns.swap(cb_elapsed_ns, Ordering::Relaxed);
-        if last_ns != 0 {
-            CB_STATS.last_interval_us.store(
-                cb_elapsed_ns.wrapping_sub(last_ns) / 1000, Ordering::Relaxed);
+        if self.head + self.len == self.buf.len() {
+            self.buf.copy_within(self.head..self.head + self.len, 0);
+            self.head = 0;
         }
-        let mut slot = played / FRAME_SIZE;
-        let mut offset = (played % FRAME_SIZE) as usize;
-        let mut data_offset = 0usize;
-        let mut mix_count = 0u64;
+        self.buf[self.head + self.len] = lr;
+        self.len += 1;
+    }
 
-        while data_offset < data.len() {
-            // Generate new mix frame when entering a new logical frame
-            if slot != current_mix_slot.get() {
-                mix_count += 1;
-                let mut mix_l = [0.0f32; FRAME_SIZE as usize];
-                let mut mix_r = [0.0f32; FRAME_SIZE as usize];
-                let mut active = 0u32;
-
-                // Phase A: collect one frame from each active client via snapshot
-                let client_ids = ACTIVE_CLIENT_IDS.load();
-                for &client_id in client_ids.iter() {
-                    if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
-                        // One atomic load: base_seq/base_slot are
-                        // always a consistent pair.
-                        let base_pair = buf.base_pair.load(Ordering::Acquire);
-                        let base_seq = (base_pair >> 32) as u32;
-                        if base_seq == 0 { continue; }
-                        let base_slot = base_pair & 0xFFFF_FFFF;
-                        let expected_seq = slot.wrapping_sub(base_slot)
-                            .wrapping_add(base_seq as u64);
-                        let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
-                        if write_seq >= expected_seq {
-                            let idx = (expected_seq.wrapping_sub(base_seq as u64))
-                                as usize % crate::JITTER_SLOTS;
-                            if let Some(frame) = buf.slots[idx].swap(None) {
-                                let vol = f32::from_bits(
-                                    buf.volume.load(Ordering::Relaxed));
-                                // Positional L/R gains (NaN position = centered).
-                                let px = f32::from_bits(
-                                    buf.pos_x.load(Ordering::Relaxed));
-                                let py = f32::from_bits(
-                                    buf.pos_y.load(Ordering::Relaxed));
-                                let (l_gain, r_gain) = positional_gains(vol, px, py);
-                                // Frame length tells the channel count.
-                                match frame.len() {
-                                    1920 => {
-                                        for i in 0..FRAME_SIZE as usize {
-                                            mix_l[i] += frame[i * 2] as f32 * l_gain;
-                                            mix_r[i] += frame[i * 2 + 1] as f32 * r_gain;
-                                        }
-                                    }
-                                    _ => {
-                                        for i in 0..FRAME_SIZE as usize {
-                                            mix_l[i] += frame[i] as f32 * l_gain;
-                                            mix_r[i] += frame[i] as f32 * r_gain;
-                                        }
-                                    }
-                                }
-                                active += 1;
-                                buf.frame_pool.push(frame);
-                            }
-                        }
-                    }
-                }
-
-                // Phase B: attenuate
-                let atten = if active > 0 {
-                    1.0 / (active as f32).sqrt()
-                } else {
-                    1.0
-                };
-                for i in 0..FRAME_SIZE as usize {
-                    mix_l[i] = (mix_l[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
-                    mix_r[i] = (mix_r[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
-                }
-
-                // Phase C: channel-event SFX — start queued requests
-                // in the two parallel slots and mix them on top of
-                // the (already attenuated) voice at fixed 0.5 gain.
-                // Samples are mono and play centered on both channels.
-                {
-                    let mut slots = sfx_slots.borrow_mut();
-                    loop {
-                        match SFX_QUEUE.pop() {
-                            None => break,
-                            Some(kind) => {
-                                if let Some(slot) =
-                                    slots.iter_mut().find(|s| s.kind == 0)
-                                {
-                                    slot.kind = kind;
-                                    slot.pos = 0;
-                                } else {
-                                    // Both slots busy — drop the
-                                    // request rather than let the
-                                    // queue grow unbounded.
-                                    eprintln!(
-                                        "[sfx] dropped request kind={} (both slots busy)",
-                                        kind
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    // Load the active sample table only when at
-                    // least one slot is playing (ArcSwap::load is
-                    // lock-free, but there is no reason to touch it
-                    // while every slot is idle).
-                    if slots.iter().any(|s| s.kind != 0) {
-                        let samples = crate::SFX_SAMPLES.load();
-                        for slot in slots.iter_mut() {
-                            if slot.kind == 0 {
-                                continue;
-                            }
-                            let src: &[f32] =
-                                match &samples[(slot.kind - 1) as usize] {
-                                    Some(s) => s.as_slice(),
-                                    None => &[],
-                                };
-                            if slot.pos >= src.len() {
-                                // Empty/consumed sample: request done.
-                                slot.kind = 0;
-                                continue;
-                            }
-                            let mut i = 0usize;
-                            while i < FRAME_SIZE as usize
-                                && slot.pos + i < src.len()
-                            {
-                                let s = src[slot.pos + i] * 0.5;
-                                mix_l[i] += s;
-                                mix_r[i] += s;
-                                i += 1;
-                            }
-                            slot.pos += i;
-                            if slot.pos >= src.len() {
-                                slot.kind = 0;
-                            }
-                        }
-                    }
-                }
-                // Final clamp after SFX mixing (voice was already
-                // clamped in Phase B).
-                for s in &mut mix_l {
-                    *s = s.clamp(-1.0, 1.0);
-                }
-                for s in &mut mix_r {
-                    *s = s.clamp(-1.0, 1.0);
-                }
-
-                *current_mix_l.borrow_mut() = mix_l;
-                *current_mix_r.borrow_mut() = mix_r;
-                current_mix_slot.set(slot);
-            }
-
-            // Copy from cached mix buffers to output. Stereo data is
-            // interleaved L/R; mono output gets the centered (L+R)/2 downmix.
-            let mix_l = current_mix_l.borrow();
-            let mix_r = current_mix_r.borrow();
-            let remaining_data = data.len() - data_offset;
-            let remaining_frame = FRAME_SIZE as usize - offset;
-            let frames_copy = (remaining_data / out_channels).min(remaining_frame);
-            if frames_copy == 0 {
-                // Unreachable for well-formed interleaved buffers; guards
-                // against spinning forever on a truncated final block.
-                break;
-            }
-
-            for i in 0..frames_copy {
-                let (l, r) = (mix_l[offset + i], mix_r[offset + i]);
-                if out_channels == 2 {
-                    data[data_offset + i * 2] = l;
-                    data[data_offset + i * 2 + 1] = r;
-                } else {
-                    data[data_offset + i] = (l + r) * 0.5;
-                }
-            }
-
-            data_offset += frames_copy * out_channels;
-            offset += frames_copy;
-            if offset >= FRAME_SIZE as usize {
-                offset = 0;
-                slot += 1;
-            }
+    fn pop(&mut self) -> [f32; 2] {
+        let lr = self.buf[self.head];
+        self.head += 1;
+        self.len -= 1;
+        if self.len == 0 {
+            self.head = 0;
         }
-
-        // ── diagnostics: record stats ────────────────────────────
-        CB_STATS.callbacks.fetch_add(1, Ordering::Relaxed);
-        CB_STATS.samples_total.fetch_add(
-            data.len() as u64 / out_channels as u64, Ordering::Relaxed);
-        CB_STATS.mix_frames.fetch_add(mix_count, Ordering::Relaxed);
-        // PLAYED_SAMPLES consistency: old value must equal played_before.
-        // Incremented in per-channel samples (see the doc comment).
-        let per_channel = (data.len() / out_channels) as u64;
-        let old = PLAYED_SAMPLES.fetch_add(per_channel, Ordering::Relaxed);
-        if old != played_before {
-            CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
-        }
-        // Store expected value for next callback's entry check
-        CB_STATS.expected_next_played.store(old + per_channel, Ordering::Relaxed);
+        lr
     }
 }
 
-/// Drop the current cpal output stream and rebuild it on the current default
-/// output device (same config and mixing callback as the initial build).
-/// Resets playback state exactly like `ts_stop_audio` — buffers are cleared
-/// and jitter/decoders are rebuilt on the next incoming audio.
+/// Generate one 48 kHz mix position (active clients with positional L/R
+/// gains + channel-event SFX) and append the [left, right] pair to the
+/// output ring. Runs inside the cpal output callback — no allocation
+/// (`mix_l`/`mix_r` are local arrays, the ring is pre-allocated).
 ///
-/// Called on connect and, from the maintenance task, when
-/// `OUTPUT_RESTART_REQUESTED` is set (device route change or stream error).
+/// This IS the mixing clock: PLAYED_SAMPLES advances by FRAME_SIZE (per-
+/// channel samples — the logical frame number PLAYED_SAMPLES / FRAME_SIZE
+/// advances at 50/s regardless of the output channel count) and the jitter
+/// buffers schedule packets against it (base_slot + TARGET_DELAY), so
+/// generation must be driven strictly on demand as the output pass drains
+/// the ring — never ahead of real time.
+fn gen_output_mix_frame(ring: &mut OutRing, sfx_slots: &mut [SfxSlot; 2]) {
+    let slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / FRAME_SIZE;
+    let mut mix_l = [0.0f32; FRAME_SIZE as usize];
+    let mut mix_r = [0.0f32; FRAME_SIZE as usize];
+    let mut active = 0u32;
+
+    // Phase A: collect one frame from each active client via snapshot
+    let client_ids = ACTIVE_CLIENT_IDS.load();
+    for &client_id in client_ids.iter() {
+        if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
+            // One atomic load: base_seq/base_slot are always a consistent pair.
+            let base_pair = buf.base_pair.load(Ordering::Acquire);
+            // `base_pair == 0` means "uninitialized". Do NOT test base_seq
+            // instead: a speaker's very first voice packet has seq 0, which
+            // would make their audio silently skipped forever (the rebase
+            // path can't fire while they keep talking).
+            if base_pair == 0 {
+                continue;
+            }
+            let base_seq = (base_pair >> 32) as u32;
+            let base_slot = base_pair & 0xFFFF_FFFF;
+            let expected_seq = slot
+                .wrapping_sub(base_slot)
+                .wrapping_add(base_seq as u64);
+            let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
+            if write_seq >= expected_seq {
+                let idx = (expected_seq.wrapping_sub(base_seq as u64)) as usize
+                    % crate::JITTER_SLOTS;
+                if let Some(frame) = buf.slots[idx].swap(None) {
+                    let vol = f32::from_bits(buf.volume.load(Ordering::Relaxed));
+                    // Positional L/R gains (NaN position = centered).
+                    let px = f32::from_bits(buf.pos_x.load(Ordering::Relaxed));
+                    let py = f32::from_bits(buf.pos_y.load(Ordering::Relaxed));
+                    let (l_gain, r_gain) = positional_gains(vol, px, py);
+                    // Frame length tells the channel count: 960 mono
+                    // (duplicated into both mix channels) or 1920 stereo
+                    // interleaved (L/R kept separate end-to-end).
+                    match frame.len() {
+                        1920 => {
+                            for i in 0..FRAME_SIZE as usize {
+                                mix_l[i] += frame[i * 2] as f32 * l_gain;
+                                mix_r[i] += frame[i * 2 + 1] as f32 * r_gain;
+                            }
+                        }
+                        _ => {
+                            for i in 0..FRAME_SIZE as usize {
+                                mix_l[i] += frame[i] as f32 * l_gain;
+                                mix_r[i] += frame[i] as f32 * r_gain;
+                            }
+                        }
+                    }
+                    active += 1;
+                    buf.frame_pool.push(frame);
+                }
+            }
+        }
+    }
+
+    // Phase B: attenuate
+    let atten = if active > 0 {
+        1.0 / (active as f32).sqrt()
+    } else {
+        1.0
+    };
+    for i in 0..FRAME_SIZE as usize {
+        mix_l[i] = (mix_l[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
+        mix_r[i] = (mix_r[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
+    }
+
+    // Phase C: channel-event SFX — start queued requests in the two parallel
+    // slots and mix them on top of the (already attenuated) voice at fixed
+    // 0.5 gain. Samples are mono and play centered on both channels.
+    {
+        loop {
+            match SFX_QUEUE.pop() {
+                None => break,
+                Some(kind) => {
+                    if let Some(sfx) = sfx_slots.iter_mut().find(|s| s.kind == 0) {
+                        sfx.kind = kind;
+                        sfx.pos = 0;
+                    } else {
+                        // Both slots busy — drop the request rather than let
+                        // the queue grow unbounded.
+                        eprintln!(
+                            "[sfx] dropped request kind={} (both slots busy)",
+                            kind
+                        );
+                    }
+                }
+            }
+        }
+        // Load the active sample table only when at least one slot is playing
+        // (ArcSwap::load is lock-free, but there is no reason to touch it
+        // while every slot is idle).
+        if sfx_slots.iter().any(|s| s.kind != 0) {
+            let samples = crate::SFX_SAMPLES.load();
+            for sfx in sfx_slots.iter_mut() {
+                if sfx.kind == 0 {
+                    continue;
+                }
+                let src: &[f32] = match &samples[(sfx.kind - 1) as usize] {
+                    Some(s) => s.as_slice(),
+                    None => &[],
+                };
+                if sfx.pos >= src.len() {
+                    // Empty/consumed sample: request done.
+                    sfx.kind = 0;
+                    continue;
+                }
+                let mut i = 0usize;
+                while i < FRAME_SIZE as usize && sfx.pos + i < src.len() {
+                    let s = src[sfx.pos + i] * 0.5;
+                    mix_l[i] += s;
+                    mix_r[i] += s;
+                    i += 1;
+                }
+                sfx.pos += i;
+                if sfx.pos >= src.len() {
+                    sfx.kind = 0;
+                }
+            }
+        }
+    }
+    // Final clamp after SFX mixing (voice was already clamped in Phase B).
+    for s in &mut mix_l {
+        *s = s.clamp(-1.0, 1.0);
+    }
+    for s in &mut mix_r {
+        *s = s.clamp(-1.0, 1.0);
+    }
+
+    for i in 0..FRAME_SIZE as usize {
+        ring.push([mix_l[i], mix_r[i]]);
+    }
+    let old = PLAYED_SAMPLES.fetch_add(FRAME_SIZE, Ordering::Relaxed);
+    // Clock-drift diagnostic: consecutive generations must observe perfectly
+    // sequential PLAYED_SAMPLES values (FRAME_SIZE apart).
+    let expected = CB_STATS.expected_next_played.load(Ordering::Relaxed);
+    if expected != 0 && old != expected {
+        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
+    }
+    CB_STATS.expected_next_played.store(old + FRAME_SIZE, Ordering::Relaxed);
+    CB_STATS.mix_frames.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Rebuilds the cpal output stream. The internal mixing clock stays 48 kHz
+/// mono at all times; the device-facing stream is negotiated through a
+/// fallback chain (48k/mono/Fixed(960) → 48k/mono/Default → device default
+/// channel count / sample rate with in-callback linear resampling and mono
+/// duplication), so desktop hosts that reject the fixed Android-style config
+/// still work.
+///
+// ─── Audio device selection ─────────────────────────────────────────
+
+/// User-selected audio devices, addressed by name ("" selection = None =
+/// system default). Set from Dart via ts_set_audio_*_device and persisted
+/// on the Dart side. cpal does not expose endpoint IDs, so names are the
+/// persistence keys — on Windows two endpoints sharing a FriendlyName
+/// resolve to the first match.
+static OUTPUT_DEVICE_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static INPUT_DEVICE_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Preferred device names when the user has not chosen one (Linux only):
+/// the desktop sound server registers these PCM names in /etc/alsa/conf.d.
+/// The ALSA "default" PCM does NOT necessarily route through the sound
+/// server — recent alsa-lib versions no longer load the directory where
+/// distros ship the `99-pipewire-default.conf` snippet, so "default"
+/// resolves to a raw dmix/dsnoop plug on the onboard card and bypasses the
+/// desktop's chosen sink/source entirely (apparently silent for users on
+/// USB/other default devices). WASAPI (Windows) and oboe (Android) don't
+/// have this layering problem: their default device IS the routed one.
+#[cfg(target_os = "linux")]
+const SOUND_SERVER_PCMS: [&str; 2] = ["pipewire", "pulse"];
+
+fn enumerate_devices(host: &cpal::Host, input: bool) -> Vec<cpal::Device> {
+    let res = if input {
+        host.input_devices()
+    } else {
+        host.output_devices()
+    };
+    match res {
+        Ok(iter) => iter.collect(),
+        Err(e) => {
+            eprintln!("audio: device enumeration failed: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// First device whose name matches one of [names] (in priority order).
+fn find_device_by_name(mut devs: Vec<cpal::Device>, names: &[&str]) -> Option<cpal::Device> {
+    for want in names {
+        if let Some(i) = devs
+            .iter()
+            .position(|d| d.name().ok().as_deref() == Some(*want))
+        {
+            return Some(devs.swap_remove(i));
+        }
+    }
+    None
+}
+
+/// Resolves the device to open, in priority order:
+/// 1. the user's explicit choice (exact name match),
+/// 2. Linux only, no explicit choice: the sound server's PCM
+///    ("pipewire"/"pulse") — see [SOUND_SERVER_PCMS],
+/// 3. the host's default device.
+fn pick_device(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
+    let kind = if input { "input" } else { "output" };
+
+    let selected = if input {
+        INPUT_DEVICE_NAME.lock().unwrap().clone()
+    } else {
+        OUTPUT_DEVICE_NAME.lock().unwrap().clone()
+    };
+    if let Some(want) = selected {
+        let devs = enumerate_devices(host, input);
+        if let Some(dev) = find_device_by_name(devs, &[want.as_str()]) {
+            return Some(dev);
+        }
+        eprintln!(
+            "audio: chosen {} device \"{}\" not available, falling back",
+            kind, want
+        );
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            let devs = enumerate_devices(host, input);
+            if let Some(dev) = find_device_by_name(devs, &SOUND_SERVER_PCMS) {
+                return Some(dev);
+            }
+        }
+    }
+    if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    }
+}
+
+/// Rebuilds the cpal output stream on the selected device (see pick_device).
+/// The internal mixing clock stays 48 kHz stereo at all times; the
+/// device-facing stream is negotiated through a fallback chain (48k stereo
+/// Fixed(960) → 48k stereo Default → 48k mono → device default sample rate
+/// with in-callback linear resampling), so desktop hosts that reject the
+/// fixed Android-style config still work. Stereo is preferred because
+/// panning/positional audio needs distinct L/R.
+///
+/// Resets playback state exactly like `ts_stop_audio` — buffers are cleared
+/// and jitter/decoders are rebuilt on the next incoming audio. Called on
+/// connect and, from the maintenance task, when `OUTPUT_RESTART_REQUESTED`
+/// is set (device route change or stream error).
 fn restart_output_stream() {
     // Drop the old stream first so the new one is the only active consumer.
     AUDIO_STREAM.lock().unwrap().0 = None;
@@ -1190,51 +1256,148 @@ fn restart_output_stream() {
     AUDIO_DECODERS_STEREO.clear();
     PLAYED_SAMPLES.store(0, Ordering::Relaxed);
     ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
+    CB_STATS.expected_next_played.store(0, Ordering::Relaxed);
 
     let host = cpal::default_host();
-    if let Some(device) = host.default_output_device() {
-        // Prefer stereo output — panning/positional audio needs distinct L/R.
-        // Fall back to mono (center-mixed in the callback) when the device
-        // rejects the stereo config.
-        for channels in [2u16, 1] {
-            let config = cpal::StreamConfig {
-                channels,
-                sample_rate: cpal::SampleRate(48000),
-                buffer_size: cpal::BufferSize::Fixed(960),
-            };
-            match device.build_output_stream(
-                &config,
-                make_output_callback(channels as usize),
-                |err| {
-                    eprintln!("cpal output error: {}", err);
-                    // A stream error usually means the output device went away
-                    // (e.g. Bluetooth route change); rebuild on the next
-                    // maintenance tick.
-                    OUTPUT_RESTART_REQUESTED.store(true, Ordering::Relaxed);
-                },
-                None,
-            ) {
-                Ok(stream) => {
-                    if stream.play().is_ok() {
-                        crate::AUDIO_STREAM.lock().unwrap().0 = Some(stream);
-                        eprintln!(
-                            "cpal: output stream started ({}ch, Default buffer, sample-driven)",
-                            channels
-                        );
-                        break;
-                    } else {
-                        eprintln!("cpal: play() failed ({}ch)", channels);
-                    }
-                }
-                Err(e) => eprintln!(
-                    "cpal: build_output_stream failed ({}ch): {}",
-                    channels, e
-                ),
-            }
-        }
-    } else {
+    let Some(device) = pick_device(&host, false) else {
         eprintln!("cpal: no output device");
+        return;
+    };
+    eprintln!(
+        "cpal: output device \"{}\"",
+        device.name().unwrap_or_default()
+    );
+
+    // Stereo is preferred — panning/positional audio needs distinct L/R;
+    // mono output plays the centered (L+R)/2 downmix. The fallback chain
+    // negotiates buffer size, channel count and finally the device's own
+    // sample rate (with in-callback linear resampling), so desktop hosts
+    // that reject the fixed Android-style config still work.
+    let mut candidates = vec![
+        cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Fixed(960),
+        },
+        cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        },
+        cpal::StreamConfig {
+            channels: 1,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Fixed(960),
+        },
+        cpal::StreamConfig {
+            channels: 1,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        },
+    ];
+    if let Ok(default) = device.default_output_config() {
+        if default.sample_rate().0 != 48000 {
+            candidates.push(cpal::StreamConfig {
+                channels: default.channels(),
+                sample_rate: default.sample_rate(),
+                buffer_size: cpal::BufferSize::Default,
+            });
+        }
     }
+
+    for config in candidates {
+        let channels = config.channels as usize;
+        // 48k mix positions consumed per device output position (interpolation
+        // phase advance); 1.0 = passthrough.
+        let ratio = 48000.0 / config.sample_rate.0 as f64;
+        let stream = device.build_output_stream(
+            &config,
+            {
+                let ring = std::cell::RefCell::new(OutRing::new());
+                let sfx_slots = std::cell::RefCell::new([SfxSlot::default(); 2]);
+                // Linear-resampler state carried across callbacks: frac is the
+                // position between s0 (last consumed 48k mix position) and s1
+                // (the next ring position). s1 = None until the first callback.
+                let rs_frac = std::cell::Cell::new(0.0f64);
+                let rs_s0 = std::cell::Cell::new([0.0f32, 0.0f32]);
+                let rs_s1: std::cell::Cell<Option<[f32; 2]>> = std::cell::Cell::new(None);
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    let mut ring = ring.borrow_mut();
+                    let mut sfx = sfx_slots.borrow_mut();
+
+                    let n_out = data.len() / channels;
+                    let mut frac = rs_frac.get();
+                    let mut s0 = rs_s0.get();
+                    let mut s1 = rs_s1.take();
+                    if s1.is_none() {
+                        // First callback: seed the interpolation pair.
+                        while ring.len < 2 {
+                            gen_output_mix_frame(&mut ring, &mut sfx);
+                        }
+                        s0 = ring.pop();
+                        s1 = Some(ring.pop());
+                    }
+                    for j in 0..n_out {
+                        let s1v = s1.unwrap_or([0.0, 0.0]);
+                        let l = s0[0] + (s1v[0] - s0[0]) * frac as f32;
+                        let r = s0[1] + (s1v[1] - s0[1]) * frac as f32;
+                        let base = j * channels;
+                        if channels == 2 {
+                            data[base] = l;
+                            data[base + 1] = r;
+                        } else {
+                            data[base] = (l + r) * 0.5;
+                        }
+                        frac += ratio;
+                        while frac >= 1.0 {
+                            frac -= 1.0;
+                            s0 = s1v;
+                            if ring.len == 0 {
+                                gen_output_mix_frame(&mut ring, &mut sfx);
+                            }
+                            s1 = Some(ring.pop());
+                        }
+                    }
+                    rs_frac.set(frac);
+                    rs_s0.set(s0);
+                    rs_s1.set(s1);
+
+                    CB_STATS.callbacks.fetch_add(1, Ordering::Relaxed);
+                    // PLAYED_SAMPLES counts PER-CHANNEL samples (see the
+                    // gen_output_mix_frame doc).
+                    CB_STATS
+                        .samples_total
+                        .fetch_add((data.len() / channels) as u64, Ordering::Relaxed);
+                }
+            },
+            |err| {
+                eprintln!("cpal output error: {}", err);
+                // A stream error usually means the output device went away
+                // (e.g. Bluetooth route change); rebuild on the next
+                // maintenance tick.
+                OUTPUT_RESTART_REQUESTED.store(true, Ordering::Relaxed);
+            },
+            None,
+        );
+        match stream {
+            Ok(stream) => match stream.play() {
+                Ok(()) => {
+                    crate::AUDIO_STREAM.lock().unwrap().0 = Some(stream);
+                    eprintln!(
+                        "cpal: output stream started ({} Hz, {} ch, mix resample ratio {:.4})",
+                        config.sample_rate.0, config.channels, ratio
+                    );
+                    return;
+                }
+                Err(e) => eprintln!("cpal: play() failed ({} Hz): {}", config.sample_rate.0, e),
+            },
+            Err(e) => eprintln!(
+                "cpal: build_output_stream failed ({} Hz, {} ch): {}",
+                config.sample_rate.0, config.channels, e
+            ),
+        }
+    }
+    eprintln!("cpal: all output stream configurations failed");
 }
 
 /// Background task: periodically cleans up stale clients and refreshes the
@@ -3328,6 +3491,8 @@ async fn event_loop(
 /// loop is already dead.  This is needed because in release builds Android kills
 /// the process almost immediately after onTaskRemoved returns — the event loop
 /// may not get another iteration to check the flag.
+/// Android-only: other platforms disconnect through ts_disconnect.
+#[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect(
     _env: *mut std::ffi::c_void,
@@ -3401,6 +3566,8 @@ pub extern "C" fn ts_restart_audio_output() {
 
 /// JNI entry used by KeepAliveService's AudioDeviceCallback when the output
 /// route changes (Bluetooth/wired/USB device added or removed).
+/// Android-only: other platforms rely on the cpal stream-error rebuild path.
+#[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsRestartAudioOutput(
     _env: *mut std::ffi::c_void,
@@ -3709,27 +3876,304 @@ pub extern "C" fn ts_stop_audio() {
     teardown_output_state();
 }
 
+/// Routes raw mic samples into the encode/send pipeline — the shared path
+/// used by both ts_send_audio (Dart push, Android) and the cpal input
+/// callback (desktop capture). VAD, mic gain and Opus encoding happen
+/// downstream in the event loop's Command::SendAudio handler. No-op when not
+/// connected.
+fn queue_mic_samples(samples: Vec<f32>) -> bool {
+    if samples.is_empty() || !STATE.lock().connected {
+        return false;
+    }
+    let tx = COMMAND_TX.lock();
+    match tx.as_ref() {
+        Some(tx) => tx.send(Command::SendAudio { data: samples }).is_ok(),
+        None => false,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
-    let connected = STATE.lock().connected;
-    if !connected {
-        return 0;
-    }
-    if data_len == 0 {
+    if data.is_null() || data_len == 0 {
         return 0;
     }
     let raw = unsafe { std::slice::from_raw_parts(data, data_len as usize) };
-    let samples: Vec<f32> = raw.to_vec();  // raw samples — gain applied after VAD
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx.send(Command::SendAudio { data: samples }).is_ok() {
-            1
-        } else {
-            0
+    let samples: Vec<f32> = raw.to_vec(); // raw samples — gain applied after VAD
+    queue_mic_samples(samples) as u8
+}
+
+// ─── Mic capture (desktop; Android uses the Kotlin EventChannel path) ──
+
+/// Per-stream mic resampler: device input (interleaved f32) → 48 kHz mono.
+/// Streaming linear interpolation with state carried across callbacks.
+struct MicResampler {
+    /// Input samples per one 48 kHz output sample (device_rate / 48000).
+    ratio: f64,
+    channels: usize,
+    /// Interpolation phase between `prev` and the next input sample, [0,1).
+    phase: f64,
+    prev: f32,
+    started: bool,
+    /// Reused scratch buffers (no allocation in the audio callback).
+    mono: Vec<f32>,
+    out: Vec<f32>,
+}
+
+impl MicResampler {
+    fn new(channels: usize, rate: u32) -> Self {
+        Self {
+            ratio: rate as f64 / 48000.0,
+            channels,
+            phase: 0.0,
+            prev: 0.0,
+            started: false,
+            mono: Vec::with_capacity(4096),
+            out: Vec::with_capacity(4096),
         }
-    } else {
-        0
     }
+
+    /// Consumes one input callback chunk and appends 48 kHz mono samples to
+    /// `self.out`.
+    fn process(&mut self, data: &[f32]) {
+        let frames = data.len() / self.channels;
+        self.mono.clear();
+        if self.channels == 1 {
+            self.mono.extend_from_slice(data);
+        } else {
+            for f in 0..frames {
+                let base = f * self.channels;
+                let sum: f32 = data[base..base + self.channels].iter().sum();
+                self.mono.push(sum / self.channels as f32);
+            }
+        }
+        if self.ratio == 1.0 {
+            self.out.extend_from_slice(&self.mono);
+            return;
+        }
+        let n = self.mono.len();
+        let mut i = 0usize;
+        if !self.started {
+            if n == 0 {
+                return;
+            }
+            // Output sample 0 IS the first input sample; the next output
+            // lands at input position `ratio`.
+            self.prev = self.mono[0];
+            self.started = true;
+            i = 1;
+            self.phase = self.ratio;
+            self.out.push(self.prev);
+        }
+        while i < n {
+            let x = self.mono[i];
+            while self.phase < 1.0 {
+                let s = self.prev + (x - self.prev) * self.phase as f32;
+                self.out.push(s);
+                self.phase += self.ratio;
+            }
+            self.phase -= 1.0;
+            self.prev = x;
+            i += 1;
+        }
+    }
+}
+
+/// Starts the cpal microphone input stream (desktop capture). Requests
+/// 48 kHz mono first, falling back to the device's default input
+/// sample rate and channel count (downmixed + resampled to 48 kHz mono in
+/// the callback). Idempotent: true when a capture stream already runs.
+pub fn start_mic_capture() -> bool {
+    if crate::MIC_STREAM.lock().unwrap().0.is_some() {
+        return true;
+    }
+    let host = cpal::default_host();
+    let Some(device) = pick_device(&host, true) else {
+        eprintln!("cpal mic: no input device");
+        return false;
+    };
+    eprintln!(
+        "cpal mic: input device \"{}\"",
+        device.name().unwrap_or_default()
+    );
+    let mut candidates = vec![cpal::StreamConfig {
+        channels: 1,
+        sample_rate: cpal::SampleRate(48000),
+        buffer_size: cpal::BufferSize::Default,
+    }];
+    if let Ok(default) = device.default_input_config() {
+        if default.sample_rate().0 != 48000 {
+            candidates.push(cpal::StreamConfig {
+                channels: 1,
+                sample_rate: default.sample_rate(),
+                buffer_size: cpal::BufferSize::Default,
+            });
+        }
+        if default.channels() > 1 {
+            candidates.push(cpal::StreamConfig {
+                channels: default.channels(),
+                sample_rate: default.sample_rate(),
+                buffer_size: cpal::BufferSize::Default,
+            });
+        }
+    }
+
+    for config in candidates {
+        let mut resampler = MicResampler::new(config.channels as usize, config.sample_rate.0);
+        let stream = device.build_input_stream(
+            &config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                resampler.process(data);
+                if resampler.out.is_empty() {
+                    return;
+                }
+                // Publish the block RMS for the UI level meter.
+                let sum_sq: f64 = resampler.out.iter().map(|s| (*s * *s) as f64).sum();
+                let rms = (sum_sq / resampler.out.len() as f64).sqrt() as f32;
+                crate::MIC_RMS.store(f32::to_bits(rms), Ordering::Relaxed);
+                queue_mic_samples(std::mem::take(&mut resampler.out));
+            },
+            |err| eprintln!("cpal mic input error: {}", err),
+            None,
+        );
+        match stream {
+            Ok(stream) => {
+                crate::MIC_STREAM.lock().unwrap().0 = Some(stream);
+                eprintln!(
+                    "cpal mic: input stream started ({} Hz, {} ch)",
+                    config.sample_rate.0, config.channels
+                );
+                return true;
+            }
+            Err(e) => eprintln!(
+                "cpal mic: build_input_stream failed ({} Hz, {} ch): {}",
+                config.sample_rate.0, config.channels, e
+            ),
+        }
+    }
+    eprintln!("cpal mic: all input configurations failed");
+    false
+}
+
+/// Stops the microphone input stream (Dart-driven lifecycle).
+pub fn stop_mic_capture() {
+    let mut guard = crate::MIC_STREAM.lock().unwrap();
+    if guard.0.take().is_some() {
+        eprintln!("cpal mic: input stream stopped");
+    }
+    drop(guard);
+    crate::MIC_RMS.store(0, Ordering::Relaxed);
+}
+
+/// Desktop mic capture toggle. Returns 1 on success (or when already in the
+/// requested state), 0 when the input stream could not be built.
+#[no_mangle]
+pub extern "C" fn ts_set_mic_capture(enable: u8) -> u8 {
+    if enable != 0 {
+        start_mic_capture() as u8
+    } else {
+        stop_mic_capture();
+        1
+    }
+}
+
+/// RMS of the most recent native-capture mic block (0..1). Android reports
+/// levels from its own Dart-side EventChannel path instead.
+#[no_mangle]
+pub extern "C" fn ts_get_mic_rms() -> f32 {
+    f32::from_bits(crate::MIC_RMS.load(Ordering::Relaxed))
+}
+
+// ─── Audio device enumeration / selection (desktop picker UI) ───────
+
+#[derive(serde::Serialize)]
+struct AudioDeviceInfo {
+    name: String,
+    is_default: bool,
+}
+
+/// Lists host output/input devices for the picker UI as JSON:
+/// `{"outputs":[{"name","is_default"}],"inputs":[...]}`. The host default
+/// is marked; on Linux sound-server PCMs and hw devices sort first (alsa
+/// exposes many alias PCMs — de-duplicated here). Platforms without
+/// enumeration support (Android/oboe) return empty arrays.
+fn list_audio_devices(host: &cpal::Host, input: bool) -> Vec<AudioDeviceInfo> {
+    let default_name = if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    }
+    .and_then(|d| d.name().ok());
+    let mut seen = HashSet::new();
+    let mut out: Vec<AudioDeviceInfo> = Vec::new();
+    for d in enumerate_devices(host, input) {
+        if let Ok(name) = d.name() {
+            if seen.insert(name.clone()) {
+                out.push(AudioDeviceInfo {
+                    is_default: default_name.as_deref() == Some(name.as_str()),
+                    name,
+                });
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let rank = |n: &str| {
+            if SOUND_SERVER_PCMS.contains(&n) {
+                0
+            } else if n.starts_with("hw:") {
+                1
+            } else {
+                2
+            }
+        };
+        out.sort_by(|a, b| {
+            rank(&a.name)
+                .cmp(&rank(&b.name))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+    out
+}
+
+/// Desktop audio device list (see list_audio_devices for the JSON shape).
+#[no_mangle]
+pub extern "C" fn ts_get_audio_devices() -> *mut c_char {
+    let host = cpal::default_host();
+    let doc = serde_json::json!({
+        "outputs": list_audio_devices(&host, false),
+        "inputs": list_audio_devices(&host, true),
+    });
+    to_c_str(doc.to_string())
+}
+
+/// Selects the output device by name ("" = system default). While
+/// connected the output stream is rebuilt by the maintenance task within
+/// 500ms; when disconnected the choice applies at the next connect.
+#[no_mangle]
+pub extern "C" fn ts_set_audio_output_device(name: *const c_char) -> u8 {
+    let name = unsafe { cstr_to_string(name) };
+    *OUTPUT_DEVICE_NAME.lock().unwrap() = if name.is_empty() { None } else { Some(name) };
+    if STATE.lock().connected {
+        OUTPUT_RESTART_REQUESTED.store(true, Ordering::Relaxed);
+    }
+    1
+}
+
+/// Selects the input (mic) device by name ("" = system default). A running
+/// capture stream is restarted on the new device immediately; returns 0
+/// when that restart failed.
+#[no_mangle]
+pub extern "C" fn ts_set_audio_input_device(name: *const c_char) -> u8 {
+    let name = unsafe { cstr_to_string(name) };
+    let was_running = crate::MIC_STREAM.lock().unwrap().0.is_some();
+    *INPUT_DEVICE_NAME.lock().unwrap() = if name.is_empty() { None } else { Some(name) };
+    if was_running {
+        stop_mic_capture();
+        if !start_mic_capture() {
+            return 0;
+        }
+    }
+    1
 }
 
 // ─── SFX (custom samples / preview / local triggers) ─────────────────

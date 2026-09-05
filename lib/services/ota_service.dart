@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 
 import '../l10n/generated/app_localizations.dart';
+
 import 'package:http/http.dart' as http;
 import 'package:ota_update/ota_update.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -94,6 +96,10 @@ class OtaSettings {
 class OtaService {
   static final _versionRe = RegExp(r'^v?(\d+)\.(\d+)\.(\d+)$');
 
+  /// OTA delivers release APKs — only meaningful on Android. Desktop/iOS
+  /// releases are plain bundle artifacts; no in-app updater exists there.
+  static bool get isSupported => Platform.isAndroid;
+
   /// Check for an update. With [OtaSource.auto] both GitHub and Gitee are
   /// probed concurrently (first successful response wins, with a preference
   /// for the last automatically selected source when both succeed) and the
@@ -174,6 +180,7 @@ class OtaService {
 
   /// Download and install the APK, reporting progress via OtaEvent.
   static Stream<OtaEvent> downloadAndInstall(String apkUrl) {
+    if (!isSupported) return const Stream.empty();
     return OtaUpdate().execute(apkUrl, destinationFilename: 'nek0_update.apk');
   }
 

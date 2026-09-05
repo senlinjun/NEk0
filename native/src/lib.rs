@@ -579,10 +579,14 @@ impl TsConnection {
 pub static STATE: Lazy<Mutex<TsConnection>> = Lazy::new(|| Mutex::new(TsConnection::new()));
 pub static PANIC_LOG: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
-/// cpal output stream (Send-safe wrapper). Drop to stop audio playback.
+/// cpal stream (Send-safe wrapper). Drop to stop audio playback.
 pub struct SendStream(pub Option<cpal::Stream>);
 unsafe impl Send for SendStream {}
 pub static AUDIO_STREAM: std::sync::Mutex<SendStream> = std::sync::Mutex::new(SendStream(None));
+/// cpal microphone input stream (desktop capture path). Android keeps its
+/// Kotlin AudioRecord → EventChannel pipeline instead — this stays None
+/// there. Dart drives the lifecycle via ts_set_mic_capture.
+pub static MIC_STREAM: std::sync::Mutex<SendStream> = std::sync::Mutex::new(SendStream(None));
 
 // ─── Lock-free audio globals ─────────────────────────────────────────
 
@@ -597,6 +601,10 @@ pub static PLAYED_SAMPLES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 /// Refreshed by the maintenance task every 500ms. Lock-free via ArcSwap.
 pub static ACTIVE_CLIENT_IDS: Lazy<arc_swap::ArcSwap<Vec<u16>>> =
     Lazy::new(|| arc_swap::ArcSwap::from(std::sync::Arc::new(Vec::new())));
+/// RMS of the most recent native-capture mic block (f32::to_bits, 0..1).
+/// Published by the cpal input callback (desktop / iOS), read by
+/// ts_get_mic_rms for the UI level meter. 0 = silence / capture inactive.
+pub static MIC_RMS: AtomicU32 = AtomicU32::new(0);
 
 // ─── Channel-event SFX (25 built-in sounds) ──────────────────────────
 

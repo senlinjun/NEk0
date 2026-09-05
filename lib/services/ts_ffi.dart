@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:ffi';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
+
 import 'package:ffi/ffi.dart';
 
 // Load the native Rust library
@@ -9,6 +10,15 @@ final DynamicLibrary _lib = _loadLib();
 DynamicLibrary _loadLib() {
   if (Platform.isAndroid) {
     return DynamicLibrary.open('libtsclient.so');
+  }
+  if (Platform.isWindows) {
+    // Bundled next to the exe (standard DLL search order finds it there).
+    return DynamicLibrary.open('tsclient.dll');
+  }
+  if (Platform.isLinux) {
+    // The Flutter Linux bundle lays out: <bundle>/nek0 + <bundle>/lib/.
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    return DynamicLibrary.open('$exeDir/lib/libtsclient.so');
   }
   throw UnsupportedError('Platform not supported');
 }
@@ -86,6 +96,22 @@ typedef _StopAudioDart = void Function();
 // ts_send_audio(data: *const f32, data_len: u32) -> bool
 typedef _SendAudioNative = Uint8 Function(Pointer<Float>, Uint32);
 typedef _SendAudioDart = int Function(Pointer<Float>, int);
+
+// ts_set_mic_capture(enable: u8) -> u8 (desktop/iOS cpal capture toggle)
+typedef _SetMicCaptureNative = Uint8 Function(Uint8);
+typedef _SetMicCaptureDart = int Function(int);
+
+// ts_get_mic_rms() -> f32 (RMS of the last native-capture mic block)
+typedef _GetMicRmsNative = Float Function();
+typedef _GetMicRmsDart = double Function();
+
+// ts_get_audio_devices() -> *char (JSON {outputs:[{name,is_default}], inputs:[...]})
+typedef _GetAudioDevicesNative = Pointer<Utf8> Function();
+typedef _GetAudioDevicesDart = Pointer<Utf8> Function();
+
+// ts_set_audio_output_device(name) / ts_set_audio_input_device(name) -> bool
+typedef _SetAudioDeviceNative = Uint8 Function(Pointer<Utf8>);
+typedef _SetAudioDeviceDart = int Function(Pointer<Utf8>);
 
 // ts_set_identity(json: *const c_char)
 typedef _SetIdentityNative = Void Function(Pointer<Utf8>);
@@ -310,6 +336,25 @@ final _stopAudio = _lib.lookupFunction<_StopAudioNative, _StopAudioDart>(
 final _sendAudio = _lib.lookupFunction<_SendAudioNative, _SendAudioDart>(
   'ts_send_audio',
 );
+final _setMicCapture = _lib
+    .lookupFunction<_SetMicCaptureNative, _SetMicCaptureDart>(
+      'ts_set_mic_capture',
+    );
+final _getMicRms = _lib.lookupFunction<_GetMicRmsNative, _GetMicRmsDart>(
+  'ts_get_mic_rms',
+);
+final _getAudioDevices = _lib
+    .lookupFunction<_GetAudioDevicesNative, _GetAudioDevicesDart>(
+      'ts_get_audio_devices',
+    );
+final _setAudioOutputDevice = _lib
+    .lookupFunction<_SetAudioDeviceNative, _SetAudioDeviceDart>(
+      'ts_set_audio_output_device',
+    );
+final _setAudioInputDevice = _lib
+    .lookupFunction<_SetAudioDeviceNative, _SetAudioDeviceDart>(
+      'ts_set_audio_input_device',
+    );
 final _setIdentity = _lib.lookupFunction<_SetIdentityNative, _SetIdentityDart>(
   'ts_set_identity',
 );
@@ -569,6 +614,49 @@ class TsNative {
 
   static bool sendAudio(Pointer<Float> data, int dataLen) {
     return _sendAudio(data, dataLen) != 0;
+  }
+
+  /// Toggles the native (cpal) microphone capture stream — desktop / iOS
+  /// only; Android captures through its Kotlin EventChannel instead.
+  /// Returns true when the stream is in the requested state.
+  static bool setMicCapture(bool enable) {
+    return _setMicCapture(enable ? 1 : 0) != 0;
+  }
+
+  /// RMS (0..1) of the most recent native-capture mic block. Android
+  /// reports levels from its own EventChannel data instead.
+  static double getMicRms() {
+    return _getMicRms();
+  }
+
+  /// Host audio devices for the picker UI (desktop). Shape:
+  /// `{"outputs":[{"name","is_default"}],"inputs":[...]}` — empty arrays
+  /// where enumeration is unsupported (Android).
+  static Map<String, dynamic> getAudioDevices() {
+    final str = _ptrToString(_getAudioDevices());
+    return jsonDecode(str) as Map<String, dynamic>;
+  }
+
+  /// Selects the output device by name ('' = system default). Applied to
+  /// the running stream within 500ms while connected.
+  static bool setAudioOutputDevice(String name) {
+    final ptr = _strToPtr(name);
+    try {
+      return _setAudioOutputDevice(ptr) != 0;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Selects the input (mic) device by name ('' = system default). A
+  /// running capture stream restarts immediately.
+  static bool setAudioInputDevice(String name) {
+    final ptr = _strToPtr(name);
+    try {
+      return _setAudioInputDevice(ptr) != 0;
+    } finally {
+      malloc.free(ptr);
+    }
   }
 
   static void setMicGain(double gain) {

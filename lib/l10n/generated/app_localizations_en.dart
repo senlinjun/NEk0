@@ -148,6 +148,18 @@ class AppLocalizationsEn extends AppLocalizations {
   String get micPermissionDenied => 'Microphone permission denied';
 
   @override
+  String get audioDevicesSection => 'Audio devices';
+
+  @override
+  String get audioOutputDevice => 'Output device';
+
+  @override
+  String get audioInputDevice => 'Input device';
+
+  @override
+  String get audioSystemDefault => 'System default';
+
+  @override
   String get updateSection => 'Update';
 
   @override

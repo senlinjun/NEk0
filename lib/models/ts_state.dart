@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -261,6 +263,14 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     if (savedMicGain != null) {
       TsNative.setMicGain(savedMicGain);
       state = state.copyWith(micGain: savedMicGain);
+    }
+    // Apply persisted audio device choices before any stream is built
+    // (desktop only — Android routes through the system automatically).
+    if (!Platform.isAndroid) {
+      TsNative.setAudioOutputDevice(
+        prefs.getString('audio_output_device') ?? '',
+      );
+      TsNative.setAudioInputDevice(prefs.getString('audio_input_device') ?? '');
     }
 
     // Call Rust FFI - starts async connection in background

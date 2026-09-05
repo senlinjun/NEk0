@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../l10n/generated/app_localizations.dart';
+
 import 'package:uuid/uuid.dart';
+
 import '../models/server.dart';
 
 class ServerFormDialog extends StatefulWidget {

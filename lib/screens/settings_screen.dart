@@ -1,3 +1,4 @@
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -11,6 +12,7 @@ import '../models/ts_state.dart';
 import '../services/audio_service.dart';
 import '../services/ota_service.dart';
 import '../services/sfx_service.dart';
+import '../services/ts_ffi.dart';
 import '../widgets/voice_settings_panel.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -32,6 +34,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   double _testRms = 0.0;
   final Map<int, String?> _sfxNames = {};
 
+  // Audio device picker (desktop only; '' = system default).
+  List<Map<String, dynamic>> _outputDevices = [];
+  List<Map<String, dynamic>> _inputDevices = [];
+  String _outputDevice = '';
+  String _inputDevice = '';
+
   @override
   void initState() {
     super.initState();
@@ -40,6 +48,84 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     });
     _loadLanguage();
     _loadSfxNames();
+    if (!Platform.isAndroid) _loadAudioDevices();
+  }
+
+  /// Restores the persisted device choice and fetches the device list.
+  /// The Rust-side selection is (re)applied here so a choice made in an
+  /// earlier session takes effect before the first connect.
+  Future<void> _loadAudioDevices() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final out = prefs.getString('audio_output_device') ?? '';
+      final inp = prefs.getString('audio_input_device') ?? '';
+      TsNative.setAudioOutputDevice(out);
+      TsNative.setAudioInputDevice(inp);
+      final devs = TsNative.getAudioDevices();
+      if (!mounted) return;
+      setState(() {
+        _outputDevice = out;
+        _inputDevice = inp;
+        _outputDevices = (devs['outputs'] as List? ?? const [])
+            .cast<Map<String, dynamic>>();
+        _inputDevices = (devs['inputs'] as List? ?? const [])
+            .cast<Map<String, dynamic>>();
+      });
+    } catch (e) {
+      debugPrint('SettingsScreen: audio device load failed: $e');
+    }
+  }
+
+  Future<void> _onOutputDeviceChanged(String value) async {
+    setState(() => _outputDevice = value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('audio_output_device', value);
+    TsNative.setAudioOutputDevice(value);
+  }
+
+  Future<void> _onInputDeviceChanged(String value) async {
+    setState(() => _inputDevice = value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('audio_input_device', value);
+    TsNative.setAudioInputDevice(value);
+  }
+
+  Widget _deviceDropdown(
+    String label,
+    String current,
+    List<Map<String, dynamic>> devices,
+    ValueChanged<String> onChanged,
+  ) {
+    final al = AppLocalizations.of(context);
+    final items = <DropdownMenuItem<String>>[
+      DropdownMenuItem(value: '', child: Text(al.audioSystemDefault)),
+      for (final d in devices)
+        DropdownMenuItem(
+          value: d['name'] as String,
+          child: Text(d['name'] as String, overflow: TextOverflow.ellipsis),
+        ),
+    ];
+    return Row(
+      children: [
+        SizedBox(
+          width: 110,
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.grey, fontSize: 13),
+          ),
+        ),
+        Expanded(
+          child: DropdownButton<String>(
+            value: current,
+            isExpanded: true,
+            underline: const SizedBox.shrink(),
+            dropdownColor: const Color(0xFF1A1A2E),
+            items: items,
+            onChanged: (v) => onChanged(v ?? ''),
+          ),
+        ),
+      ],
+    );
   }
 
   Future<void> _loadLanguage() async {
@@ -102,6 +188,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _checkNow() async {
+    if (!OtaService.isSupported) return;
     final source = _ota.source;
     final messenger = ScaffoldMessenger.of(context);
     messenger.showSnackBar(
@@ -552,93 +639,127 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
               ),
             ),
-            const SizedBox(height: 24),
-            _SectionHeader(AppLocalizations.of(context).updateSection),
-            const SizedBox(height: 8),
-            Card(
-              color: const Color(0xFF1A1A2E),
-              margin: EdgeInsets.zero,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          AppLocalizations.of(context).checkForUpdates,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 14,
-                          ),
-                        ),
-                        Switch(
-                          value: _ota.enabled,
-                          activeTrackColor: Colors.blue,
-                          onChanged: (v) {
-                            setState(() => _ota.enabled = v);
-                            _ota.setEnabled(v);
-                          },
-                        ),
-                      ],
-                    ),
-                    const Divider(height: 20, color: Color(0xFF2A2A4A)),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        AppLocalizations.of(context).updateSource,
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 12,
-                        ),
+            // Desktop device picker: choose which output/input device the
+            // Rust audio engine uses ('' = follow the system default).
+            if (!Platform.isAndroid) ...[
+              const SizedBox(height: 24),
+              _SectionHeader(AppLocalizations.of(context).audioDevicesSection),
+              const SizedBox(height: 8),
+              Card(
+                color: const Color(0xFF1A1A2E),
+                margin: EdgeInsets.zero,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      _deviceDropdown(
+                        AppLocalizations.of(context).audioOutputDevice,
+                        _outputDevice,
+                        _outputDevices,
+                        _onOutputDeviceChanged,
                       ),
-                    ),
-                    RadioGroup<OtaSource>(
-                      groupValue: _ota.source,
-                      onChanged: (v) {
-                        if (v == null) return;
-                        setState(() => _ota.source = v);
-                        _ota.setSource(v);
-                      },
-                      child: Column(
-                        children: [
-                          for (final source in OtaSource.values)
-                            RadioListTile<OtaSource>(
-                              contentPadding: EdgeInsets.zero,
-                              dense: true,
-                              activeColor: Colors.blue,
-                              title: Text(
-                                source == OtaSource.auto
-                                    ? AppLocalizations.of(
-                                        context,
-                                      ).updateSourceAuto
-                                    : source.label,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 14,
-                                ),
-                              ),
-                              value: source,
-                            ),
-                        ],
+                      const SizedBox(height: 8),
+                      _deviceDropdown(
+                        AppLocalizations.of(context).audioInputDevice,
+                        _inputDevice,
+                        _inputDevices,
+                        _onInputDeviceChanged,
                       ),
-                    ),
-                    const SizedBox(height: 4),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: _otaLoaded ? _checkNow : null,
-                        icon: const Icon(Icons.system_update_alt, size: 18),
-                        label: Text(AppLocalizations.of(context).checkNow),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Colors.blue,
-                        ),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
+            ],
+            // OTA = APK downloads from the release channel — Android-only.
+            if (OtaService.isSupported) ...[
+              const SizedBox(height: 24),
+              _SectionHeader(AppLocalizations.of(context).updateSection),
+              const SizedBox(height: 8),
+              Card(
+                color: const Color(0xFF1A1A2E),
+                margin: EdgeInsets.zero,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            AppLocalizations.of(context).checkForUpdates,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                            ),
+                          ),
+                          Switch(
+                            value: _ota.enabled,
+                            activeTrackColor: Colors.blue,
+                            onChanged: (v) {
+                              setState(() => _ota.enabled = v);
+                              _ota.setEnabled(v);
+                            },
+                          ),
+                        ],
+                      ),
+                      const Divider(height: 20, color: Color(0xFF2A2A4A)),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          AppLocalizations.of(context).updateSource,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      RadioGroup<OtaSource>(
+                        groupValue: _ota.source,
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setState(() => _ota.source = v);
+                          _ota.setSource(v);
+                        },
+                        child: Column(
+                          children: [
+                            for (final source in OtaSource.values)
+                              RadioListTile<OtaSource>(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                activeColor: Colors.blue,
+                                title: Text(
+                                  source == OtaSource.auto
+                                      ? AppLocalizations.of(
+                                          context,
+                                        ).updateSourceAuto
+                                      : source.label,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                value: source,
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _otaLoaded ? _checkNow : null,
+                          icon: const Icon(Icons.system_update_alt, size: 18),
+                          label: Text(AppLocalizations.of(context).checkNow),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
