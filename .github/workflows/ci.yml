@@ -54,6 +54,7 @@ jobs:
         dart format . --set-exit-if-changed
         flutter analyze
     - name: Build Linux bundle
+      if: startsWith(github.ref, 'refs/tags/')
       run: flutter build linux --release
     - name: Package Linux bundle
       if: startsWith(github.ref, 'refs/tags/')
@@ -97,6 +98,7 @@ jobs:
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file Nek0_${{github.ref_name}}_linux_x64.tar.gz
 
   windows:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
@@ -116,17 +118,14 @@ jobs:
     - name: Build Windows bundle
       run: flutter build windows --release
     - name: Package Windows bundle
-      if: startsWith(github.ref, 'refs/tags/')
       shell: pwsh
       run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath Nek0_${{github.ref_name}}_windows_x64.zip
     - name: GH Release
-      if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v3.0.2
       with:
           token: ${{ secrets.TOKEN }}
           files: Nek0_${{github.ref_name}}_windows_x64.zip
     - name: Gitee Release
-      if: startsWith(github.ref, 'refs/tags/')
       run: |
           sudo apt install python3-requests
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file Nek0_${{github.ref_name}}_windows_x64.zip
