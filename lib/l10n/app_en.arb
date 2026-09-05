@@ -192,14 +192,55 @@
   "channelPasswordTitle": "Enter channel password",
   "channelPasswordHint": "Password",
   "channelPasswordWrong": "Wrong channel password",
-"menuEnterChannel": "Join channel",
+  "menuEnterChannel": "Join channel",
   "menuFileManager": "File management",
+  "menuServerTitle": "Server",
+  "menuCreateChannel": "Create channel",
+  "menuEditChannel": "Edit channel",
+  "menuDeleteChannel": "Delete channel",
+  "channelCreateTitle": "Create Channel",
+  "channelEditTitle": "Edit Channel",
+  "channelNameLabel": "Channel name",
+  "channelTopicLabel": "Topic (optional)",
+  "channelPasswordHelper": "Leave empty to clear",
+  "channelMaxClientsLabel": "Max clients",
+  "channelMaxClientsHelper": "Empty = unlimited",
+  "channelTypeLabel": "Type",
+  "channelTypeTemporary": "Temporary",
+  "channelTypeSemiPermanent": "Semi-permanent",
+  "channelTypePermanent": "Permanent",
+  "deleteChannelTitle": "Delete channel?",
+  "deleteChannelBody": "Delete \"{name}\"?",
+  "@deleteChannelBody": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "deleteChannelOccupied": "This channel has {count} clients — they will be moved to the default channel.",
+  "@deleteChannelOccupied": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "channelCreated": "Channel created",
+  "channelSaved": "Channel updated",
+  "channelDeleted": "Channel deleted",
+  "channelMoved": "Channel moved",
+  "menuMoveUp": "Move up",
+  "menuMoveDown": "Move down",
+  "channelDescriptionLabel": "Description",
+  "channelNeededTalkPowerLabel": "Needed talk power",
+  "channelTalkPowerHelper": "0 = everyone may talk",
+  "channelDeleteDelayLabel": "Delete delay (seconds)",
+  "channelDeleteDelayHelper": "Seconds before an empty channel is removed",
+  "channelMaxFamilyLabel": "Group user limit",
+  "channelMaxFamilyInherit": "Inherit from parent",
+  "channelMaxFamilyUnlimited": "Unlimited",
+  "channelMaxFamilyLimited": "Custom limit",
+  "channelIsDefaultLabel": "Default channel",
 
   "audio": "Audio",
 
-  "gestureSection": "Channel gestures",
-  "gestureDefault": "Tap: switch channel · Long press: menu",
-  "gestureSwapped": "Tap: menu · Long press: switch channel",
 
   "fmUp": "Up",
   "fmRootShort": "/",

@@ -500,16 +500,114 @@ class AppLocalizationsEn extends AppLocalizations {
   String get menuFileManager => 'File management';
 
   @override
+  String get menuServerTitle => 'Server';
+
+  @override
+  String get menuCreateChannel => 'Create channel';
+
+  @override
+  String get menuEditChannel => 'Edit channel';
+
+  @override
+  String get menuDeleteChannel => 'Delete channel';
+
+  @override
+  String get channelCreateTitle => 'Create Channel';
+
+  @override
+  String get channelEditTitle => 'Edit Channel';
+
+  @override
+  String get channelNameLabel => 'Channel name';
+
+  @override
+  String get channelTopicLabel => 'Topic (optional)';
+
+  @override
+  String get channelPasswordHelper => 'Leave empty to clear';
+
+  @override
+  String get channelMaxClientsLabel => 'Max clients';
+
+  @override
+  String get channelMaxClientsHelper => 'Empty = unlimited';
+
+  @override
+  String get channelTypeLabel => 'Type';
+
+  @override
+  String get channelTypeTemporary => 'Temporary';
+
+  @override
+  String get channelTypeSemiPermanent => 'Semi-permanent';
+
+  @override
+  String get channelTypePermanent => 'Permanent';
+
+  @override
+  String get deleteChannelTitle => 'Delete channel?';
+
+  @override
+  String deleteChannelBody(String name) {
+    return 'Delete \"$name\"?';
+  }
+
+  @override
+  String deleteChannelOccupied(int count) {
+    return 'This channel has $count clients — they will be moved to the default channel.';
+  }
+
+  @override
+  String get channelCreated => 'Channel created';
+
+  @override
+  String get channelSaved => 'Channel updated';
+
+  @override
+  String get channelDeleted => 'Channel deleted';
+
+  @override
+  String get channelMoved => 'Channel moved';
+
+  @override
+  String get menuMoveUp => 'Move up';
+
+  @override
+  String get menuMoveDown => 'Move down';
+
+  @override
+  String get channelDescriptionLabel => 'Description';
+
+  @override
+  String get channelNeededTalkPowerLabel => 'Needed talk power';
+
+  @override
+  String get channelTalkPowerHelper => '0 = everyone may talk';
+
+  @override
+  String get channelDeleteDelayLabel => 'Delete delay (seconds)';
+
+  @override
+  String get channelDeleteDelayHelper =>
+      'Seconds before an empty channel is removed';
+
+  @override
+  String get channelMaxFamilyLabel => 'Group user limit';
+
+  @override
+  String get channelMaxFamilyInherit => 'Inherit from parent';
+
+  @override
+  String get channelMaxFamilyUnlimited => 'Unlimited';
+
+  @override
+  String get channelMaxFamilyLimited => 'Custom limit';
+
+  @override
+  String get channelIsDefaultLabel => 'Default channel';
+
+  @override
   String get audio => 'Audio';
-
-  @override
-  String get gestureSection => 'Channel gestures';
-
-  @override
-  String get gestureDefault => 'Tap: switch channel · Long press: menu';
-
-  @override
-  String get gestureSwapped => 'Tap: menu · Long press: switch channel';
 
   @override
   String get fmUp => 'Up';

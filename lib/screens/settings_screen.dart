@@ -7,7 +7,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../l10n/generated/app_localizations.dart';
 import '../models/app_locale.dart';
-import '../models/app_settings.dart';
 import '../models/ts_state.dart';
 import '../services/audio_service.dart';
 import '../services/ota_service.dart';
@@ -500,59 +499,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  /// The short-tap / long-press role swap for channel rows.
-  Widget _buildGestureSection(BuildContext context) {
-    final al = AppLocalizations.of(context);
-    final settings = ref.watch(appSettingsProvider);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionHeader(al.gestureSection),
-        const SizedBox(height: 8),
-        Card(
-          color: const Color(0xFF1A1A2E),
-          margin: EdgeInsets.zero,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: RadioGroup<bool>(
-              groupValue: settings.channelGestureSwap,
-              onChanged: (swap) {
-                if (swap == null) return;
-                ref
-                    .read(appSettingsProvider.notifier)
-                    .setChannelGestureSwap(swap);
-              },
-              child: Column(
-                children: [
-                  RadioListTile<bool>(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    activeColor: Colors.blue,
-                    title: Text(
-                      al.gestureDefault,
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
-                    ),
-                    value: false,
-                  ),
-                  RadioListTile<bool>(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    activeColor: Colors.blue,
-                    title: Text(
-                      al.gestureSwapped,
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
-                    ),
-                    value: true,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -570,8 +516,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // Voice parameters + mic test + channel sounds, folded away by
             // default (see _buildAudioSection).
             _buildAudioSection(context),
-            const SizedBox(height: 24),
-            _buildGestureSection(context),
             const SizedBox(height: 24),
             _SectionHeader(AppLocalizations.of(context).language),
             const SizedBox(height: 8),

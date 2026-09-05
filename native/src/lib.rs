@@ -52,6 +52,27 @@ pub enum Command {
         reason: String,
         token: Option<String>,
     },
+    /// Create a channel (`channelcreate`). See [ChannelArgs] for the field
+    /// semantics; `token` correlates the server's answer (see KickClient).
+    ChannelCreate { args: ChannelArgs, token: String },
+    /// Edit channel properties (`channeledit`). See [ChannelArgs].
+    ChannelEdit { channel_id: u32, args: ChannelArgs, token: String },
+    /// Delete a channel (`channeldelete`). `force` also removes a channel
+    /// that still has clients in it (needs the force-delete permission).
+    ChannelDelete {
+        channel_id: u32,
+        force: bool,
+        token: String,
+    },
+    /// Move a channel to another parent (`channelmove`) — also re-orders
+    /// within the same parent. `order` is the sibling id the channel comes
+    /// after (0 = first; None = server default, appended at the end).
+    ChannelMove {
+        channel_id: u32,
+        parent_id: u32,
+        order: Option<u32>,
+        token: String,
+    },
     /// Add a client to a server group. `dbid` is the client's database id.
     /// `token` correlates the server's answer with the Dart caller.
     ServerGroupAddClient { sgid: u64, dbid: u64, token: String },
@@ -271,6 +292,64 @@ pub struct TsChannel {
     pub permission_hints: u64,
     /// i_channel_needed_talk_power (0 when the channel does not restrict talk).
     pub needed_talk_power: i32,
+    /// channel_maxclients (-1 when the server reported unlimited/inherited).
+    pub max_clients: i32,
+    /// channel_flag_permanent / channel_flag_semi_permanent (a channel with
+    /// both false is temporary).
+    pub is_permanent: bool,
+    pub is_semi_permanent: bool,
+    /// channel_description ('' until the server tells us — channellist does
+    /// not carry descriptions; they arrive via channeledited broadcasts).
+    pub description: String,
+    /// channel_maxfamilyclients (-1 inherited/unknown, 0 unlimited, >0 limit).
+    pub max_family_clients: i32,
+    /// channel_delete_delay in whole seconds (0 = delete as soon as empty).
+    pub delete_delay: i64,
+}
+
+/// Body of the `args_json` parameter of `ts_channel_create` /
+/// `ts_channel_edit` (all fields optional except where noted). On edit, an
+/// absent field means "leave untouched"; on create it means "server default"
+/// (the Dart form always sends the full intended state for create).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ChannelArgs {
+    /// Create only: the parent channel (0 = top level).
+    #[serde(default)]
+    pub parent_id: Option<u32>,
+    /// Create: required. Edit: absent = unchanged.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// None = untouched (edit) / none (create); Some("") = clear.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// None = untouched (edit) / none (create); Some("") = clear.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Same tri-state as [ChannelArgs::topic].
+    #[serde(default)]
+    pub description: Option<String>,
+    /// -1 inherited, 0 unlimited, >0 limit; None = untouched (edit).
+    #[serde(default)]
+    pub max_family_clients: Option<i32>,
+    /// 0 unlimited, >0 limit; None = untouched (edit).
+    #[serde(default)]
+    pub max_clients: Option<i32>,
+    /// The form always sends these (unchanged values are server-side no-ops).
+    #[serde(default)]
+    pub is_permanent: Option<bool>,
+    #[serde(default)]
+    pub is_semi_permanent: Option<bool>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
+    /// Seconds an empty temporary channel lingers before deletion.
+    #[serde(default)]
+    pub delete_delay: Option<i64>,
+    /// Edit only — `channelcreate` rejects channel_needed_talk_power.
+    #[serde(default)]
+    pub needed_talk_power: Option<i32>,
+    /// Edit only: the sibling id this channel comes after (0 = first).
+    #[serde(default)]
+    pub order: Option<u32>,
 }
 
 /// A server group (from the book's `server_groups` map, which is populated

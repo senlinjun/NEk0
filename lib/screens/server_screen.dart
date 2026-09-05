@@ -6,7 +6,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../l10n/generated/app_localizations.dart';
 
-import '../models/app_settings.dart';
 import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/group.dart';
@@ -15,6 +14,7 @@ import '../models/ts_state.dart';
 import '../services/avatar_cache.dart';
 import '../services/foreground_service.dart';
 import '../services/ts_ffi.dart';
+import '../widgets/channel_edit_screen.dart';
 import '../widgets/channel_password_dialog.dart';
 import '../widgets/channel_tree.dart';
 import '../widgets/chat_panel.dart';
@@ -229,7 +229,18 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   /// The join action reuses [_onChannelTap] so password handling stays in
   /// one place regardless of which gesture summoned the menu.
   Future<void> _onChannelMenu(TsChannel channel) async {
-    final result = await showChannelMenu(context, channel);
+    // Move availability: a neighbor must exist, and re-ordering needs
+    // modify rights (no dedicated hint bit — use the modify convention).
+    final canMove = channel.permissionHints == 0 || channel.canModify;
+    final siblings = _channelSiblings(channel);
+    final idx = siblings.indexWhere((c) => c.id == channel.id);
+    final result = await showChannelMenu(
+      context,
+      channel,
+      canCreateChannel: _canCreateChannels,
+      canMoveUp: canMove && idx > 0,
+      canMoveDown: canMove && idx >= 0 && idx < siblings.length - 1,
+    );
     if (!mounted || result == null) return;
     switch (result) {
       case channelMenuJoin:
@@ -247,16 +258,222 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             ),
           ),
         );
+      case channelMenuCreateSub:
+        await _createChannel(parentId: channel.id);
+      case channelMenuEdit:
+        await _editChannel(channel);
+      case channelMenuMoveUp:
+        await _moveChannel(channel, up: true);
+      case channelMenuMoveDown:
+        await _moveChannel(channel, up: false);
+      case channelMenuDelete:
+        await _confirmDeleteChannel(channel);
     }
+  }
+
+  /// The channel's siblings in server display order (TS3 linked-list order).
+  List<TsChannel> _channelSiblings(TsChannel channel) {
+    final conn = ref.read(tsConnectionProvider);
+    return TsChannel.resolveOrder(
+      conn.channels.where((c) => c.parentId == channel.parentId).toList()
+        ..sort((a, b) => a.id.compareTo(b.id)),
+    );
+  }
+
+  /// Moves a channel one slot among its siblings. TS3 orders siblings as a
+  /// linked list (each channel stores the id it comes after), so a move
+  /// rewrites two entries: the moved channel points past its neighbor and
+  /// the neighbor takes the moved channel's old predecessor. Both edits run
+  /// sequentially with their own receipt; the result is reported once.
+  Future<void> _moveChannel(TsChannel channel, {required bool up}) async {
+    final siblings = _channelSiblings(channel);
+    final idx = siblings.indexWhere((c) => c.id == channel.id);
+    if (idx < 0 || (up ? idx == 0 : idx >= siblings.length - 1)) return;
+    final notifier = ref.read(tsConnectionProvider.notifier);
+    final String? error;
+    if (up) {
+      final prev = siblings[idx - 1];
+      error =
+          await notifier.editChannel(
+            channel.id,
+            order: idx >= 2 ? siblings[idx - 2].id : 0,
+          ) ??
+          await notifier.editChannel(prev.id, order: channel.id);
+    } else {
+      final next = siblings[idx + 1];
+      error =
+          await notifier.editChannel(channel.id, order: next.id) ??
+          await notifier.editChannel(next.id, order: channel.order);
+    }
+    if (!mounted) return;
+    _reportOp(error, AppLocalizations.of(context).channelMoved);
+  }
+
+  /// Long-press (or tap) on the server root node. Currently only channel
+  /// creation; the sheet is not opened at all when we look unprivileged.
+  Future<void> _onServerMenu() async {
+    final result = await showServerMenu(
+      context,
+      canCreateChannel: _canCreateChannels,
+    );
+    if (!mounted || result != serverMenuCreateChannel) return;
+    await _createChannel(parentId: 0);
+  }
+
+  /// Opens the shared channel form to create a channel under [parentId]
+  /// (0 = top level). On success the tree refreshes itself through the
+  /// `channels_updated` event the server's answer triggers.
+  Future<void> _createChannel({required int parentId}) async {
+    final al = AppLocalizations.of(context);
+    final form = await pushChannelEditPage(context);
+    if (!mounted || form == null) return;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .createChannel(
+          // Never null in create mode: the save button requires a name.
+          parentId,
+          form.name!,
+          topic: form.topic.isEmpty ? null : form.topic,
+          password: form.password.isEmpty ? null : form.password,
+          maxClients: form.maxClients,
+          isPermanent: form.isPermanent,
+          isSemiPermanent: form.isSemiPermanent,
+          description: form.description,
+          maxFamilyClients: form.maxFamilyClients,
+          isDefault: form.isDefault,
+          deleteDelay: form.deleteDelay,
+        );
+    if (!mounted) return;
+    _reportOp(error, al.channelCreated);
+  }
+
+  /// Opens the shared channel form prefilled with the channel's current
+  /// settings and submits the changes as a `channeledit`.
+  Future<void> _editChannel(TsChannel channel) async {
+    final al = AppLocalizations.of(context);
+    final form = await pushChannelEditPage(context, channel: channel);
+    if (!mounted || form == null) return;
+    // Password tri-state: an empty field clears the password of a locked
+    // channel (the real password is never known client-side) and is a no-op
+    // for an unlocked one.
+    final password = form.password.isEmpty
+        ? (channel.hasPassword ? '' : null)
+        : form.password;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .editChannel(
+          channel.id,
+          name: form.name,
+          topic: form.topic,
+          password: password,
+          maxClients: form.maxClients,
+          isPermanent: form.isPermanent,
+          isSemiPermanent: form.isSemiPermanent,
+          description: form.description,
+          maxFamilyClients: form.maxFamilyClients,
+          isDefault: form.isDefault,
+          deleteDelay: form.deleteDelay,
+          neededTalkPower: form.neededTalkPower,
+        );
+    if (!mounted) return;
+    _reportOp(error, al.channelSaved);
+  }
+
+  /// Delete confirmation. A channel that still has members is force-deleted
+  /// (needs the force-delete permission); its occupants are moved to the
+  /// default channel.
+  Future<void> _confirmDeleteChannel(TsChannel channel) async {
+    final al = AppLocalizations.of(context);
+    final occupied = channel.clientCount > 0;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: Text(
+          al.deleteChannelTitle,
+          style: const TextStyle(color: Colors.white, fontSize: 18),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              al.deleteChannelBody(channel.name),
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+            if (occupied) ...[
+              const SizedBox(height: 8),
+              Text(
+                al.deleteChannelOccupied(channel.clientCount),
+                style: const TextStyle(color: Colors.amber, fontSize: 13),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(al.cancel, style: const TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              al.delete,
+              style: const TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .deleteChannel(channel.id, force: occupied);
+    if (!mounted) return;
+    _reportOp(error, al.channelDeleted);
+  }
+
+  /// Drop handler for the tree's long-press drag: re-parent (or re-order)
+  /// the dragged channel via a single `channelmove`.
+  Future<void> _onChannelDrop(int draggedId, int parentId, int? afterId) async {
+    // Double-check the target is not the channel itself or inside its own
+    // subtree (the tree filters these too; this guards against stale data).
+    final conn = ref.read(tsConnectionProvider);
+    final invalid = <int>{draggedId};
+    var grew = true;
+    while (grew) {
+      grew = false;
+      for (final c in conn.channels) {
+        if (invalid.contains(c.parentId) && invalid.add(c.id)) {
+          grew = true;
+        }
+      }
+    }
+    if (invalid.contains(parentId)) return;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .moveChannel(draggedId, parentId: parentId, afterId: afterId);
+    if (!mounted) return;
+    _reportOp(error, AppLocalizations.of(context).channelMoved);
+  }
+
+  /// Green/red receipt SnackBar for the channel-management operations
+  /// (mirrors the client sheet's perm-op reporting).
+  void _reportOp(String? error, String okLabel) {
+    final al = AppLocalizations.of(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(error == null ? okLabel : al.permOpFailed(error)),
+        backgroundColor: error == null ? null : Colors.red.shade900,
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   Widget _buildLeftPanel(
     TsConnectionState conn,
     TsConnectionNotifier notifier,
   ) {
-    final gestureSwap = ref.watch(
-      appSettingsProvider.select((s) => s.channelGestureSwap),
-    );
     return Container(
       color: const Color(0xFF12122A),
       child: Column(
@@ -298,10 +515,10 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                         .firstOrNull
                         ?.talkPower ??
                     0,
-                // Gesture swap from settings: default short tap joins and a
-                // long press opens the menu; swapped, the roles are reversed.
-                onChannelTap: gestureSwap ? _onChannelMenu : _onChannelTap,
-                onChannelMenu: gestureSwap ? _onChannelTap : _onChannelMenu,
+                // Fixed gestures: short tap joins, long press opens the
+                // menu, long-press drag moves the channel (see onChannelDrop).
+                onChannelTap: _onChannelTap,
+                onChannelMenu: _onChannelMenu,
                 // Open-lock hint for channels whose password is already
                 // cached for this session.
                 sessionPasswordKnown: (channelId) =>
@@ -312,6 +529,12 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                 // Server groups for the privileged-identity badges; empty
                 // while the group list is unavailable.
                 serverGroups: _serverGroups,
+                // TS3-style server root node; its menu (create channel)
+                // only exists when we look privileged enough.
+                serverName: conn.serverName,
+                onServerMenu: _canCreateChannels ? _onServerMenu : null,
+                // Long-press drag: re-parent / re-order the dragged channel.
+                onChannelDrop: _onChannelDrop,
                 // Tapping yourself opens the same voice settings as
                 // long-pressing the mic; tapping others opens their
                 // per-client volume + poke sheet.
@@ -365,6 +588,30 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     }
   }
 
+  /// Our own privilege level: query admin beats the server-group name tier.
+  /// Shared by the client sheet's permission gating and the channel
+  /// management entries (channel creation has no per-channel hint bit).
+  PrivilegeTier get _ownPrivilegeTier {
+    final conn = ref.read(tsConnectionProvider);
+    final ownClient = conn.clients
+        .where((c) => c.id == conn.ownClientId)
+        .firstOrNull;
+    if (ownClient?.isQueryAdmin ?? false) return PrivilegeTier.admin;
+    final ownGroupNames = _serverGroups
+        .where((g) => ownClient?.serverGroupIds.contains(g.id) ?? false)
+        .map((g) => g.name);
+    return privilegeTierOf(ownGroupNames);
+  }
+
+  /// Whether the channel-management entries (create channel / sub-channel)
+  /// are offered. Channel creation has no per-channel permission hint, so
+  /// this reuses the "are we privileged" heuristics of the client sheet
+  /// (_ownPrivilegeTier, or a management power in our own clientpermlist).
+  /// A wrong guess surfaces as a server rejection in the perm_op receipt.
+  bool get _canCreateChannels =>
+      _ownPrivilegeTier != PrivilegeTier.none ||
+      ref.read(tsConnectionProvider.notifier).canManagePermissions;
+
   void _showClientVolume(int clientId) {
     final conn = ref.read(tsConnectionProvider);
     final connNotifier = ref.read(tsConnectionProvider.notifier);
@@ -383,18 +630,13 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       'hints=${client.permissionHints}',
     );
 
-    // Our own privilege tier (from server-group names) is the last-resort
-    // gate for the permission-management entries when neither the target's
-    // permission hints nor our clientpermlist are available yet.
+    // Our own privilege tier (query admin / server-group name tier) is the
+    // last-resort gate for the permission-management entries when neither
+    // the target's permission hints nor our clientpermlist are available yet.
     final ownClient = conn.clients
         .where((c) => c.id == conn.ownClientId)
         .firstOrNull;
-    final ownGroupNames = _serverGroups
-        .where((g) => ownClient?.serverGroupIds.contains(g.id) ?? false)
-        .map((g) => g.name);
-    final ownPrivilegeTier = (ownClient?.isQueryAdmin ?? false)
-        ? PrivilegeTier.admin
-        : privilegeTierOf(ownGroupNames);
+    final ownPrivilegeTier = _ownPrivilegeTier;
 
     showModalBottomSheet(
       context: context,

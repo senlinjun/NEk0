@@ -489,16 +489,113 @@ class AppLocalizationsZh extends AppLocalizations {
   String get menuFileManager => '文件管理';
 
   @override
+  String get menuServerTitle => '服务器';
+
+  @override
+  String get menuCreateChannel => '新建频道';
+
+  @override
+  String get menuEditChannel => '编辑频道';
+
+  @override
+  String get menuDeleteChannel => '删除频道';
+
+  @override
+  String get channelCreateTitle => '新建频道';
+
+  @override
+  String get channelEditTitle => '编辑频道';
+
+  @override
+  String get channelNameLabel => '频道名称';
+
+  @override
+  String get channelTopicLabel => '主题（可选）';
+
+  @override
+  String get channelPasswordHelper => '留空清除现有密码';
+
+  @override
+  String get channelMaxClientsLabel => '最大用户数';
+
+  @override
+  String get channelMaxClientsHelper => '留空为无限';
+
+  @override
+  String get channelTypeLabel => '类型';
+
+  @override
+  String get channelTypeTemporary => '临时';
+
+  @override
+  String get channelTypeSemiPermanent => '半永久';
+
+  @override
+  String get channelTypePermanent => '永久';
+
+  @override
+  String get deleteChannelTitle => '删除频道？';
+
+  @override
+  String deleteChannelBody(String name) {
+    return '删除“$name”？';
+  }
+
+  @override
+  String deleteChannelOccupied(int count) {
+    return '频道内有 $count 名用户，将被移至默认频道。';
+  }
+
+  @override
+  String get channelCreated => '频道已创建';
+
+  @override
+  String get channelSaved => '频道已更新';
+
+  @override
+  String get channelDeleted => '频道已删除';
+
+  @override
+  String get channelMoved => '频道已移动';
+
+  @override
+  String get menuMoveUp => '上移';
+
+  @override
+  String get menuMoveDown => '下移';
+
+  @override
+  String get channelDescriptionLabel => '频道描述';
+
+  @override
+  String get channelNeededTalkPowerLabel => '说话所需权限';
+
+  @override
+  String get channelTalkPowerHelper => '0 = 不限制说话';
+
+  @override
+  String get channelDeleteDelayLabel => '删除延迟（秒）';
+
+  @override
+  String get channelDeleteDelayHelper => '频道空置多少秒后删除';
+
+  @override
+  String get channelMaxFamilyLabel => '频道组人数上限';
+
+  @override
+  String get channelMaxFamilyInherit => '继承父频道';
+
+  @override
+  String get channelMaxFamilyUnlimited => '不限制';
+
+  @override
+  String get channelMaxFamilyLimited => '自定义限制';
+
+  @override
+  String get channelIsDefaultLabel => '设为默认频道';
+
+  @override
   String get audio => '音频';
-
-  @override
-  String get gestureSection => '频道手势';
-
-  @override
-  String get gestureDefault => '短按：切换频道 · 长按：菜单';
-
-  @override
-  String get gestureSwapped => '短按：菜单 · 长按：切换频道';
 
   @override
   String get fmUp => '上一级';

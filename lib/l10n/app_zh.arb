@@ -174,12 +174,53 @@
   "channelPasswordWrong": "频道密码错误",
 "menuEnterChannel": "进入频道",
   "menuFileManager": "文件管理",
+  "menuServerTitle": "服务器",
+  "menuCreateChannel": "新建频道",
+  "menuEditChannel": "编辑频道",
+  "menuDeleteChannel": "删除频道",
+  "channelCreateTitle": "新建频道",
+  "channelEditTitle": "编辑频道",
+  "channelNameLabel": "频道名称",
+  "channelTopicLabel": "主题（可选）",
+  "channelPasswordHelper": "留空清除现有密码",
+  "channelMaxClientsLabel": "最大用户数",
+  "channelMaxClientsHelper": "留空为无限",
+  "channelTypeLabel": "类型",
+  "channelTypeTemporary": "临时",
+  "channelTypeSemiPermanent": "半永久",
+  "channelTypePermanent": "永久",
+  "deleteChannelTitle": "删除频道？",
+  "deleteChannelBody": "删除“{name}”？",
+  "@deleteChannelBody": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "deleteChannelOccupied": "频道内有 {count} 名用户，将被移至默认频道。",
+  "@deleteChannelOccupied": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "channelCreated": "频道已创建",
+  "channelSaved": "频道已更新",
+  "channelDeleted": "频道已删除",
+  "channelMoved": "频道已移动",
+  "menuMoveUp": "上移",
+  "menuMoveDown": "下移",
+  "channelDescriptionLabel": "频道描述",
+  "channelNeededTalkPowerLabel": "说话所需权限",
+  "channelTalkPowerHelper": "0 = 不限制说话",
+  "channelDeleteDelayLabel": "删除延迟（秒）",
+  "channelDeleteDelayHelper": "频道空置多少秒后删除",
+  "channelMaxFamilyLabel": "频道组人数上限",
+  "channelMaxFamilyInherit": "继承父频道",
+  "channelMaxFamilyUnlimited": "不限制",
+  "channelMaxFamilyLimited": "自定义限制",
+  "channelIsDefaultLabel": "设为默认频道",
 
   "audio": "音频",
 
-  "gestureSection": "频道手势",
-  "gestureDefault": "短按：切换频道 · 长按：菜单",
-  "gestureSwapped": "短按：菜单 · 长按：切换频道",
 
   "fmUp": "上一级",
   "fmRootShort": "/",

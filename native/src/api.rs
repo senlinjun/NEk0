@@ -276,6 +276,23 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
             is_default: c.is_default.unwrap_or(false),
             permission_hints: c.permission_hints.map(|p| p.bits()).unwrap_or(0),
             needed_talk_power: c.needed_talk_power.unwrap_or(0),
+            max_clients: match c.max_clients {
+                Some(tsclientlib::MaxClients::Limited(n)) => n as i32,
+                _ => -1, // unlimited / inherited / not yet reported
+            },
+            is_permanent: c.channel_type == tsclientlib::ChannelType::Permanent,
+            is_semi_permanent: c.channel_type == tsclientlib::ChannelType::SemiPermanent,
+            description: c
+                .optional_data
+                .as_ref()
+                .map(|d| d.description.clone())
+                .unwrap_or_default(),
+            max_family_clients: match c.max_family_clients {
+                Some(tsclientlib::MaxClients::Limited(n)) => n as i32,
+                Some(tsclientlib::MaxClients::Unlimited) => 0,
+                _ => -1, // inherited / not yet reported
+            },
+            delete_delay: c.delete_delay.map(|d| d.whole_seconds()).unwrap_or(0),
         })
         .collect();
     let clients: Vec<_> = book
@@ -2412,6 +2429,140 @@ async fn event_loop(
                         }
                     }
                 }
+                // ── Channel management ───────────────────────────────────
+                Command::ChannelCreate { args, token } => {
+                    // channelcreate takes the hashed cpw form (like the move
+                    // and ft commands), never the plaintext.
+                    let hashed_password = args
+                        .password
+                        .as_deref()
+                        .map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
+                        .map(Cow::Owned);
+                    let (family_value, family_unlimited, family_inherited) =
+                        family_limits(args.max_family_clients);
+                    let part = OutChannelCreatePart {
+                        parent_id: Some(ChannelId(args.parent_id.unwrap_or(0) as u64)),
+                        name: Cow::Owned(args.name.clone().unwrap_or_default()),
+                        topic: args.topic.filter(|t| !t.is_empty()).map(Cow::Owned),
+                        description: args
+                            .description
+                            .filter(|d| !d.is_empty())
+                            .map(Cow::Owned),
+                        password: hashed_password,
+                        codec: None,
+                        codec_quality: None,
+                        max_clients: match args.max_clients {
+                            Some(n) if n > 0 => Some(n),
+                            _ => None,
+                        },
+                        max_family_clients: family_value,
+                        order: None,
+                        has_password: Some(args.password.is_some()),
+                        is_unencrypted: None,
+                        delete_delay: args.delete_delay.map(time::Duration::seconds),
+                        is_max_clients_unlimited: Some(!matches!(
+                            args.max_clients,
+                            Some(n) if n > 0
+                        )),
+                        is_max_family_clients_unlimited: family_unlimited,
+                        inherits_max_family_clients: family_inherited,
+                        phonetic_name: None,
+                        is_permanent: Some(args.is_permanent.unwrap_or(false)),
+                        is_semi_permanent: Some(args.is_semi_permanent.unwrap_or(false)),
+                        is_default: Some(args.is_default.unwrap_or(false)),
+                    };
+                    push_diag(&format!(
+                        "channel create under {}: sent",
+                        args.parent_id.unwrap_or(0)
+                    ));
+                    let result = OutChannelCreateMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
+                Command::ChannelEdit { channel_id, args, token } => {
+                    // password: None = untouched, Some("") = clear,
+                    // Some(p) = set (hashed, see ChannelCreate).
+                    let (has_password, hashed_password) = match args.password {
+                        None => (None, None),
+                        Some(ref p) if p.is_empty() => (Some(false), None),
+                        Some(ref p) => (
+                            Some(true),
+                            Some(Cow::Owned(
+                                tsproto_types::crypto::encode_password(p.as_bytes()),
+                            )),
+                        ),
+                    };
+                    let (family_value, family_unlimited, family_inherited) =
+                        family_limits(args.max_family_clients);
+                    let part = OutChannelEditPart {
+                        channel_id: ChannelId(channel_id as u64),
+                        order: args.order.map(|id| ChannelId(id as u64)),
+                        name: args.name.map(Cow::Owned),
+                        topic: args.topic.map(Cow::Owned),
+                        is_default: args.is_default,
+                        has_password,
+                        password: hashed_password,
+                        is_permanent: args.is_permanent,
+                        is_semi_permanent: args.is_semi_permanent,
+                        codec: None,
+                        codec_quality: None,
+                        needed_talk_power: args.needed_talk_power,
+                        max_clients: match args.max_clients {
+                            Some(n) if n > 0 => Some(n),
+                            _ => None,
+                        },
+                        max_family_clients: family_value,
+                        codec_latency_factor: None,
+                        is_unencrypted: None,
+                        delete_delay: args.delete_delay.map(time::Duration::seconds),
+                        is_max_clients_unlimited: match args.max_clients {
+                            Some(0) => Some(true),
+                            Some(_) => Some(false),
+                            None => None,
+                        },
+                        is_max_family_clients_unlimited: family_unlimited,
+                        inherits_max_family_clients: family_inherited,
+                        phonetic_name: None,
+                        description: args.description.map(Cow::Owned),
+                    };
+                    push_diag(&format!("channel edit {}: sent", channel_id));
+                    let result = OutChannelEditMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
+                Command::ChannelDelete {
+                    channel_id,
+                    force,
+                    token,
+                } => {
+                    let part = OutChannelDeletePart {
+                        channel_id: ChannelId(channel_id as u64),
+                        force,
+                    };
+                    push_diag(&format!("channel delete {} (force={}): sent", channel_id, force));
+                    let result = OutChannelDeleteMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
+                Command::ChannelMove {
+                    channel_id,
+                    parent_id,
+                    order,
+                    token,
+                } => {
+                    let part = OutChannelMovePart {
+                        channel_id: ChannelId(channel_id as u64),
+                        parent_id: ChannelId(parent_id as u64),
+                        order: order.map(|id| ChannelId(id as u64)),
+                    };
+                    push_diag(&format!(
+                        "channel move {} -> {} (order {:?}): sent",
+                        channel_id, parent_id, order
+                    ));
+                    let result = OutChannelMoveMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
                 // ── Permission management ────────────────────────────────
                 Command::ServerGroupAddClient { sgid, dbid, token } => {
                     let part = OutServerGroupAddClientPart {
@@ -3540,6 +3691,123 @@ pub extern "C" fn ts_ban_client(
     }
 }
 
+/// Creates a channel. `args_json` is a `ChannelArgs` object (see lib.rs):
+/// parent_id (0 = top level), name (required), topic, password, description,
+/// max_clients, max_family_clients (-1 inherited / 0 unlimited / >0 limit),
+/// is_permanent / is_semi_permanent / is_default, delete_delay (seconds).
+/// `token` is required — the server's answer resolves the caller's `PermOp`
+/// future. Returns 1 when the command was queued, 0 when invalid / not
+/// connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_create(args_json: *const c_char, token: *const c_char) -> u8 {
+    if args_json.is_null() || token.is_null() {
+        return 0;
+    }
+    unsafe {
+        let token = cstr_to_string(token);
+        if token.is_empty() {
+            return 0;
+        }
+        let args: crate::ChannelArgs = match serde_json::from_str(&cstr_to_string(args_json)) {
+            Ok(a) => a,
+            Err(_) => return 0,
+        };
+        if args.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return 0;
+        }
+        try_send_cmd(Command::ChannelCreate { args, token }) as u8
+    }
+}
+
+/// Edits channel properties. `args_json` is a `ChannelArgs` object (see
+/// lib.rs); absent fields are left untouched, empty strings clear
+/// topic/description/password, `order` (sibling id, 0 = first) repositions
+/// the channel, and `needed_talk_power` >= 0 sets the talk-power gate.
+/// Returns 1 when queued, 0 when invalid / not connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_edit(
+    channel_id: u32,
+    args_json: *const c_char,
+    token: *const c_char,
+) -> u8 {
+    if args_json.is_null() || token.is_null() {
+        return 0;
+    }
+    unsafe {
+        let token = cstr_to_string(token);
+        if token.is_empty() {
+            return 0;
+        }
+        let args: crate::ChannelArgs = match serde_json::from_str(&cstr_to_string(args_json)) {
+            Ok(a) => a,
+            Err(_) => return 0,
+        };
+        try_send_cmd(Command::ChannelEdit {
+            channel_id,
+            args,
+            token,
+        }) as u8
+    }
+}
+
+/// Deletes a channel. `force != 0` also removes a channel that still has
+/// clients in it (they are moved to the default channel; requires the
+/// force-delete permission). Returns 1 when queued, 0 when not connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_delete(
+    channel_id: u32,
+    force: u8,
+    token: *const c_char,
+) -> u8 {
+    if token.is_null() {
+        return 0;
+    }
+    unsafe {
+        if cstr_to_string(token).is_empty() {
+            return 0;
+        }
+        let deleted = try_send_cmd(Command::ChannelDelete {
+            channel_id,
+            force: force != 0,
+            token: cstr_to_string(token),
+        });
+        deleted as u8
+    }
+}
+
+/// Moves a channel to another parent (`channelmove`) — also re-orders within
+/// the same parent. `order` is the sibling id the channel comes after
+/// (0 = first, -1 = server default / append at the end). `token` is
+/// required — the server's answer resolves the caller's `PermOp` future.
+/// Returns 1 when the command was queued, 0 when not connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_move(
+    channel_id: u32,
+    parent_id: u32,
+    order: i64,
+    token: *const c_char,
+) -> u8 {
+    if token.is_null() {
+        return 0;
+    }
+    unsafe {
+        if cstr_to_string(token).is_empty() {
+            return 0;
+        }
+        let moved = try_send_cmd(Command::ChannelMove {
+            channel_id,
+            parent_id,
+            order: if order < 0 {
+                None
+            } else {
+                Some(order as u32)
+            },
+            token: cstr_to_string(token),
+        });
+        moved as u8
+    }
+}
+
 /// Move a client (or ourselves) to another channel. `password` is the
 /// channel password when the target channel is locked. `token` is optional
 /// (see `ts_kick_client`); when non-empty the caller gets a `PermOp` answer.
@@ -3596,6 +3864,18 @@ unsafe fn read_cstr(p: *const c_char) -> String {
         String::new()
     } else {
         unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+}
+
+/// Maps the Dart form's max-family-clients sentinel onto the wire's three
+/// fields: None = don't send (leave untouched), -1 = inherited, 0 = unlimited,
+/// >0 = limited to that many clients.
+fn family_limits(v: Option<i32>) -> (Option<i32>, Option<bool>, Option<bool>) {
+    match v {
+        None => (None, None, None),
+        Some(-1) => (None, Some(false), Some(true)),
+        Some(0) => (None, Some(true), Some(false)),
+        Some(n) => (Some(n), Some(false), Some(false)),
     }
 }
 

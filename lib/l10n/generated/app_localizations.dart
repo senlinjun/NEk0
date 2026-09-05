@@ -1034,29 +1034,215 @@ abstract class AppLocalizations {
   /// **'File management'**
   String get menuFileManager;
 
+  /// No description provided for @menuServerTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Server'**
+  String get menuServerTitle;
+
+  /// No description provided for @menuCreateChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Create channel'**
+  String get menuCreateChannel;
+
+  /// No description provided for @menuEditChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit channel'**
+  String get menuEditChannel;
+
+  /// No description provided for @menuDeleteChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete channel'**
+  String get menuDeleteChannel;
+
+  /// No description provided for @channelCreateTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Create Channel'**
+  String get channelCreateTitle;
+
+  /// No description provided for @channelEditTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit Channel'**
+  String get channelEditTitle;
+
+  /// No description provided for @channelNameLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel name'**
+  String get channelNameLabel;
+
+  /// No description provided for @channelTopicLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Topic (optional)'**
+  String get channelTopicLabel;
+
+  /// No description provided for @channelPasswordHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Leave empty to clear'**
+  String get channelPasswordHelper;
+
+  /// No description provided for @channelMaxClientsLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Max clients'**
+  String get channelMaxClientsLabel;
+
+  /// No description provided for @channelMaxClientsHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Empty = unlimited'**
+  String get channelMaxClientsHelper;
+
+  /// No description provided for @channelTypeLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Type'**
+  String get channelTypeLabel;
+
+  /// No description provided for @channelTypeTemporary.
+  ///
+  /// In en, this message translates to:
+  /// **'Temporary'**
+  String get channelTypeTemporary;
+
+  /// No description provided for @channelTypeSemiPermanent.
+  ///
+  /// In en, this message translates to:
+  /// **'Semi-permanent'**
+  String get channelTypeSemiPermanent;
+
+  /// No description provided for @channelTypePermanent.
+  ///
+  /// In en, this message translates to:
+  /// **'Permanent'**
+  String get channelTypePermanent;
+
+  /// No description provided for @deleteChannelTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete channel?'**
+  String get deleteChannelTitle;
+
+  /// No description provided for @deleteChannelBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete \"{name}\"?'**
+  String deleteChannelBody(String name);
+
+  /// No description provided for @deleteChannelOccupied.
+  ///
+  /// In en, this message translates to:
+  /// **'This channel has {count} clients — they will be moved to the default channel.'**
+  String deleteChannelOccupied(int count);
+
+  /// No description provided for @channelCreated.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel created'**
+  String get channelCreated;
+
+  /// No description provided for @channelSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel updated'**
+  String get channelSaved;
+
+  /// No description provided for @channelDeleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel deleted'**
+  String get channelDeleted;
+
+  /// No description provided for @channelMoved.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel moved'**
+  String get channelMoved;
+
+  /// No description provided for @menuMoveUp.
+  ///
+  /// In en, this message translates to:
+  /// **'Move up'**
+  String get menuMoveUp;
+
+  /// No description provided for @menuMoveDown.
+  ///
+  /// In en, this message translates to:
+  /// **'Move down'**
+  String get menuMoveDown;
+
+  /// No description provided for @channelDescriptionLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Description'**
+  String get channelDescriptionLabel;
+
+  /// No description provided for @channelNeededTalkPowerLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Needed talk power'**
+  String get channelNeededTalkPowerLabel;
+
+  /// No description provided for @channelTalkPowerHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'0 = everyone may talk'**
+  String get channelTalkPowerHelper;
+
+  /// No description provided for @channelDeleteDelayLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete delay (seconds)'**
+  String get channelDeleteDelayLabel;
+
+  /// No description provided for @channelDeleteDelayHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Seconds before an empty channel is removed'**
+  String get channelDeleteDelayHelper;
+
+  /// No description provided for @channelMaxFamilyLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Group user limit'**
+  String get channelMaxFamilyLabel;
+
+  /// No description provided for @channelMaxFamilyInherit.
+  ///
+  /// In en, this message translates to:
+  /// **'Inherit from parent'**
+  String get channelMaxFamilyInherit;
+
+  /// No description provided for @channelMaxFamilyUnlimited.
+  ///
+  /// In en, this message translates to:
+  /// **'Unlimited'**
+  String get channelMaxFamilyUnlimited;
+
+  /// No description provided for @channelMaxFamilyLimited.
+  ///
+  /// In en, this message translates to:
+  /// **'Custom limit'**
+  String get channelMaxFamilyLimited;
+
+  /// No description provided for @channelIsDefaultLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Default channel'**
+  String get channelIsDefaultLabel;
+
   /// No description provided for @audio.
   ///
   /// In en, this message translates to:
   /// **'Audio'**
   String get audio;
-
-  /// No description provided for @gestureSection.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel gestures'**
-  String get gestureSection;
-
-  /// No description provided for @gestureDefault.
-  ///
-  /// In en, this message translates to:
-  /// **'Tap: switch channel · Long press: menu'**
-  String get gestureDefault;
-
-  /// No description provided for @gestureSwapped.
-  ///
-  /// In en, this message translates to:
-  /// **'Tap: menu · Long press: switch channel'**
-  String get gestureSwapped;
 
   /// No description provided for @fmUp.
   ///

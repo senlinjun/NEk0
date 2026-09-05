@@ -136,6 +136,26 @@ typedef _MoveClientNative =
     Uint8 Function(Uint16, Uint32, Pointer<Utf8>, Pointer<Utf8>);
 typedef _MoveClientDart = int Function(int, int, Pointer<Utf8>, Pointer<Utf8>);
 
+// ─── Channel management ─────────────────────────────────────────────
+
+// ts_channel_create(args_json, token) -> bool
+typedef _ChannelCreateNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _ChannelCreateDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
+// ts_channel_edit(channel_id: u32, args_json, token) -> bool
+typedef _ChannelEditNative =
+    Uint8 Function(Uint32, Pointer<Utf8>, Pointer<Utf8>);
+typedef _ChannelEditDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>);
+
+// ts_channel_delete(channel_id: u32, force: u8, token) -> bool
+typedef _ChannelDeleteNative = Uint8 Function(Uint32, Uint8, Pointer<Utf8>);
+typedef _ChannelDeleteDart = int Function(int, int, Pointer<Utf8>);
+
+// ts_channel_move(channel_id: u32, parent_id: u32, order: i64, token) -> bool
+typedef _ChannelMoveNative =
+    Uint8 Function(Uint32, Uint32, Int64, Pointer<Utf8>);
+typedef _ChannelMoveDart = int Function(int, int, int, Pointer<Utf8>);
+
 // ─── File transfer (channel file management) ────────────────────────
 
 // ts_ft_list(channel_id, path, password, token) -> bool
@@ -316,6 +336,20 @@ final _banClient = _lib.lookupFunction<_BanClientNative, _BanClientDart>(
 );
 final _moveClient = _lib.lookupFunction<_MoveClientNative, _MoveClientDart>(
   'ts_move_client',
+);
+final _channelCreate = _lib
+    .lookupFunction<_ChannelCreateNative, _ChannelCreateDart>(
+      'ts_channel_create',
+    );
+final _channelEdit = _lib.lookupFunction<_ChannelEditNative, _ChannelEditDart>(
+  'ts_channel_edit',
+);
+final _channelDelete = _lib
+    .lookupFunction<_ChannelDeleteNative, _ChannelDeleteDart>(
+      'ts_channel_delete',
+    );
+final _channelMove = _lib.lookupFunction<_ChannelMoveNative, _ChannelMoveDart>(
+  'ts_channel_move',
 );
 final _ftList = _lib.lookupFunction<_FtListNative, _FtListDart>('ts_ft_list');
 final _ftMkDir = _lib.lookupFunction<_FtMkDirNative, _FtMkDirDart>(
@@ -614,6 +648,86 @@ class TsNative {
     } finally {
       malloc.free(ptr);
       malloc.free(t);
+    }
+  }
+
+  /// Creates a channel. [args] is a `ChannelArgs` map (see native/src/lib.rs):
+  /// parent_id, name (required), topic, password, description, max_clients,
+  /// max_family_clients (-1 inherited / 0 unlimited / >0 limit), is_permanent,
+  /// is_semi_permanent, is_default, delete_delay (seconds). [token] is
+  /// required: the server's answer resolves as a `perm_op` event carrying it.
+  /// Returns true when the request was queued.
+  static bool createChannel(
+    Map<String, Object?> args, {
+    required String token,
+  }) {
+    debugLog('createChannel(${args['name']})');
+    final ptr = _strToPtr(jsonEncode(args));
+    final tok = _strToPtr(token);
+    try {
+      return _channelCreate(ptr, tok) != 0;
+    } finally {
+      malloc.free(ptr);
+      malloc.free(tok);
+    }
+  }
+
+  /// Edits channel properties. [args] is a `ChannelArgs` map (see
+  /// native/src/lib.rs); absent keys are left untouched, empty strings clear
+  /// topic/description/password, 'order' (sibling id, 0 = first) repositions
+  /// the channel. [token] is required (see [createChannel]). Returns true
+  /// when the request was queued.
+  static bool editChannel(
+    int channelId,
+    Map<String, Object?> args, {
+    required String token,
+  }) {
+    debugLog('editChannel(channel=$channelId, keys=${args.keys.toList()})');
+    final ptr = _strToPtr(jsonEncode(args));
+    final tok = _strToPtr(token);
+    try {
+      return _channelEdit(channelId, ptr, tok) != 0;
+    } finally {
+      malloc.free(ptr);
+      malloc.free(tok);
+    }
+  }
+
+  /// Deletes a channel. [force] also removes a channel that still has
+  /// clients in it (requires the force-delete permission). [token] is
+  /// required (see [createChannel]). Returns true when the request was queued.
+  static bool deleteChannel(
+    int channelId, {
+    required bool force,
+    required String token,
+  }) {
+    debugLog('deleteChannel(channel=$channelId, force=$force)');
+    final tok = _strToPtr(token);
+    try {
+      return _channelDelete(channelId, force ? 1 : 0, tok) != 0;
+    } finally {
+      malloc.free(tok);
+    }
+  }
+
+  /// Moves a channel to another parent (also re-orders within the same
+  /// parent). [order] is the sibling id the channel comes after (0 = first,
+  /// null = server default / append at the end). [token] is required
+  /// (see [createChannel]). Returns true when the request was queued.
+  static bool moveChannelTo(
+    int channelId, {
+    required int parentId,
+    int? order,
+    required String token,
+  }) {
+    debugLog(
+      'moveChannelTo(channel=$channelId, parent=$parentId, order=$order)',
+    );
+    final tok = _strToPtr(token);
+    try {
+      return _channelMove(channelId, parentId, order ?? -1, tok) != 0;
+    } finally {
+      malloc.free(tok);
     }
   }
 

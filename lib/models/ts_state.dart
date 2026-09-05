@@ -776,6 +776,104 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         ),
       );
 
+  // ─── Channel management ────────────────────────────────────────────
+
+  /// Creates a channel under [parentId] (0 = top level). [maxFamilyClients]:
+  /// -1 inherited, 0 unlimited, >0 limit. [deleteDelay] in seconds applies to
+  /// temporary channels. Returns null on success or an error description.
+  Future<String?> createChannel(
+    int parentId,
+    String name, {
+    String? topic,
+    String? password,
+    String? description,
+    int? maxClients,
+    int? maxFamilyClients,
+    required bool isPermanent,
+    required bool isSemiPermanent,
+    bool isDefault = false,
+    int? deleteDelay,
+  }) {
+    return _permOp(
+      (t) => TsNative.createChannel({
+        'parent_id': parentId,
+        'name': name,
+        if (topic != null) 'topic': topic,
+        if (password != null) 'password': password,
+        if (description != null) 'description': description,
+        if (maxClients != null) 'max_clients': maxClients,
+        if (maxFamilyClients != null) 'max_family_clients': maxFamilyClients,
+        'is_permanent': isPermanent,
+        'is_semi_permanent': isSemiPermanent,
+        'is_default': isDefault,
+        if (deleteDelay != null) 'delete_delay': deleteDelay,
+      }, token: t),
+    );
+  }
+
+  /// Edits channel properties. Null fields are left untouched; an empty
+  /// [password] clears it (null keeps it); [maxFamilyClients]: -1 inherited,
+  /// 0 unlimited, >0 limit; [order] = the sibling id this channel comes
+  /// after (0 = first); [neededTalkPower] >= 0 sets the talk gate. Returns
+  /// null on success or an error description.
+  Future<String?> editChannel(
+    int channelId, {
+    String? name,
+    String? topic,
+    String? password,
+    String? description,
+    int? maxClients,
+    int? maxFamilyClients,
+    bool? isPermanent,
+    bool? isSemiPermanent,
+    bool? isDefault,
+    int? deleteDelay,
+    int? neededTalkPower,
+    int? order,
+  }) {
+    return _permOp(
+      (t) => TsNative.editChannel(channelId, {
+        if (name != null) 'name': name,
+        if (topic != null) 'topic': topic,
+        if (password != null) 'password': password,
+        if (description != null) 'description': description,
+        if (maxClients != null) 'max_clients': maxClients,
+        if (maxFamilyClients != null) 'max_family_clients': maxFamilyClients,
+        if (isPermanent != null) 'is_permanent': isPermanent,
+        if (isSemiPermanent != null) 'is_semi_permanent': isSemiPermanent,
+        if (isDefault != null) 'is_default': isDefault,
+        if (deleteDelay != null) 'delete_delay': deleteDelay,
+        if (neededTalkPower != null) 'needed_talk_power': neededTalkPower,
+        if (order != null) 'order': order,
+      }, token: t),
+    );
+  }
+
+  /// Deletes a channel ([force] also removes one that still has clients —
+  /// its occupants are moved to the default channel). Returns null on
+  /// success or an error description.
+  Future<String?> deleteChannel(int channelId, {required bool force}) =>
+      _permOp((t) => TsNative.deleteChannel(channelId, force: force, token: t));
+
+  /// Moves a channel to another parent (0 = server root) and optionally
+  /// positions it after [afterId] within the new parent (0 = first; null =
+  /// appended at the end). Also re-orders within the same parent. Returns
+  /// null on success or an error description.
+  Future<String?> moveChannel(
+    int channelId, {
+    required int parentId,
+    int? afterId,
+  }) {
+    return _permOp(
+      (t) => TsNative.moveChannelTo(
+        channelId,
+        parentId: parentId,
+        order: afterId,
+        token: t,
+      ),
+    );
+  }
+
   // ─── Permission management ─────────────────────────────────────────
 
   /// Re-reads our own directly-assigned permissions from the Rust cache
