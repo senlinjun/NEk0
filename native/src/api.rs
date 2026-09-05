@@ -314,6 +314,31 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                 tsclientlib::ClientType::Query { admin: false } => 1u8,
                 tsclientlib::ClientType::Query { admin: true } => 2u8,
             };
+            // Volume + 2D position — one STATE lock for both (both keyed by UID).
+            let (volume, pos) = {
+                let cid = c.id.0 as u16;
+                let state = STATE.lock();
+                // Primary source: persisted dB value keyed by the user UID
+                let persisted = c
+                    .uid
+                    .as_ref()
+                    .and_then(|uid| state.client_volumes.get(&uid.to_string()).copied());
+                let volume = persisted.unwrap_or_else(|| {
+                    // Fallback: convert linear gain from jitter buffer → dB
+                    crate::CLIENT_BUFFERS
+                        .get(&cid)
+                        .map(|b| {
+                            let gain = f32::from_bits(b.volume.load(Ordering::Relaxed));
+                            20.0 * gain.max(1e-10).log10()
+                        })
+                        .unwrap_or(0.0) // default: 0 dB = unity gain
+                });
+                let pos = c
+                    .uid
+                    .as_ref()
+                    .and_then(|uid| state.client_positions.get(&uid.to_string()).copied());
+                (volume, pos)
+            };
             TsClient {
                 id: c.id.0 as u32,
                 nickname: c.name.clone(),
@@ -345,26 +370,9 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                         .map(|t| t.elapsed().as_millis() < 500)
                         .unwrap_or(false)
                 },
-                volume: {
-                    let cid = c.id.0 as u16;
-                    let state = STATE.lock();
-                    // Primary source: persisted dB value keyed by the user UID
-                    let persisted = c
-                        .uid
-                        .as_ref()
-                        .and_then(|uid| state.client_volumes.get(&uid.to_string()).copied());
-                    drop(state);
-                    persisted.unwrap_or_else(|| {
-                        // Fallback: convert linear gain from jitter buffer → dB
-                        crate::CLIENT_BUFFERS
-                            .get(&cid)
-                            .map(|b| {
-                                let gain = f32::from_bits(b.volume.load(Ordering::Relaxed));
-                                20.0 * gain.max(1e-10).log10()
-                            })
-                            .unwrap_or(0.0) // default: 0 dB = unity gain
-                    })
-                },
+                volume,
+                pos_x: pos.map(|p| p.0),
+                pos_y: pos.map(|p| p.1),
             }
         })
         .collect();
@@ -663,29 +671,33 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     // audio_data and audio are references — they get dropped naturally
     drop(audio_buf);
 
-    // Get or create per-client decoder (mono, fallback stereo) — DashMap, no STATE lock
-    let mut decoder = AUDIO_DECODERS.entry(from_id)
-        .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
-    let mut pcm_out = vec![0.0f32; FRAME];
-    let ok = match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
-        Ok(_) => true,
-        Err(_) => {
-            drop(decoder);
-            let mut stereo = AUDIO_DECODERS_STEREO.entry(from_id)
-                .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
-            let mut stereo_out = vec![0.0f32; FRAME * 2];
-            match stereo.decode(&opus_vec, FRAME, &mut stereo_out) {
-                Ok(decoded) => {
-                    let n = decoded.min(FRAME);
-                    for i in 0..n {
-                        pcm_out[i] = (stereo_out[i * 2] + stereo_out[i * 2 + 1]) * 0.5;
-                    }
-                    true
-                }
-                Err(e) => {
-                    eprintln!("opus decode error from client {}: {}", from_id, e);
-                    false
-                }
+    // Parse the Opus TOC byte: the top 5 bits are the config, bit 2 is the
+    // stereo flag, the low 2 bits the frame-count code. Decode with the
+    // matching channel count and keep the result stereo end-to-end — stereo
+    // sources (e.g. music bots) must reach the mixer as L/R so they can be
+    // positioned; never downmixed here. The frame stored in the jitter buffer
+    // carries 960 (mono) or 1920 (stereo interleaved) samples.
+    let stereo_packet = !opus_vec.is_empty() && (opus_vec[0] >> 2) & 1 == 1;
+    let out_len = if stereo_packet { FRAME * 2 } else { FRAME };
+    let mut pcm_out = vec![0.0f32; out_len];
+    let ok = if stereo_packet {
+        let mut decoder = AUDIO_DECODERS_STEREO.entry(from_id)
+            .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
+        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("opus stereo decode error from client {}: {}", from_id, e);
+                false
+            }
+        }
+    } else {
+        let mut decoder = AUDIO_DECODERS.entry(from_id)
+            .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
+        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("opus decode error from client {}: {}", from_id, e);
+                false
             }
         }
     };
@@ -693,7 +705,7 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     if !ok { return; }
 
     // Convert f32 → i16 (no volume post-gain — volume is applied as mixing weight in callback)
-    let mut frame = vec![0i16; FRAME];
+    let mut frame = vec![0i16; out_len];
     for (i, &s) in pcm_out.iter().enumerate() {
         frame[i] = (s.clamp(-1.0, 1.0) * 32767.0).clamp(-32768.0, 32767.0) as i16;
     }
@@ -701,20 +713,24 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     // Get or create per-client jitter buffer — DashMap, no STATE lock
     let buf = CLIENT_BUFFERS.entry(from_id).or_insert_with(|| {
         let b = crate::ClientJitterBuffer::new();
-        // Inherit persisted volume when creating a new jitter buffer: resolve
-        // the client's UID from the roster, then look up the UID-keyed table.
+        // Inherit persisted per-UID settings when creating a new jitter
+        // buffer: resolve the client's UID from the roster, then look up the
+        // UID-keyed tables (volume + 2D position survive reconnects).
         let state = STATE.lock();
-        let persisted_db = state
+        let uid = state
             .clients
             .iter()
             .find(|c| c.id as u16 == from_id)
-            .and_then(|c| c.uid.as_ref())
-            .and_then(|uid| state.client_volumes.get(uid.as_str()).copied());
-        drop(state);
-        if let Some(db) = persisted_db {
+            .and_then(|c| c.uid.as_ref());
+        if let Some(db) = uid.and_then(|uid| state.client_volumes.get(uid.as_str()).copied()) {
             let gain = 10.0_f32.powf(db / 20.0);
             b.volume.store(f32::to_bits(gain), Ordering::Release);
         }
+        if let Some(pos) = uid.and_then(|uid| state.client_positions.get(uid.as_str()).copied()) {
+            b.pos_x.store(f32::to_bits(pos.0), Ordering::Release);
+            b.pos_y.store(f32::to_bits(pos.1), Ordering::Release);
+        }
+        drop(state);
         b
     });
 
@@ -811,9 +827,12 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
         buf.frame_pool.push(old);
     }
 
-    // Get frame buffer from pool or allocate
-    let mut write_frame = buf.frame_pool.pop().unwrap_or_else(|| vec![0i16; FRAME]);
-    write_frame.copy_from_slice(&frame);
+    // Get frame buffer from pool or allocate. Pool vecs come in both mono
+    // (960) and stereo (1920) lengths — resize to this frame before storing
+    // (capacity is reused either way).
+    let mut write_frame = buf.frame_pool.pop().unwrap_or_else(|| frame.clone());
+    write_frame.clear();
+    write_frame.extend_from_slice(&frame);
     buf.slots[slot_idx].swap(Some(write_frame));
     buf.write_seq.store(global_seq, Ordering::Release);
     buf.last_packet.store(Some(Instant::now()));
@@ -875,6 +894,266 @@ struct SfxSlot {
     pos: usize,
 }
 
+/// Per-client mixing gains from the client's 2D position relative to us
+/// (meters; +x = right, +y = forward), multiplied by the user-set linear
+/// volume. A NaN position (never set) plays centered at `vol` — identical to
+/// the pre-positional behavior. Distance attenuation 1/(1+(d/REF)²) is smooth
+/// with no hard cutoff; pan uses an equal-gain center law so the centered
+/// loudness matches the unpositioned one and neither side exceeds it (plain
+/// stereo cannot place front vs back — the distance carries that).
+const POS_ATTEN_REF: f32 = 3.0; // meters: atten is 0.5 at this distance
+const POS_PAN_RANGE: f32 = 2.0; // meters: x where the pan reaches fully left/right
+
+fn positional_gains(vol: f32, x: f32, y: f32) -> (f32, f32) {
+    if x.is_nan() || y.is_nan() {
+        return (vol, vol);
+    }
+    let d = (x * x + y * y).sqrt();
+    let atten = vol / (1.0 + (d / POS_ATTEN_REF).powi(2));
+    let pan = (x / POS_PAN_RANGE).clamp(-1.0, 1.0);
+    let l = atten * if pan <= 0.0 { 1.0 } else { 1.0 - pan };
+    let r = atten * if pan >= 0.0 { 1.0 } else { 1.0 + pan };
+    (l, r)
+}
+
+/// Build the cpal mixing callback for the given output channel count (1 or 2).
+/// All playback state (mix buffers, SFX slots) is owned by the closure.
+///
+/// Frames come out of the jitter buffers in two lengths: 960 (mono —
+/// duplicated into both mix channels) and 1920 (stereo interleaved — L/R kept
+/// separate so stereo sources like music bots survive end-to-end).
+///
+/// Playback is driven by PLAYED_SAMPLES, which counts PER-CHANNEL samples:
+/// the logical frame number = PLAYED_SAMPLES / FRAME_SIZE advances at 50/s
+/// regardless of the output channel count.
+fn make_output_callback(
+    out_channels: usize,
+) -> impl FnMut(&mut [f32], &cpal::OutputCallbackInfo) {
+    let current_mix_slot = std::cell::Cell::new(u64::MAX);
+    let current_mix_l = std::cell::RefCell::new([0.0f32; FRAME_SIZE as usize]);
+    let current_mix_r = std::cell::RefCell::new([0.0f32; FRAME_SIZE as usize]);
+    let sfx_slots = std::cell::RefCell::new([SfxSlot::default(); 2]);
+    let cb_seq = std::cell::Cell::new(0u64);
+
+    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+        // ── diagnostics: first 3 callbacks print liveness ──────────
+        let seq = cb_seq.get();
+        if seq < 3 {
+            eprintln!("[cpal-stats] cb#{} ch={} data.len={} played_before={}",
+                seq, out_channels, data.len(), PLAYED_SAMPLES.load(Ordering::Relaxed));
+            cb_seq.set(seq + 1);
+        }
+        // ── diagnostics: entry timing ────────────────────────────
+        let cb_entry = std::time::Instant::now();
+        let played = PLAYED_SAMPLES.load(Ordering::Relaxed);
+        let played_before = played;
+        // Consistency: next-callback expects this value
+        let expected = CB_STATS.expected_next_played.load(Ordering::Relaxed);
+        if expected != 0 && played_before != expected {
+            CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
+        }
+        let cb_elapsed_ns = cb_entry.elapsed().as_nanos() as u64;
+        let last_ns = CB_STATS.last_cb_entry_ns.swap(cb_elapsed_ns, Ordering::Relaxed);
+        if last_ns != 0 {
+            CB_STATS.last_interval_us.store(
+                cb_elapsed_ns.wrapping_sub(last_ns) / 1000, Ordering::Relaxed);
+        }
+        let mut slot = played / FRAME_SIZE;
+        let mut offset = (played % FRAME_SIZE) as usize;
+        let mut data_offset = 0usize;
+        let mut mix_count = 0u64;
+
+        while data_offset < data.len() {
+            // Generate new mix frame when entering a new logical frame
+            if slot != current_mix_slot.get() {
+                mix_count += 1;
+                let mut mix_l = [0.0f32; FRAME_SIZE as usize];
+                let mut mix_r = [0.0f32; FRAME_SIZE as usize];
+                let mut active = 0u32;
+
+                // Phase A: collect one frame from each active client via snapshot
+                let client_ids = ACTIVE_CLIENT_IDS.load();
+                for &client_id in client_ids.iter() {
+                    if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
+                        // One atomic load: base_seq/base_slot are
+                        // always a consistent pair.
+                        let base_pair = buf.base_pair.load(Ordering::Acquire);
+                        let base_seq = (base_pair >> 32) as u32;
+                        if base_seq == 0 { continue; }
+                        let base_slot = base_pair & 0xFFFF_FFFF;
+                        let expected_seq = slot.wrapping_sub(base_slot)
+                            .wrapping_add(base_seq as u64);
+                        let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
+                        if write_seq >= expected_seq {
+                            let idx = (expected_seq.wrapping_sub(base_seq as u64))
+                                as usize % crate::JITTER_SLOTS;
+                            if let Some(frame) = buf.slots[idx].swap(None) {
+                                let vol = f32::from_bits(
+                                    buf.volume.load(Ordering::Relaxed));
+                                // Positional L/R gains (NaN position = centered).
+                                let px = f32::from_bits(
+                                    buf.pos_x.load(Ordering::Relaxed));
+                                let py = f32::from_bits(
+                                    buf.pos_y.load(Ordering::Relaxed));
+                                let (l_gain, r_gain) = positional_gains(vol, px, py);
+                                // Frame length tells the channel count.
+                                match frame.len() {
+                                    1920 => {
+                                        for i in 0..FRAME_SIZE as usize {
+                                            mix_l[i] += frame[i * 2] as f32 * l_gain;
+                                            mix_r[i] += frame[i * 2 + 1] as f32 * r_gain;
+                                        }
+                                    }
+                                    _ => {
+                                        for i in 0..FRAME_SIZE as usize {
+                                            mix_l[i] += frame[i] as f32 * l_gain;
+                                            mix_r[i] += frame[i] as f32 * r_gain;
+                                        }
+                                    }
+                                }
+                                active += 1;
+                                buf.frame_pool.push(frame);
+                            }
+                        }
+                    }
+                }
+
+                // Phase B: attenuate
+                let atten = if active > 0 {
+                    1.0 / (active as f32).sqrt()
+                } else {
+                    1.0
+                };
+                for i in 0..FRAME_SIZE as usize {
+                    mix_l[i] = (mix_l[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
+                    mix_r[i] = (mix_r[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
+                }
+
+                // Phase C: channel-event SFX — start queued requests
+                // in the two parallel slots and mix them on top of
+                // the (already attenuated) voice at fixed 0.5 gain.
+                // Samples are mono and play centered on both channels.
+                {
+                    let mut slots = sfx_slots.borrow_mut();
+                    loop {
+                        match SFX_QUEUE.pop() {
+                            None => break,
+                            Some(kind) => {
+                                if let Some(slot) =
+                                    slots.iter_mut().find(|s| s.kind == 0)
+                                {
+                                    slot.kind = kind;
+                                    slot.pos = 0;
+                                } else {
+                                    // Both slots busy — drop the
+                                    // request rather than let the
+                                    // queue grow unbounded.
+                                    eprintln!(
+                                        "[sfx] dropped request kind={} (both slots busy)",
+                                        kind
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // Load the active sample table only when at
+                    // least one slot is playing (ArcSwap::load is
+                    // lock-free, but there is no reason to touch it
+                    // while every slot is idle).
+                    if slots.iter().any(|s| s.kind != 0) {
+                        let samples = crate::SFX_SAMPLES.load();
+                        for slot in slots.iter_mut() {
+                            if slot.kind == 0 {
+                                continue;
+                            }
+                            let src: &[f32] =
+                                match &samples[(slot.kind - 1) as usize] {
+                                    Some(s) => s.as_slice(),
+                                    None => &[],
+                                };
+                            if slot.pos >= src.len() {
+                                // Empty/consumed sample: request done.
+                                slot.kind = 0;
+                                continue;
+                            }
+                            let mut i = 0usize;
+                            while i < FRAME_SIZE as usize
+                                && slot.pos + i < src.len()
+                            {
+                                let s = src[slot.pos + i] * 0.5;
+                                mix_l[i] += s;
+                                mix_r[i] += s;
+                                i += 1;
+                            }
+                            slot.pos += i;
+                            if slot.pos >= src.len() {
+                                slot.kind = 0;
+                            }
+                        }
+                    }
+                }
+                // Final clamp after SFX mixing (voice was already
+                // clamped in Phase B).
+                for s in &mut mix_l {
+                    *s = s.clamp(-1.0, 1.0);
+                }
+                for s in &mut mix_r {
+                    *s = s.clamp(-1.0, 1.0);
+                }
+
+                *current_mix_l.borrow_mut() = mix_l;
+                *current_mix_r.borrow_mut() = mix_r;
+                current_mix_slot.set(slot);
+            }
+
+            // Copy from cached mix buffers to output. Stereo data is
+            // interleaved L/R; mono output gets the centered (L+R)/2 downmix.
+            let mix_l = current_mix_l.borrow();
+            let mix_r = current_mix_r.borrow();
+            let remaining_data = data.len() - data_offset;
+            let remaining_frame = FRAME_SIZE as usize - offset;
+            let frames_copy = (remaining_data / out_channels).min(remaining_frame);
+            if frames_copy == 0 {
+                // Unreachable for well-formed interleaved buffers; guards
+                // against spinning forever on a truncated final block.
+                break;
+            }
+
+            for i in 0..frames_copy {
+                let (l, r) = (mix_l[offset + i], mix_r[offset + i]);
+                if out_channels == 2 {
+                    data[data_offset + i * 2] = l;
+                    data[data_offset + i * 2 + 1] = r;
+                } else {
+                    data[data_offset + i] = (l + r) * 0.5;
+                }
+            }
+
+            data_offset += frames_copy * out_channels;
+            offset += frames_copy;
+            if offset >= FRAME_SIZE as usize {
+                offset = 0;
+                slot += 1;
+            }
+        }
+
+        // ── diagnostics: record stats ────────────────────────────
+        CB_STATS.callbacks.fetch_add(1, Ordering::Relaxed);
+        CB_STATS.samples_total.fetch_add(
+            data.len() as u64 / out_channels as u64, Ordering::Relaxed);
+        CB_STATS.mix_frames.fetch_add(mix_count, Ordering::Relaxed);
+        // PLAYED_SAMPLES consistency: old value must equal played_before.
+        // Incremented in per-channel samples (see the doc comment).
+        let per_channel = (data.len() / out_channels) as u64;
+        let old = PLAYED_SAMPLES.fetch_add(per_channel, Ordering::Relaxed);
+        if old != played_before {
+            CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
+        }
+        // Store expected value for next callback's entry check
+        CB_STATS.expected_next_played.store(old + per_channel, Ordering::Relaxed);
+    }
+}
+
 /// Drop the current cpal output stream and rebuild it on the current default
 /// output device (same config and mixing callback as the initial build).
 /// Resets playback state exactly like `ts_stop_audio` — buffers are cleared
@@ -894,210 +1173,44 @@ fn restart_output_stream() {
 
     let host = cpal::default_host();
     if let Some(device) = host.default_output_device() {
-        let config = cpal::StreamConfig {
-            channels: 1,
-            sample_rate: cpal::SampleRate(48000),
-            buffer_size: cpal::BufferSize::Fixed(960),
-        };
-        match device.build_output_stream(
-            &config,
-            {
-                let current_mix_slot = std::cell::Cell::new(u64::MAX);
-                let current_mix_buf = std::cell::RefCell::new([0.0f32; FRAME_SIZE as usize]);
-                let sfx_slots = std::cell::RefCell::new([SfxSlot::default(); 2]);
-                let cb_seq = std::cell::Cell::new(0u64);
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // ── diagnostics: first 3 callbacks print liveness ──────────
-                    let seq = cb_seq.get();
-                    if seq < 3 {
-                        eprintln!("[cpal-stats] cb#{} data.len={} played_before={}",
-                            seq, data.len(), PLAYED_SAMPLES.load(Ordering::Relaxed));
-                        cb_seq.set(seq + 1);
+        // Prefer stereo output — panning/positional audio needs distinct L/R.
+        // Fall back to mono (center-mixed in the callback) when the device
+        // rejects the stereo config.
+        for channels in [2u16, 1] {
+            let config = cpal::StreamConfig {
+                channels,
+                sample_rate: cpal::SampleRate(48000),
+                buffer_size: cpal::BufferSize::Fixed(960),
+            };
+            match device.build_output_stream(
+                &config,
+                make_output_callback(channels as usize),
+                |err| {
+                    eprintln!("cpal output error: {}", err);
+                    // A stream error usually means the output device went away
+                    // (e.g. Bluetooth route change); rebuild on the next
+                    // maintenance tick.
+                    OUTPUT_RESTART_REQUESTED.store(true, Ordering::Relaxed);
+                },
+                None,
+            ) {
+                Ok(stream) => {
+                    if stream.play().is_ok() {
+                        crate::AUDIO_STREAM.lock().unwrap().0 = Some(stream);
+                        eprintln!(
+                            "cpal: output stream started ({}ch, Default buffer, sample-driven)",
+                            channels
+                        );
+                        break;
+                    } else {
+                        eprintln!("cpal: play() failed ({}ch)", channels);
                     }
-                    // ── diagnostics: entry timing ────────────────────────────
-                    let cb_entry = std::time::Instant::now();
-                    let played = PLAYED_SAMPLES.load(Ordering::Relaxed);
-                    let played_before = played;
-                    // Consistency: next-callback expects this value
-                    let expected = CB_STATS.expected_next_played.load(Ordering::Relaxed);
-                    if expected != 0 && played_before != expected {
-                        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
-                    }
-                    let cb_elapsed_ns = cb_entry.elapsed().as_nanos() as u64;
-                    let last_ns = CB_STATS.last_cb_entry_ns.swap(cb_elapsed_ns, Ordering::Relaxed);
-                    if last_ns != 0 {
-                        CB_STATS.last_interval_us.store(
-                            cb_elapsed_ns.wrapping_sub(last_ns) / 1000, Ordering::Relaxed);
-                    }
-                    let mut slot = played / FRAME_SIZE;
-                    let mut offset = (played % FRAME_SIZE) as usize;
-                    let mut data_offset = 0usize;
-                    let mut mix_count = 0u64;
-
-                    while data_offset < data.len() {
-                        // Generate new mix frame when entering a new logical frame
-                        if slot != current_mix_slot.get() {
-                            mix_count += 1;
-                            let mut mix_buf = [0.0f32; FRAME_SIZE as usize];
-                            let mut active = 0u32;
-
-                            // Phase A: collect one frame from each active client via snapshot
-                            let client_ids = ACTIVE_CLIENT_IDS.load();
-                            for &client_id in client_ids.iter() {
-                                if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
-                                    // One atomic load: base_seq/base_slot are
-                                    // always a consistent pair.
-                                    let base_pair = buf.base_pair.load(Ordering::Acquire);
-                                    let base_seq = (base_pair >> 32) as u32;
-                                    if base_seq == 0 { continue; }
-                                    let base_slot = base_pair & 0xFFFF_FFFF;
-                                    let expected_seq = slot.wrapping_sub(base_slot)
-                                        .wrapping_add(base_seq as u64);
-                                    let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
-                                    if write_seq >= expected_seq {
-                                        let idx = (expected_seq.wrapping_sub(base_seq as u64))
-                                            as usize % crate::JITTER_SLOTS;
-                                        if let Some(frame) = buf.slots[idx].swap(None) {
-                                            let vol = f32::from_bits(
-                                                buf.volume.load(Ordering::Relaxed));
-                                            for i in 0..FRAME_SIZE as usize {
-                                                mix_buf[i] += frame[i] as f32 * vol;
-                                            }
-                                            active += 1;
-                                            buf.frame_pool.push(frame);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Phase B: attenuate
-                            let atten = if active > 0 {
-                                1.0 / (active as f32).sqrt()
-                            } else {
-                                1.0
-                            };
-                            for s in &mut mix_buf {
-                                *s = (*s * atten).clamp(-32768.0, 32767.0) / 32768.0;
-                            }
-
-                            // Phase C: channel-event SFX — start queued requests
-                            // in the two parallel slots and mix them on top of
-                            // the (already attenuated) voice at fixed 0.5 gain.
-                            {
-                                let mut slots = sfx_slots.borrow_mut();
-                                loop {
-                                    match SFX_QUEUE.pop() {
-                                        None => break,
-                                        Some(kind) => {
-                                            if let Some(slot) =
-                                                slots.iter_mut().find(|s| s.kind == 0)
-                                            {
-                                                slot.kind = kind;
-                                                slot.pos = 0;
-                                            } else {
-                                                // Both slots busy — drop the
-                                                // request rather than let the
-                                                // queue grow unbounded.
-                                                eprintln!(
-                                                    "[sfx] dropped request kind={} (both slots busy)",
-                                                    kind
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                // Load the active sample table only when at
-                                // least one slot is playing (ArcSwap::load is
-                                // lock-free, but there is no reason to touch it
-                                // while every slot is idle).
-                                if slots.iter().any(|s| s.kind != 0) {
-                                    let samples = crate::SFX_SAMPLES.load();
-                                    for slot in slots.iter_mut() {
-                                        if slot.kind == 0 {
-                                            continue;
-                                        }
-                                        let src: &[f32] =
-                                            match &samples[(slot.kind - 1) as usize] {
-                                                Some(s) => s.as_slice(),
-                                                None => &[],
-                                            };
-                                        if slot.pos >= src.len() {
-                                            // Empty/consumed sample: request done.
-                                            slot.kind = 0;
-                                            continue;
-                                        }
-                                        let mut i = 0usize;
-                                        while i < FRAME_SIZE as usize
-                                            && slot.pos + i < src.len()
-                                        {
-                                            mix_buf[i] += src[slot.pos + i] * 0.5;
-                                            i += 1;
-                                        }
-                                        slot.pos += i;
-                                        if slot.pos >= src.len() {
-                                            slot.kind = 0;
-                                        }
-                                    }
-                                }
-                            }
-                            // Final clamp after SFX mixing (voice was already
-                            // clamped in Phase B).
-                            for s in &mut mix_buf {
-                                *s = s.clamp(-1.0, 1.0);
-                            }
-
-                            *current_mix_buf.borrow_mut() = mix_buf;
-                            current_mix_slot.set(slot);
-                        }
-
-                        // Copy from cached mix buffer to output
-                        let mix = current_mix_buf.borrow();
-                        let remaining_data = data.len() - data_offset;
-                        let remaining_frame = FRAME_SIZE as usize - offset;
-                        let copy = remaining_data.min(remaining_frame);
-
-                        data[data_offset..data_offset + copy]
-                            .copy_from_slice(&mix[offset..offset + copy]);
-
-                        data_offset += copy;
-                        offset += copy;
-                        if offset >= FRAME_SIZE as usize {
-                            offset = 0;
-                            slot += 1;
-                        }
-                    }
-
-                    // ── diagnostics: record stats ────────────────────────
-                    CB_STATS.callbacks.fetch_add(1, Ordering::Relaxed);
-                    CB_STATS.samples_total.fetch_add(data.len() as u64, Ordering::Relaxed);
-                    CB_STATS.mix_frames.fetch_add(mix_count, Ordering::Relaxed);
-                    // PLAYED_SAMPLES consistency: old value must equal played_before
-                    let old = PLAYED_SAMPLES.fetch_add(data.len() as u64, Ordering::Relaxed);
-                    if old != played_before {
-                        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
-                    }
-                    // Store expected value for next callback's entry check
-                    CB_STATS.expected_next_played.store(old + data.len() as u64, Ordering::Relaxed);
                 }
-            },
-            |err| {
-                eprintln!("cpal output error: {}", err);
-                // A stream error usually means the output device went away
-                // (e.g. Bluetooth route change); rebuild on the next
-                // maintenance tick.
-                OUTPUT_RESTART_REQUESTED.store(true, Ordering::Relaxed);
-            },
-            None,
-        ) {
-            Ok(stream) => {
-                if stream.play().is_ok() {
-                    crate::AUDIO_STREAM.lock().unwrap().0 = Some(stream);
-                    eprintln!("cpal: output stream started (Default buffer, sample-driven)");
-                } else {
-                    eprintln!("cpal: play() failed");
-                }
+                Err(e) => eprintln!(
+                    "cpal: build_output_stream failed ({}ch): {}",
+                    channels, e
+                ),
             }
-            Err(e) => eprintln!("cpal: build_output_stream failed: {}", e),
         }
     } else {
         eprintln!("cpal: no output device");
@@ -3485,6 +3598,45 @@ pub extern "C" fn ts_set_client_volume(client_id: u16, volume_db: f32) {
     // Also update the live jitter buffer if it exists
     if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
         buf.volume.store(f32::to_bits(gain), Ordering::Release);
+    }
+}
+
+/// Set (enabled != 0) or clear (enabled == 0) a remote client's 2D position
+/// relative to us, in meters on the horizontal plane (+x = right, +y =
+/// forward). The mixer pans and distance-attenuates that client's audio by it.
+/// Persisted under the client's user UID like ts_set_client_volume so it
+/// survives reconnects; when the UID is not known yet (e.g. brand-new client
+/// within the roster refresh window), only the live buffer is updated and not
+/// persisted.
+#[no_mangle]
+pub extern "C" fn ts_set_client_position(client_id: u16, x: f32, y: f32, enabled: u8) {
+    let mut state = STATE.lock();
+    let uid = state
+        .clients
+        .iter()
+        .find(|c| c.id as u16 == client_id)
+        .and_then(|c| c.uid.as_ref())
+        .cloned();
+    if enabled != 0 {
+        if let Some(uid) = uid {
+            state.client_positions.insert(uid, (x, y));
+        }
+    } else if let Some(uid) = uid {
+        state.client_positions.remove(&uid);
+    }
+    drop(state);
+
+    // Also update the live jitter buffer if it exists. NaN bits mean "no
+    // position" (centered playback) — the mixer's positional_gains checks for
+    // them, so clearing writes NaN rather than (0, 0).
+    if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
+        let (px, py) = if enabled != 0 {
+            (x, y)
+        } else {
+            (f32::NAN, f32::NAN)
+        };
+        buf.pos_x.store(f32::to_bits(px), Ordering::Release);
+        buf.pos_y.store(f32::to_bits(py), Ordering::Release);
     }
 }
 

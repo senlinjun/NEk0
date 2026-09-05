@@ -1729,6 +1729,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'The server rejected the request'**
   String get permFailedUnknown;
+
+  /// No description provided for @positionTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Set position'**
+  String get positionTitle;
+
+  /// No description provided for @positionSelf.
+  ///
+  /// In en, this message translates to:
+  /// **'Me'**
+  String get positionSelf;
+
+  /// No description provided for @positionHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Drag to place them around you: up is in front of you, farther away is quieter. Plain stereo cannot tell front from back — distance carries that.'**
+  String get positionHint;
+
+  /// No description provided for @positionUnset.
+  ///
+  /// In en, this message translates to:
+  /// **'No position set — plays centered'**
+  String get positionUnset;
+
+  /// No description provided for @positionReset.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset position'**
+  String get positionReset;
 }
 
 class _AppLocalizationsDelegate

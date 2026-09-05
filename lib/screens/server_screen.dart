@@ -21,6 +21,7 @@ import '../widgets/chat_panel.dart';
 import '../widgets/connection_bar.dart';
 import '../screens/file_manager_screen.dart';
 import '../widgets/channel_menu.dart';
+import '../widgets/position_edit_screen.dart';
 import '../widgets/spotlight_tour.dart';
 import '../widgets/voice_settings_panel.dart';
 
@@ -1016,6 +1017,16 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
                 ),
               ],
             ),
+            // ── Position (never for ourselves — we are the origin) ──
+            if (!isSelf) ...[
+              const SizedBox(height: 8),
+              _actionButton(
+                context,
+                icon: Icons.spatial_audio,
+                label: al.positionTitle,
+                onPressed: () => pushPositionEditPage(context, c),
+              ),
+            ],
             const SizedBox(height: 20),
             // ── Permission-gated actions (never for ourselves) ──
             if (!isSelf && _hasAnyAction(c)) ...[

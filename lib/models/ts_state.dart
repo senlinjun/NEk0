@@ -151,6 +151,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       false; // true only after enableMic() successfully completes
   bool _inputMutedBeforeAway = false; // input mute to restore when leaving away
   SharedPreferences? _prefs; // cached for synchronous saves
+  // UIDs whose saved 2D position has been applied this session (see
+  // _applySavedClientPositions). Afterwards live Rust state is authoritative.
+  final Set<String> _positionedUids = {};
   // Session-only cache of channel passwords entered by the user, keyed by
   // channel id. Cleared on disconnect; deliberately never persisted to disk.
   final Map<int, String> _channelPasswords = {};
@@ -308,6 +311,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       // differs from the saved value. Runs on every refresh, so it also covers
       // late joiners and the brief window where a UID is not yet known.
       _applySavedClientVolumes();
+      _applySavedClientPositions();
     } catch (e) {
       debugPrint('FFI poll error: $e');
     }
@@ -991,6 +995,31 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     }
   }
 
+  /// Sets ([x]/[y] both non-null) or clears (either null) a client's 2D
+  /// position relative to us, in meters (+x = right, +y = forward). The Rust
+  /// mixer pans and distance-attenuates that client's audio accordingly.
+  void setClientPosition(int clientId, double? x, double? y) {
+    TsNative.setClientPosition(clientId, x, y);
+    final newClients = state.clients.map((c) {
+      if (c.id == clientId) return c.copyWith(position: (x: x, y: y));
+      return c;
+    }).toList();
+    state = state.copyWith(clients: newClients);
+    // Persist per-client position to SharedPreferences keyed by the user UID,
+    // mirroring setClientVolume: without a UID yet (client just joined and the
+    // roster hasn't refreshed) the change only applies for this session;
+    // _applySavedClientPositions restores it once the UID shows up.
+    final client = newClients.where((c) => c.id == clientId).firstOrNull;
+    final uid = client?.uid;
+    if (uid != null && uid.isNotEmpty) {
+      if (x == null || y == null) {
+        _prefs?.remove('client_pos_uid_$uid');
+      } else {
+        _prefs?.setString('client_pos_uid_$uid', '{"x":$x,"y":$y}');
+      }
+    }
+  }
+
   /// Removes legacy `client_volume_<clid>` keys persisted by older builds.
   /// Volume persistence now uses `client_volume_uid_<uid>`.
   void _migrateLegacyVolumeKeys() {
@@ -1019,6 +1048,34 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       final saved = prefs.getDouble('client_volume_uid_$uid');
       if (saved != null && (saved - client.volume).abs() > 0.001) {
         setClientVolume(client.id, saved);
+      }
+    }
+  }
+
+  /// Restores saved per-client positions (keyed by user UID) for roster
+  /// clients not yet seen this session. Runs on every poll cycle: it covers
+  /// the app-restart case (Rust state starts empty) and clients whose UID
+  /// appears late. Each UID is applied at most once — afterwards live Rust
+  /// state is authoritative, so the user's in-session edits always win.
+  void _applySavedClientPositions() {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    for (final client in state.clients) {
+      final uid = client.uid;
+      if (uid == null || uid.isEmpty || _positionedUids.contains(uid)) continue;
+      _positionedUids.add(uid);
+      final raw = prefs.getString('client_pos_uid_$uid');
+      if (raw == null) continue;
+      try {
+        final saved = jsonDecode(raw) as Map<String, dynamic>;
+        final x = (saved['x'] as num?)?.toDouble();
+        final y = (saved['y'] as num?)?.toDouble();
+        if (x != null && y != null) {
+          TsNative.setClientPosition(client.id, x, y);
+        }
+      } catch (_) {
+        // Corrupt entry — drop it so it cannot break later polls either.
+        prefs.remove('client_pos_uid_$uid');
       }
     }
   }

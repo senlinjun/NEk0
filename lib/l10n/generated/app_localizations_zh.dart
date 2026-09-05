@@ -853,4 +853,20 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get permFailedUnknown => '服务器拒绝了该请求';
+
+  @override
+  String get positionTitle => '设置位置';
+
+  @override
+  String get positionSelf => '我';
+
+  @override
+  String get positionHint =>
+      '拖动圆点设置 TA 相对你的位置：上方是你的前方，距离越远音量越小。普通立体声无法区分前后，由距离体现。';
+
+  @override
+  String get positionUnset => '未设置位置——居中播放';
+
+  @override
+  String get positionReset => '重置位置';
 }

@@ -340,5 +340,10 @@
   "permNotConnected": "未连接",
   "permQueueFailed": "请求入队失败",
   "permTimeout": "服务器未在规定时间内应答",
-  "permFailedUnknown": "服务器拒绝了该请求"
+  "permFailedUnknown": "服务器拒绝了该请求",
+  "positionTitle": "设置位置",
+  "positionSelf": "我",
+  "positionHint": "拖动圆点设置 TA 相对你的位置：上方是你的前方，距离越远音量越小。普通立体声无法区分前后，由距离体现。",
+  "positionUnset": "未设置位置——居中播放",
+  "positionReset": "重置位置"
 }

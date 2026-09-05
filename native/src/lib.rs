@@ -434,6 +434,10 @@ pub struct TsClient {
     /// tooltips; may be empty when the group data is unavailable).
     pub server_group_names: Vec<String>,
     pub channel_group: u32,
+    /// 2D position relative to us in meters (+x = right, +y = forward).
+    /// None = no position set → centered playback.
+    pub pos_x: Option<f32>,
+    pub pos_y: Option<f32>,
 }
 
 // ─── Per-client lock-free jitter buffer ──────────────────────────────
@@ -463,6 +467,12 @@ pub struct ClientJitterBuffer {
     pub frame_pool: SegQueue<Vec<i16>>,
     /// Linear gain as f32::to_bits, applied as mixing weight in the audio callback.
     pub volume: AtomicU32,
+    /// 2D position of this client relative to us (meters; +x = right,
+    /// +y = forward), stored as f32::to_bits. NaN bits = no position set →
+    /// centered playback. Written by ts_set_client_position, read by the
+    /// audio callback.
+    pub pos_x: AtomicU32,
+    pub pos_y: AtomicU32,
 }
 
 impl ClientJitterBuffer {
@@ -476,6 +486,8 @@ impl ClientJitterBuffer {
             last_packet: AtomicCell::new(None),
             frame_pool: SegQueue::new(),
             volume: AtomicU32::new(f32::to_bits(1.0)),
+            pos_x: AtomicU32::new(f32::to_bits(f32::NAN)),
+            pos_y: AtomicU32::new(f32::to_bits(f32::NAN)),
         }
     }
 }
@@ -522,6 +534,10 @@ pub struct TsConnection {
     /// only a session-scoped handle; the UID is what survives reconnects and
     /// identifies the same user across servers.
     pub client_volumes: HashMap<String, f32>,
+    /// Per-client 2D position (x, y) in meters relative to us (+x = right,
+    /// +y = forward), keyed by the client's user UID. Source of truth —
+    /// NOT cleared on disconnect. Same lifetime rules as client_volumes.
+    pub client_positions: HashMap<String, (f32, f32)>,
 }
 
 impl TsConnection {
@@ -550,6 +566,7 @@ impl TsConnection {
             talking_clients: HashMap::new(),
             pending_move: None,
             client_volumes: HashMap::new(),
+            client_positions: HashMap::new(),
         }
     }
 }

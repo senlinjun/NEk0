@@ -360,5 +360,10 @@
   "permNotConnected": "Not connected",
   "permQueueFailed": "Failed to queue the request",
   "permTimeout": "The server did not answer in time",
-  "permFailedUnknown": "The server rejected the request"
+  "permFailedUnknown": "The server rejected the request",
+  "positionTitle": "Set position",
+  "positionSelf": "Me",
+  "positionHint": "Drag to place them around you: up is in front of you, farther away is quieter. Plain stereo cannot tell front from back — distance carries that.",
+  "positionUnset": "No position set — plays centered",
+  "positionReset": "Reset position"
 }

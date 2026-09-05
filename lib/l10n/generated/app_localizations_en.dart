@@ -867,4 +867,20 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get permFailedUnknown => 'The server rejected the request';
+
+  @override
+  String get positionTitle => 'Set position';
+
+  @override
+  String get positionSelf => 'Me';
+
+  @override
+  String get positionHint =>
+      'Drag to place them around you: up is in front of you, farther away is quieter. Plain stereo cannot tell front from back — distance carries that.';
+
+  @override
+  String get positionUnset => 'No position set — plays centered';
+
+  @override
+  String get positionReset => 'Reset position';
 }

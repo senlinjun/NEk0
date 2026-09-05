@@ -100,6 +100,11 @@ typedef _SetMicGainDart = void Function(double);
 typedef _SetClientVolumeNative = Void Function(Uint16, Float);
 typedef _SetClientVolumeDart = void Function(int, double);
 
+// ts_set_client_position(client_id: u16, x: f32, y: f32, enabled: u8)
+// enabled == 0 clears the position (back to centered playback).
+typedef _SetClientPositionNative = Void Function(Uint16, Float, Float, Uint8);
+typedef _SetClientPositionDart = void Function(int, double, double, int);
+
 // ts_set_sfx_sample(kind: u8, data: *const u8, len: usize) -> i32
 // Returns: 0 ok, 1 invalid kind, 2 unsupported format, 3 empty/too long.
 typedef _SetSfxSampleNative = Int32 Function(Uint8, Pointer<Uint8>, IntPtr);
@@ -310,6 +315,10 @@ final _setMicGain = _lib.lookupFunction<_SetMicGainNative, _SetMicGainDart>(
 final _setClientVolume = _lib
     .lookupFunction<_SetClientVolumeNative, _SetClientVolumeDart>(
       'ts_set_client_volume',
+    );
+final _setClientPosition = _lib
+    .lookupFunction<_SetClientPositionNative, _SetClientPositionDart>(
+      'ts_set_client_position',
     );
 final _setSfxSample = _lib
     .lookupFunction<_SetSfxSampleNative, _SetSfxSampleDart>(
@@ -555,6 +564,14 @@ class TsNative {
 
   static void setClientVolume(int clientId, double volumeDb) {
     _setClientVolume(clientId, volumeDb);
+  }
+
+  /// Sets the client's 2D position relative to us in meters (+x = right,
+  /// +y = forward), or clears it when either coordinate is null (back to
+  /// centered playback).
+  static void setClientPosition(int clientId, double? x, double? y) {
+    final enabled = (x != null && y != null) ? 1 : 0;
+    _setClientPosition(clientId, x ?? 0.0, y ?? 0.0, enabled);
   }
 
   /// Install a custom WAV sample for an SFX kind (1..=25, see SfxKind).
