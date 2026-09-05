@@ -141,6 +141,18 @@ class AppLocalizationsZh extends AppLocalizations {
   String get micPermissionDenied => '麦克风权限被拒绝';
 
   @override
+  String get audioDevicesSection => '音频设备';
+
+  @override
+  String get audioOutputDevice => '输出设备';
+
+  @override
+  String get audioInputDevice => '输入设备';
+
+  @override
+  String get audioSystemDefault => '系统默认';
+
+  @override
   String get updateSection => '更新';
 
   @override

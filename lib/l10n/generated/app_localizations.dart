@@ -356,6 +356,30 @@ abstract class AppLocalizations {
   /// **'Microphone permission denied'**
   String get micPermissionDenied;
 
+  /// No description provided for @audioDevicesSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Audio devices'**
+  String get audioDevicesSection;
+
+  /// No description provided for @audioOutputDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Output device'**
+  String get audioOutputDevice;
+
+  /// No description provided for @audioInputDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Input device'**
+  String get audioInputDevice;
+
+  /// No description provided for @audioSystemDefault.
+  ///
+  /// In en, this message translates to:
+  /// **'System default'**
+  String get audioSystemDefault;
+
   /// No description provided for @updateSection.
   ///
   /// In en, this message translates to:

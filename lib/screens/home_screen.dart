@@ -47,6 +47,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Future<void> _maybeAutoCheckUpdate() async {
     if (_otaChecked) return;
     _otaChecked = true;
+    if (!OtaService.isSupported) return;
     final settings = OtaSettings();
     await settings.load();
     if (!settings.enabled || !mounted) return;

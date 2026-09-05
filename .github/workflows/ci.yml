@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  android-linux:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -29,11 +29,11 @@ jobs:
         rustup target add aarch64-linux-android
         rustup target add x86_64-linux-android
     - name: Install system deps
-      run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      run: sudo apt-get update && sudo apt-get install -y libasound2-dev ninja-build libgtk-3-dev
     - name: Setup Android NDK
       id: ndk
       uses: nttld/setup-ndk@v1.6.0
-      with: 
+      with:
         ndk-version: r27d
     - name: Check Rust
       env:
@@ -41,16 +41,25 @@ jobs:
       run: |
         cd native
         cargo check
-    - name: Prebuild
+    - name: Prebuild (Android)
       env:
         ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-      run: python3 pre_build.py
+      run: python3 pre_build.py android
+    - name: Prebuild (Linux)
+      run: python3 pre_build.py linux
     - name: Flutter check
       run: |
         flutter pub get
         flutter gen-l10n
         dart format . --set-exit-if-changed
         flutter analyze
+    - name: Build Linux bundle
+      run: flutter build linux --release
+    - name: Package Linux bundle
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        tar -C build/linux/x64/release/bundle -czf \
+          Nek0_${{github.ref_name}}_linux_x64.tar.gz .
     - name: Generate key
       if: startsWith(github.ref, 'refs/tags/')
       run: echo "${{ secrets.KEY_STORE }}" | base64 --decode > android/app/key.jks  && echo "${{ secrets.KEY_PROPERTIES }}" > android/app/key.properties
@@ -76,6 +85,7 @@ jobs:
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_arm64-v8a.apk
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
             build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_universal.apk
+            Nek0_${{github.ref_name}}_linux_x64.tar.gz
     - name: Gitee Release
       if: startsWith(github.ref, 'refs/tags/')
       run: |
@@ -84,4 +94,33 @@ jobs:
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_arm64-v8a.apk
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_x86_64.apk
           python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file build/app/outputs/flutter-apk/Nek0_${{github.ref_name}}_android_universal.apk
-      
+
+  windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Flutter action
+      uses: subosito/flutter-action@v2.23.0
+      with:
+        flutter-version: 3.47.0
+    - name: Setup Python
+      uses: actions/setup-python@v7.0.0
+    - name: Prebuild (Windows)
+      run: python3 pre_build.py windows
+    - name: Flutter check
+      run: |
+        flutter pub get
+        flutter gen-l10n
+        flutter analyze
+    - name: Build Windows bundle
+      run: flutter build windows --release
+    - name: Package Windows bundle
+      if: startsWith(github.ref, 'refs/tags/')
+      shell: pwsh
+      run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath Nek0_${{github.ref_name}}_windows_x64.zip
+    - name: GH Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v3.0.2
+      with:
+          token: ${{ secrets.TOKEN }}
+          files: Nek0_${{github.ref_name}}_windows_x64.zip

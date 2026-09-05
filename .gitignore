@@ -52,6 +52,7 @@ app.*.map.json
 
 # Rust
 target/
+native/prebuilt/
 
 .claude
 libtsclient.so

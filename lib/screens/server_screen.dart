@@ -558,6 +558,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   /// The battery-optimization exemption is requested only AFTER the user
   /// acknowledges the dialog, so they know why the settings page opens.
   Future<void> _maybeShowOemGuide() async {
+    // OEM battery/auto-start quirks (MIUI/EMUI/...) are Android-only.
+    if (!Platform.isAndroid) return;
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool('oem_guide_shown') ?? false) return;
     await prefs.setBool('oem_guide_shown', true);
