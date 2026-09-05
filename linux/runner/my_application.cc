@@ -25,6 +25,23 @@ static void my_application_activate(GApplication* application) {
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
+  g_autoptr(FlDartProject) project = fl_dart_project_new();
+  fl_dart_project_set_dart_entrypoint_arguments(
+      project, self->dart_entrypoint_arguments);
+
+  // Window/taskbar icon from <exe dir>/data/app_icon.png. Best effort: a
+  // missing file just leaves GTK's default icon in place.
+  gchar* data_dir =
+      g_path_get_dirname(fl_dart_project_get_assets_path(project));
+  gchar* icon_path = g_build_filename(data_dir, "app_icon.png", nullptr);
+  GError* icon_error = nullptr;
+  if (!gtk_window_set_default_icon_from_file(icon_path, &icon_error)) {
+    g_debug("Failed to load app icon from %s: %s", icon_path,
+            icon_error != nullptr ? icon_error->message : "unknown error");
+    g_clear_error(&icon_error);
+  }
+  g_free(icon_path);
+
   // Use a header bar when running in GNOME as this is the common style used
   // by applications and is the setup most users will be using (e.g. Ubuntu
   // desktop).
@@ -53,10 +70,6 @@ static void my_application_activate(GApplication* application) {
   }
 
   gtk_window_set_default_size(window, 1280, 720);
-
-  g_autoptr(FlDartProject) project = fl_dart_project_new();
-  fl_dart_project_set_dart_entrypoint_arguments(
-      project, self->dart_entrypoint_arguments);
 
   FlView* view = fl_view_new(project);
   GdkRGBA background_color;
