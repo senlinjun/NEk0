@@ -602,7 +602,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                 // per-client volume + poke sheet.
                 onClientTap: (clientId) {
                   if (clientId == conn.ownClientId) {
-                    _showVoiceSettings(conn, notifier);
+                    _showVoiceSettings(notifier);
                   } else {
                     _showClientVolume(clientId);
                   }
@@ -829,7 +829,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
           GestureDetector(
             key: _micKey,
             onTap: () => notifier.toggleInputMute(),
-            onLongPress: () => _showVoiceSettings(conn, notifier),
+            onLongPress: () => _showVoiceSettings(notifier),
             child: Icon(Icons.mic, color: micColor, size: 28),
           ),
           const SizedBox(width: 24),
@@ -903,10 +903,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     );
   }
 
-  void _showVoiceSettings(
-    TsConnectionState conn,
-    TsConnectionNotifier notifier,
-  ) {
+  void _showVoiceSettings(TsConnectionNotifier notifier) {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF12122A),
@@ -914,9 +911,17 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
       ),
       builder: (ctx) {
+        // The modal route lives outside this screen's rebuild tree, so the
+        // captured conn snapshot would freeze the level bar; watch the
+        // provider here to keep the panel live.
         return Padding(
           padding: const EdgeInsets.all(20),
-          child: VoiceSettingsPanel(conn: conn, notifier: notifier),
+          child: Consumer(
+            builder: (ctx, ref, _) {
+              final live = ref.watch(tsConnectionProvider);
+              return VoiceSettingsPanel(conn: live, notifier: notifier);
+            },
+          ),
         );
       },
     );
