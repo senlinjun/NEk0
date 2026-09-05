@@ -33,6 +33,11 @@ class TsConnectionState {
   /// Channel id whose join was just rejected because of a wrong password.
   /// Transient marker consumed by the server screen to re-open the prompt.
   final int? failedPasswordChannelId;
+
+  /// The server announced `ask_for_privilegekey` and no token was submitted
+  /// with clientinit — the server screen should offer the privilege-key
+  /// dialog. Reset once handled or on disconnect.
+  final bool askForPrivilegeKey;
   final String? error;
   final List<String> diagMessages;
   final bool voiceActive;
@@ -57,6 +62,7 @@ class TsConnectionState {
     this.messages = const [],
     this.selectedChannelId,
     this.failedPasswordChannelId,
+    this.askForPrivilegeKey = false,
     this.error,
     this.diagMessages = const [],
     this.voiceActive = false,
@@ -82,6 +88,7 @@ class TsConnectionState {
     List<ChatMessage>? messages,
     Object? selectedChannelId = _sentinel,
     Object? failedPasswordChannelId = _sentinel,
+    bool? askForPrivilegeKey,
     String? error,
     List<String>? diagMessages,
     bool? voiceActive,
@@ -109,6 +116,7 @@ class TsConnectionState {
     failedPasswordChannelId: failedPasswordChannelId == _sentinel
         ? this.failedPasswordChannelId
         : failedPasswordChannelId as int?,
+    askForPrivilegeKey: askForPrivilegeKey ?? this.askForPrivilegeKey,
     error: error,
     diagMessages: diagMessages ?? this.diagMessages,
     voiceActive: voiceActive ?? this.voiceActive,
@@ -157,6 +165,14 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   // Session-only cache of channel passwords entered by the user, keyed by
   // channel id. Cleared on disconnect; deliberately never persisted to disk.
   final Map<int, String> _channelPasswords = {};
+  // Id of the server whose one-time privilege key (token) was submitted with
+  // the current connect attempt; cleared from the server entry once the
+  // connection succeeds.
+  String? _pendingTokenServerId;
+  // True when the current connect attempt carried a pre-filled token in
+  // clientinit — suppresses the post-connect privilege-key prompt for that
+  // connection (the server already got a key).
+  bool _clientinitTokenSubmitted = false;
 
   /// Pending permission-management operations: token → completer. Resolved by
   /// the `perm_op` event handler; timed out after 8s by the caller.
@@ -222,9 +238,15 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     required String nickname,
     String? channel,
     String? password,
+    String? token,
+    String? serverId,
   }) async {
-    debugPrint('TS: connect($address, $nickname, ch=$channel)');
+    debugPrint(
+      'TS: connect($address, $nickname, ch=$channel, token=${token != null})',
+    );
     state = state.copyWith(connecting: true, error: null);
+    _pendingTokenServerId = token != null ? serverId : null;
+    _clientinitTokenSubmitted = token != null;
 
     // Push persisted identity to Rust before connecting
     final prefs = await SharedPreferences.getInstance();
@@ -247,6 +269,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       nickname,
       channel: channel,
       password: password,
+      token: token,
     );
     debugPrint('TS: connect result = $resultJson');
     final result = jsonDecode(resultJson) as Map<String, dynamic>;
@@ -346,7 +369,27 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           channels: channels,
           clients: clients,
           selectedChannelId: joinedChannelId,
+          // Offer the privilege-key dialog only when the server asks AND we
+          // did not already hand it a key in clientinit.
+          askForPrivilegeKey:
+              (event['ask_for_privilegekey'] as bool? ?? false) &&
+              !_clientinitTokenSubmitted,
         );
+
+        // The privilege key was redeemed by the server during the handshake —
+        // privilege keys are one-time, so drop it from the saved server.
+        final tokenServerId = _pendingTokenServerId;
+        _pendingTokenServerId = null;
+        _clientinitTokenSubmitted = false;
+        if (tokenServerId != null) {
+          final servers = ref.read(serverListProvider).servers;
+          final idx = servers.indexWhere((s) => s.id == tokenServerId);
+          if (idx >= 0) {
+            ref
+                .read(serverListProvider.notifier)
+                .updateServer(servers[idx].copyWith(clearToken: true));
+          }
+        }
 
         // Kick off avatar downloads right away (the poll loop would catch
         // them on its next tick anyway).
@@ -887,6 +930,22 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       _ownPerms = TsNative.getOwnPerms().map(TsPerm.fromJson).toList();
     } catch (_) {
       _ownPerms = const [];
+    }
+  }
+
+  /// Redeems a privilege key (admin token) on the connected server via
+  /// `clientupdate client_default_token`. Returns null when the server
+  /// accepted the command, or an error description. Note: a server may
+  /// accept the command yet silently ignore an invalid/used key — the
+  /// caller should confirm the effect via the client's server groups.
+  Future<String?> usePrivilegeKey(String token) =>
+      _permOp((t) => TsNative.usePrivilegeKey(token, t));
+
+  /// Marks the connection's privilege-key prompt as handled (dismissed or
+  /// submitted) so it is not offered again until the next connect.
+  void clearAskForPrivilegeKey() {
+    if (state.askForPrivilegeKey) {
+      state = state.copyWith(askForPrivilegeKey: false);
     }
   }
 

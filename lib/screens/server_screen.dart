@@ -22,6 +22,7 @@ import '../widgets/connection_bar.dart';
 import '../screens/file_manager_screen.dart';
 import '../widgets/channel_menu.dart';
 import '../widgets/position_edit_screen.dart';
+import '../widgets/privilege_key_dialog.dart';
 import '../widgets/spotlight_tour.dart';
 import '../widgets/voice_settings_panel.dart';
 
@@ -83,6 +84,66 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     await _maybeShowOemGuide();
     if (!mounted) return;
     await _maybeAutoShowGuide();
+    if (!mounted) return;
+    // The server asked for a privilege key (typically the very first login
+    // on a fresh server): prompt after the guides so the dialogs don't
+    // overlap. No-op when a token was already submitted with clientinit.
+    if (ref.read(tsConnectionProvider).askForPrivilegeKey) {
+      await _showPrivilegeKeyDialog();
+    }
+  }
+
+  /// Opens the privilege-key prompt and, on submit, redeems the key.
+  Future<void> _showPrivilegeKeyDialog() async {
+    ref.read(tsConnectionProvider.notifier).clearAskForPrivilegeKey();
+    if (!mounted) return;
+    final token = await showPrivilegeKeyDialog(context);
+    if (!mounted || token == null || token.trim().isEmpty) return;
+    await _submitPrivilegeKey(token.trim());
+  }
+
+  /// Sends the key and reports the outcome. The server only acks the
+  /// command — an invalid or used key may be silently ignored, so the own
+  /// server groups are polled for a change before claiming success.
+  Future<void> _submitPrivilegeKey(String token) async {
+    final al = AppLocalizations.of(context);
+    final before = _ownServerGroups();
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .usePrivilegeKey(token);
+    if (!mounted) return;
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error), backgroundColor: Colors.red),
+      );
+      return;
+    }
+    var granted = false;
+    for (var i = 0; i < 12; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
+      final now = _ownServerGroups();
+      if (now.length != before.length || now.any((g) => !before.contains(g))) {
+        granted = true;
+        break;
+      }
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          granted ? al.privilegeKeyGranted : al.privilegeKeyNoEffect,
+        ),
+        backgroundColor: granted ? Colors.green : Colors.orange,
+      ),
+    );
+  }
+
+  /// The own client's current server group ids (empty when unknown).
+  Set<int> _ownServerGroups() {
+    final st = ref.read(tsConnectionProvider);
+    final own = st.clients.where((c) => c.id == st.ownClientId).firstOrNull;
+    return own?.serverGroupIds.toSet() ?? {};
   }
 
   Future<void> _showGuide() async {

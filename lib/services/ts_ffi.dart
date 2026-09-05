@@ -15,13 +15,15 @@ DynamicLibrary _loadLib() {
 
 // ─── C function typedefs ────────────────────────────────────────────
 
-// ts_connect(address, nickname, channel, password) -> *char (JSON)
+// ts_connect(address, nickname, channel, password, token) -> *char (JSON)
+// token: privilege key for the first login, null/empty for none.
 typedef _ConnectNative =
     Pointer<Utf8> Function(
       Pointer<Utf8> address,
       Pointer<Utf8> nickname,
       Pointer<Utf8> channel,
       Pointer<Utf8> password,
+      Pointer<Utf8> token,
     );
 typedef _ConnectDart =
     Pointer<Utf8> Function(
@@ -29,6 +31,7 @@ typedef _ConnectDart =
       Pointer<Utf8> nickname,
       Pointer<Utf8> channel,
       Pointer<Utf8> password,
+      Pointer<Utf8> token,
     );
 
 // ts_disconnect() -> *char (JSON)
@@ -215,6 +218,10 @@ typedef _RefreshGroupsDart = int Function();
 typedef _SgAddClientNative = Uint8 Function(Uint64, Uint64, Pointer<Utf8>);
 typedef _SgAddClientDart = int Function(int, int, Pointer<Utf8>);
 
+// ts_use_privilege_key(token, op_token) -> bool
+typedef _UsePrivKeyNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _UsePrivKeyDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
 // ts_server_group_del_client(dbid: u64, sgid: u64, token) -> bool
 typedef _SgDelClientNative = Uint8 Function(Uint64, Uint64, Pointer<Utf8>);
 typedef _SgDelClientDart = int Function(int, int, Pointer<Utf8>);
@@ -396,6 +403,9 @@ final _getOwnPerms = _lib.lookupFunction<_GetOwnPermsNative, _GetOwnPermsDart>(
 final _sgAddClient = _lib.lookupFunction<_SgAddClientNative, _SgAddClientDart>(
   'ts_server_group_add_client',
 );
+final _usePrivKey = _lib.lookupFunction<_UsePrivKeyNative, _UsePrivKeyDart>(
+  'ts_use_privilege_key',
+);
 final _sgDelClient = _lib.lookupFunction<_SgDelClientNative, _SgDelClientDart>(
   'ts_server_group_del_client',
 );
@@ -451,13 +461,17 @@ class TsNative {
     String nickname, {
     String? channel,
     String? password,
+    String? token,
   }) {
-    debugLog('connect($address, $nickname, ch=$channel)');
+    debugLog(
+      'connect($address, $nickname, ch=$channel, token=${token != null})',
+    );
     final result = _connect(
       _strToPtr(address),
       _strToPtr(nickname),
       _strToPtr(channel),
       _strToPtr(password),
+      _strToPtr(token),
     );
     final str = _ptrToString(result);
     debugLog('connect -> $str');
@@ -909,6 +923,19 @@ class TsNative {
       return _sgAddClient(dbid, sgid, t) != 0;
     } finally {
       malloc.free(t);
+    }
+  }
+
+  /// Redeem a privilege key (admin token) on the connected server. The
+  /// outcome arrives as a `perm_op` event carrying [opToken].
+  static bool usePrivilegeKey(String token, String opToken) {
+    final t = _strToPtr(token);
+    final ot = _strToPtr(opToken);
+    try {
+      return _usePrivKey(t, ot) != 0;
+    } finally {
+      malloc.free(t);
+      malloc.free(ot);
     }
   }
 

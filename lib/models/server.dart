@@ -23,6 +23,11 @@ class Server {
   final String? channel;
   final String? password;
 
+  /// One-time privilege key (admin token) for the first login. The server
+  /// redeems it during the handshake and grants the associated server
+  /// groups; it is cleared after a successful connection.
+  final String? token;
+
   /// Custom ports for this server's connection. Null means "use the default".
   final int? voicePort;
   final int? serverQueryPort;
@@ -36,11 +41,28 @@ class Server {
     required this.nickname,
     this.channel,
     this.password,
+    this.token,
     this.voicePort,
     this.serverQueryPort,
     this.serverQuerySshPort,
     this.fileTransferPort,
   });
+
+  /// `clearToken` exists because `token: null` would keep the old value
+  /// (the usual copyWith trap); it explicitly drops the one-time key.
+  Server copyWith({String? token, bool clearToken = false}) => Server(
+    id: id,
+    name: name,
+    address: address,
+    nickname: nickname,
+    channel: channel,
+    password: password,
+    token: clearToken ? null : (token ?? this.token),
+    voicePort: voicePort,
+    serverQueryPort: serverQueryPort,
+    serverQuerySshPort: serverQuerySshPort,
+    fileTransferPort: fileTransferPort,
+  );
 
   /// Address with the custom voice port embedded. tsclientlib's resolver
   /// natively understands `host:port`, `1.2.3.4:port` and `[::1]:port`, so the
@@ -79,6 +101,7 @@ class Server {
     'nickname': nickname,
     'channel': channel,
     'password': password,
+    'token': token,
     'voicePort': voicePort,
     'serverQueryPort': serverQueryPort,
     'serverQuerySshPort': serverQuerySshPort,
@@ -92,6 +115,8 @@ class Server {
     nickname: json['nickname'] as String,
     channel: json['channel'] as String?,
     password: json['password'] as String?,
+    // Tolerate records saved before the token field existed.
+    token: json['token'] as String?,
     // Tolerate records saved before the port fields existed.
     voicePort: json['voicePort'] as int?,
     serverQueryPort: json['serverQueryPort'] as int?,

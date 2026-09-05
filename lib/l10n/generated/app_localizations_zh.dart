@@ -407,6 +407,24 @@ class AppLocalizationsZh extends AppLocalizations {
   String get passwordOptional => '密码（可选）';
 
   @override
+  String get tokenOptional => '管理员 Token（可选）';
+
+  @override
+  String get privilegeKeyTitle => '使用管理员 Token';
+
+  @override
+  String get privilegeKeyBody => '该服务器要求提供管理员 Token（权限密钥）。输入后你将被加入对应的服务器组。';
+
+  @override
+  String get privilegeKeyHint => 'Token';
+
+  @override
+  String get privilegeKeyGranted => 'Token 兑换成功，服务器组已更新。';
+
+  @override
+  String get privilegeKeyNoEffect => 'Token 已提交，但未检测到服务器组变化，可能无效或已被使用。';
+
+  @override
   String get teamSpeakUserDefault => 'TeamSpeakUser';
 
   @override

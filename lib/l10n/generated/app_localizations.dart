@@ -884,6 +884,42 @@ abstract class AppLocalizations {
   /// **'Password (optional)'**
   String get passwordOptional;
 
+  /// No description provided for @tokenOptional.
+  ///
+  /// In en, this message translates to:
+  /// **'Privilege key (optional)'**
+  String get tokenOptional;
+
+  /// No description provided for @privilegeKeyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Use privilege key'**
+  String get privilegeKeyTitle;
+
+  /// No description provided for @privilegeKeyBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This server is asking for a privilege key (admin token). Enter it to be added to the associated server groups.'**
+  String get privilegeKeyBody;
+
+  /// No description provided for @privilegeKeyHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Token'**
+  String get privilegeKeyHint;
+
+  /// No description provided for @privilegeKeyGranted.
+  ///
+  /// In en, this message translates to:
+  /// **'Privilege key redeemed — server groups updated.'**
+  String get privilegeKeyGranted;
+
+  /// No description provided for @privilegeKeyNoEffect.
+  ///
+  /// In en, this message translates to:
+  /// **'The token was accepted, but no group change was detected. It may be invalid or already used.'**
+  String get privilegeKeyNoEffect;
+
   /// No description provided for @teamSpeakUserDefault.
   ///
   /// In en, this message translates to:

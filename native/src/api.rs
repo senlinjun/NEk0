@@ -409,6 +409,7 @@ pub extern "C" fn ts_connect(
     nickname: *const c_char,
     channel: *const c_char,
     password: *const c_char,
+    token: *const c_char,
 ) -> *mut c_char {
     let address = unsafe { std::ffi::CStr::from_ptr(address) }
         .to_string_lossy()
@@ -434,6 +435,15 @@ pub extern "C" fn ts_connect(
                 .into_owned(),
         )
     };
+    // Privilege key for the first login; empty means "no token".
+    let token = if token.is_null() {
+        None
+    } else {
+        let t = unsafe { std::ffi::CStr::from_ptr(token) }
+            .to_string_lossy()
+            .into_owned();
+        if t.is_empty() { None } else { Some(t) }
+    };
 
     eprintln!("ts_connect: address={}", address);
 
@@ -453,7 +463,7 @@ pub extern "C" fn ts_connect(
     drop(state);
 
     RUNTIME.spawn(async move {
-        if let Err(e) = do_connect(address, nickname, channel, password).await {
+        if let Err(e) = do_connect(address, nickname, channel, password, token).await {
             eprintln!("do_connect: ERROR {}", e);
             let mut state = STATE.lock();
             state.connecting = false;
@@ -471,6 +481,7 @@ async fn do_connect(
     nickname: String,
     channel: Option<String>,
     password: Option<String>,
+    token: Option<String>,
 ) -> Result<(), String> {
     crate::install_panic_hook();
     let mut opts = Connection::build(address).name(nickname);
@@ -484,6 +495,9 @@ async fn do_connect(
     }
     if let Some(pw) = password {
         opts = opts.password(pw);
+    }
+    if let Some(tok) = token {
+        opts = opts.token(tok);
     }
 
     let mut con = opts.connect().map_err(|e| format!("{}", e))?;
@@ -539,14 +553,19 @@ async fn do_connect(
 
     // Own the data we need before sending more commands: `get_state()` borrows
     // `con` immutably, and the permission-list request needs `&mut con`.
-    let (own_dbid, sname, oid) = {
+    let (own_dbid, sname, oid, ask_privilegekey) = {
         let book = con.get_state().map_err(|e| format!("{}", e))?;
         let own_dbid = book
             .clients
             .get(&book.own_client)
             .map(|c| c.database_id.0)
             .unwrap_or(0);
-        (own_dbid, book.server.name.clone(), book.own_client.0 as u32)
+        (
+            own_dbid,
+            book.server.name.clone(),
+            book.own_client.0 as u32,
+            book.server.ask_for_privilegekey,
+        )
     };
     // Ask for our own directly-assigned permission list — a low-threshold
     // hint used by the UI to decide whether to offer the permission-
@@ -587,6 +606,7 @@ async fn do_connect(
         state.pending_events.push_back(TsEvent::Connected {
             server_name: sname,
             client_id: oid,
+            ask_for_privilegekey: ask_privilegekey,
         });
     }
 
@@ -2785,6 +2805,18 @@ async fn event_loop(
                     let _ = OutChannelGroupListRequestMessage::new().send(&mut con);
                     push_diag("perm: re-requested server/channel group lists");
                 }
+                Command::UsePrivilegeKey { token, op_token } => {
+                    // Redeem a privilege key after connecting (`privilegekeyuse`
+                    // — the same command the official client sends for
+                    // "Use Privilege Key"; on success the server answers with
+                    // `notifytokenused`).
+                    let part = OutPrivilegeKeyUsePart { token: token.into() };
+                    perm_op_send(
+                        OutPrivilegeKeyUseMessage::new(&mut std::iter::once(part))
+                            .send_with_result(&mut con),
+                        &op_token,
+                    );
+                }
                 Command::OwnPermList => {
                     // (Re-)request our own directly-assigned permissions.
                     let (own_id, own_dbid) = {
@@ -4099,6 +4131,20 @@ pub extern "C" fn ts_server_group_add_client(
 ) -> u8 {
     let token = unsafe { read_cstr(token) };
     if try_send_cmd(Command::ServerGroupAddClient { sgid, dbid, token }) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Redeem a privilege key (admin token) on the connected server via
+/// `clientupdate client_default_token`. The outcome arrives as a `perm_op`
+/// event carrying `op_token`. Returns 1 when queued, 0 when not connected.
+#[no_mangle]
+pub extern "C" fn ts_use_privilege_key(token: *const c_char, op_token: *const c_char) -> u8 {
+    let token = unsafe { read_cstr(token) };
+    let op_token = unsafe { read_cstr(op_token) };
+    if try_send_cmd(Command::UsePrivilegeKey { token, op_token }) {
         1
     } else {
         0

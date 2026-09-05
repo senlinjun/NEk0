@@ -418,6 +418,27 @@ class AppLocalizationsEn extends AppLocalizations {
   String get passwordOptional => 'Password (optional)';
 
   @override
+  String get tokenOptional => 'Privilege key (optional)';
+
+  @override
+  String get privilegeKeyTitle => 'Use privilege key';
+
+  @override
+  String get privilegeKeyBody =>
+      'This server is asking for a privilege key (admin token). Enter it to be added to the associated server groups.';
+
+  @override
+  String get privilegeKeyHint => 'Token';
+
+  @override
+  String get privilegeKeyGranted =>
+      'Privilege key redeemed — server groups updated.';
+
+  @override
+  String get privilegeKeyNoEffect =>
+      'The token was accepted, but no group change was detected. It may be invalid or already used.';
+
+  @override
   String get teamSpeakUserDefault => 'TeamSpeakUser';
 
   @override

@@ -99,6 +99,11 @@ pub enum Command {
     /// Request OUR OWN directly-assigned permission list (`clientpermlist`
     /// for our own database id). The answer fills `STATE.own_perms`.
     OwnPermList,
+    /// Redeem a privilege key after connecting (`privilegekeyuse token=...`
+    /// — the command behind the official client's "Use Privilege Key").
+    /// `token` is the privilege key itself; `op_token` correlates the
+    /// server's answer with the Dart caller (see KickClient).
+    UsePrivilegeKey { token: String, op_token: String },
     Disconnect,
     SendAudio { data: Vec<f32> },
     // File transfer commands (see FtTask / FT_TASKS below). `cid` is the
@@ -235,7 +240,7 @@ pub static IDENTITY_STASH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new
 #[serde(tag = "type")]
 pub enum TsEvent {
     #[serde(rename = "connected")]
-    Connected { server_name: String, client_id: u32 },
+    Connected { server_name: String, client_id: u32, ask_for_privilegekey: bool },
     #[serde(rename = "disconnected")]
     Disconnected { reason: String },
     #[serde(rename = "text_message")]

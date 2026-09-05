@@ -253,6 +253,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       nickname: server.nickname,
       channel: server.channel,
       password: server.password,
+      token: server.token,
+      serverId: server.id,
     );
 
     if (context.mounted) {
