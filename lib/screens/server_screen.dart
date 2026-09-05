@@ -519,6 +519,30 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     _reportOp(error, AppLocalizations.of(context).channelMoved);
   }
 
+  /// Drop handler for a long-press-dragged user. Dropping our own row is a
+  /// JOIN: it reuses the tap-to-join flow (password prompt, optimistic
+  /// selection, auto-expand) instead of a `clientmove`. Everyone else is
+  /// moved via a single `clientmove` whose perm_op receipt reports the
+  /// server's answer.
+  Future<void> _onClientDrop(int clientId, int channelId) async {
+    if (clientId == ref.read(tsConnectionProvider).ownClientId) {
+      final channel = ref
+          .read(tsConnectionProvider)
+          .channels
+          .where((c) => c.id == channelId)
+          .firstOrNull;
+      if (channel != null) {
+        await _onChannelTap(channel);
+        return;
+      }
+    }
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .moveClient(clientId, channelId);
+    if (!mounted) return;
+    _reportOp(error, AppLocalizations.of(context).moveSucceeded);
+  }
+
   /// Green/red receipt SnackBar for the channel-management operations
   /// (mirrors the client sheet's perm-op reporting).
   void _reportOp(String? error, String okLabel) {
@@ -597,6 +621,10 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                 onServerMenu: _canCreateChannels ? _onServerMenu : null,
                 // Long-press drag: re-parent / re-order the dragged channel.
                 onChannelDrop: _onChannelDrop,
+                // Long-press drag of a user row: move them into the target
+                // channel (dropping our own row joins it instead).
+                ownClientId: conn.ownClientId,
+                onClientDrop: _onClientDrop,
                 // Tapping yourself opens the same voice settings as
                 // long-pressing the mic; tapping others opens their
                 // per-client volume + poke sheet.

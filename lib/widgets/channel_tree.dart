@@ -10,6 +10,10 @@ import 'client_row.dart';
 /// appended last) or "before/after" it (re-order among its siblings).
 enum _DropZone { into, before, after }
 
+/// What is being long-press-dragged: a channel (re-parent / re-order via
+/// `channelmove`) or a client (move into a channel via `clientmove`).
+enum _DragKind { channel, client }
+
 class ChannelTree extends StatefulWidget {
   final List<TsChannel> channels;
 
@@ -56,6 +60,16 @@ class ChannelTree extends StatefulWidget {
   /// dragging entirely.
   final void Function(int draggedId, int parentId, int? afterId)? onChannelDrop;
 
+  /// Our own client id. Our own row is always draggable — dropping it means
+  /// joining the target channel, which the caller routes through the
+  /// tap-to-join flow (no move permission involved). Null = self unknown.
+  final int? ownClientId;
+
+  /// Invoked when a long-press-dragged client is released on a channel row:
+  /// moves that user into the channel (`clientmove`). Null disables client
+  /// dragging entirely.
+  final void Function(int clientId, int channelId)? onClientDrop;
+
   const ChannelTree({
     super.key,
     required this.channels,
@@ -70,6 +84,8 @@ class ChannelTree extends StatefulWidget {
     this.serverName = '',
     this.onServerMenu,
     this.onChannelDrop,
+    this.ownClientId,
+    this.onClientDrop,
   });
 
   @override
@@ -85,7 +101,7 @@ class _ChannelTreeState extends State<ChannelTree> {
   /// members of other channels are reachable without extra taps).
   final Set<int> _collapsed = {};
 
-  // ─── Long-press drag (channelmove) ──────────────────────────────────
+  // ─── Long-press drag (channelmove / clientmove) ─────────────────────
 
   /// Sentinel row id for the server root tile (a drop target for top level).
   static const _serverRowId = -1;
@@ -94,7 +110,10 @@ class _ChannelTreeState extends State<ChannelTree> {
   /// below that, releasing the long press opens the channel menu.
   static const _dragStartThreshold = 16.0;
 
+  /// What is dragged and the dragged row's id (a channel id or a client id —
+  /// only ever looked up against the list matching [_dragKind]).
   int? _draggingId;
+  _DragKind? _dragKind;
   int? _hoverRowId;
   _DropZone? _hoverZone;
 
@@ -125,7 +144,7 @@ class _ChannelTreeState extends State<ChannelTree> {
 
   // ─── Drag gesture handling ──────────────────────────────────────────
 
-  bool get _dragActive => _draggingId != null;
+  bool get _dragActive => _dragKind != null;
 
   Offset _toLocal(Offset global) {
     final box = context.findRenderObject();
@@ -189,7 +208,10 @@ class _ChannelTreeState extends State<ChannelTree> {
           _dragStartThreshold) {
         return;
       }
-      setState(() => _draggingId = channel.id);
+      setState(() {
+        _dragKind = _DragKind.channel;
+        _draggingId = channel.id;
+      });
     }
     _dragPos.value = _toLocal(d.globalPosition);
     _updateHover(d.globalPosition);
@@ -209,8 +231,47 @@ class _ChannelTreeState extends State<ChannelTree> {
     if (_dragActive) setState(_clearDrag);
   }
 
+  /// Whether this client row may start a drag. Our own row always can —
+  /// dropping it is a JOIN, not a `clientmove` of another user, so no move
+  /// permission is needed. Everyone else uses the client sheet's move gate —
+  /// "unknown → optimistic": while the server has not pushed the permission
+  /// hints (`permissionHints == 0`) the drag is allowed and the server's
+  /// perm_op receipt decides.
+  bool _canDragClient(TsClient client) =>
+      widget.onClientDrop != null &&
+      (client.id == widget.ownClientId ||
+          client.permissionHints == 0 ||
+          client.canMoveClient);
+
+  void _onClientLongPressMove(TsClient client, LongPressMoveUpdateDetails d) {
+    if (!_dragActive) {
+      if (!_canDragClient(client) ||
+          (d.globalPosition - _dragGlobalStart).distance <
+              _dragStartThreshold) {
+        return;
+      }
+      setState(() {
+        _dragKind = _DragKind.client;
+        _draggingId = client.id;
+      });
+    }
+    _dragPos.value = _toLocal(d.globalPosition);
+    _updateHover(d.globalPosition);
+  }
+
+  void _onClientLongPressEnd(TsClient client) {
+    if (!_dragActive) {
+      // Plain long press (no drag): same as tapping the row — opens the
+      // per-client sheet (voice settings for ourselves).
+      widget.onClientTap?.call(client.id);
+      return;
+    }
+    _resolveDrop();
+  }
+
   void _clearDrag() {
     _draggingId = null;
+    _dragKind = null;
     _hoverRowId = null;
     _hoverZone = null;
     _hoverBoundaryY = null;
@@ -223,7 +284,27 @@ class _ChannelTreeState extends State<ChannelTree> {
     final hit = _hitTestRow(global);
     if (hit != null) {
       final (rowId, zone) = hit;
-      if (!_subtreeIds(_draggingId!).contains(rowId)) {
+      if (_dragKind == _DragKind.client) {
+        // A client always moves INTO a channel — every part of the row is
+        // the same target (whole-row highlight, no insertion line). The
+        // server node and the client's current channel are not targets.
+        final client = widget.clients
+            .where((c) => c.id == _draggingId)
+            .firstOrNull;
+        // Joining (our own row) also obeys the target's join permission —
+        // the same gate as tapping the channel (unknown hints → optimistic),
+        // so a channel we cannot join never highlights as a target.
+        final target = widget.channels.where((c) => c.id == rowId).firstOrNull;
+        final mayJoin =
+            target == null || target.permissionHints == 0 || target.canJoin;
+        if (rowId != _serverRowId &&
+            client != null &&
+            rowId != client.channelId &&
+            (client.id != widget.ownClientId || mayJoin)) {
+          newHover = rowId;
+          newZone = _DropZone.into;
+        }
+      } else if (!_subtreeIds(_draggingId!).contains(rowId)) {
         newHover = rowId;
         newZone = zone;
         if (zone != _DropZone.into) {
@@ -245,16 +326,33 @@ class _ChannelTreeState extends State<ChannelTree> {
     }
   }
 
-  /// Turns the current hover into a `channelmove` call once the finger
-  /// lifts. Insertion points carry the id of the sibling the dropped
-  /// channel must follow (0 = first); "into" targets append at the end of
-  /// that channel's children.
+  /// Turns the current hover into a `channelmove` / `clientmove` call once
+  /// the finger lifts. For channels, insertion points carry the id of the
+  /// sibling the dropped channel must follow (0 = first) and "into" targets
+  /// append at the end of that channel's children; for clients, any point of
+  /// a channel row means "move the user into it".
   void _resolveDrop() {
     final dragged = _draggingId;
+    final kind = _dragKind;
     final hover = _hoverRowId;
     final zone = _hoverZone;
     setState(_clearDrag);
-    if (dragged == null || hover == null || zone == null) return;
+    if (dragged == null || kind == null || hover == null || zone == null) {
+      return;
+    }
+    if (kind == _DragKind.client) {
+      if (widget.onClientDrop == null) return;
+      // The user may have left the server while being dragged, and the
+      // server node / their current channel were never valid targets.
+      final client = widget.clients.where((c) => c.id == dragged).firstOrNull;
+      if (client == null ||
+          hover == _serverRowId ||
+          hover == client.channelId) {
+        return;
+      }
+      widget.onClientDrop!(dragged, hover);
+      return;
+    }
     if (widget.onChannelDrop == null) return;
     final draggedChannel = widget.channels
         .where((c) => c.id == dragged)
@@ -320,50 +418,57 @@ class _ChannelTreeState extends State<ChannelTree> {
           ValueListenableBuilder(
             valueListenable: _dragPos,
             builder: (context, pos, _) {
-              final dragged = widget.channels
-                  .where((c) => c.id == _draggingId)
-                  .firstOrNull;
-              if (dragged == null) return const SizedBox.shrink();
+              final Widget pill;
+              if (_dragKind == _DragKind.client) {
+                final client = widget.clients
+                    .where((c) => c.id == _draggingId)
+                    .firstOrNull;
+                if (client == null) return const SizedBox.shrink();
+                pill = _dragPill(Icons.person, client.nickname);
+              } else {
+                final dragged = widget.channels
+                    .where((c) => c.id == _draggingId)
+                    .firstOrNull;
+                if (dragged == null) return const SizedBox.shrink();
+                pill = _dragPill(
+                  dragged.children(widget.channels).isNotEmpty
+                      ? Icons.folder
+                      : Icons.tag,
+                  dragged.name,
+                );
+              }
               return Positioned(
                 left: pos.dx + 12,
                 top: pos.dy - 14,
-                child: IgnorePointer(
-                  child: Material(
-                    elevation: 6,
-                    borderRadius: BorderRadius.circular(14),
-                    color: const Color(0xFF16213E).withValues(alpha: 0.95),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 6,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            dragged.children(widget.channels).isNotEmpty
-                                ? Icons.folder
-                                : Icons.tag,
-                            size: 14,
-                            color: Colors.blue,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            dragged.name,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
+                child: IgnorePointer(child: pill),
               );
             },
           ),
       ],
+    );
+  }
+
+  /// The floating pill that follows the finger during a drag: an icon plus
+  /// the dragged channel's / client's name.
+  Widget _dragPill(IconData icon, String label) {
+    return Material(
+      elevation: 6,
+      borderRadius: BorderRadius.circular(14),
+      color: const Color(0xFF16213E).withValues(alpha: 0.95),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: Colors.blue),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -647,16 +752,26 @@ class _ChannelTreeState extends State<ChannelTree> {
         // sub-channels), then the sub-channels — only while expanded.
         if (isExpanded) ...[
           for (final client in clientsInChannel)
-            ClientRow(
-              client: client,
-              // Talk power is per channel: use THIS channel's restriction.
-              channelNeededTalkPower: channel.neededTalkPower,
-              serverGroups: widget.serverGroups,
-              // Align roughly with the channel icon of this depth.
-              indent: 30.0 + depth * 20.0,
-              onTap: widget.onClientTap == null
-                  ? null
-                  : () => widget.onClientTap!(client.id),
+            // The outer GestureDetector owns the long press, mirroring the
+            // channel rows: hold + move = drag the client onto a channel,
+            // hold still (then release) = open the per-client sheet. The
+            // inner ListTile keeps the tap.
+            GestureDetector(
+              onLongPressStart: _onRowLongPressStart,
+              onLongPressMoveUpdate: (d) => _onClientLongPressMove(client, d),
+              onLongPressEnd: (_) => _onClientLongPressEnd(client),
+              onLongPressCancel: _onRowLongPressCancel,
+              child: ClientRow(
+                client: client,
+                // Talk power is per channel: use THIS channel's restriction.
+                channelNeededTalkPower: channel.neededTalkPower,
+                serverGroups: widget.serverGroups,
+                // Align roughly with the channel icon of this depth.
+                indent: 30.0 + depth * 20.0,
+                onTap: widget.onClientTap == null
+                    ? null
+                    : () => widget.onClientTap!(client.id),
+              ),
             ),
           ...children.map((ch) => _buildTile(ch, depth + 1)),
         ],
