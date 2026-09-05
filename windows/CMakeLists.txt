@@ -90,13 +90,12 @@ endif()
 # Rust core (tsclient.dll), loaded at runtime by lib/services/ts_ffi.dart from
 # the exe directory. Built by `python3 pre_build.py windows` into
 # native/prebuilt/windows/; optional so pure-Dart checks can still build.
+# Installed below into the bundle (INSTALL_BUNDLE_LIB_DIR = the exe dir);
+# VS builds run the install step too (CMAKE_VS_INCLUDE_INSTALL_TO_DEFAULT_BUILD).
 set(TSCLIENT_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../native/prebuilt/windows/tsclient.dll")
 if(EXISTS "${TSCLIENT_DLL}")
   install(FILES "${TSCLIENT_DLL}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
-  add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TSCLIENT_DLL}"
-            "$<TARGET_FILE_DIR:${BINARY_NAME}>/tsclient.dll")
 else()
   message(WARNING "native/prebuilt/windows/tsclient.dll missing — run `python3 pre_build.py windows`; the app will crash at startup without it")
 endif()
