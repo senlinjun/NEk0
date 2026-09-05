@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../l10n/generated/app_localizations.dart';
@@ -10,8 +11,9 @@ import 'client_row.dart';
 /// appended last) or "before/after" it (re-order among its siblings).
 enum _DropZone { into, before, after }
 
-/// What is being long-press-dragged: a channel (re-parent / re-order via
+/// What is being dragged: a channel (re-parent / re-order via
 /// `channelmove`) or a client (move into a channel via `clientmove`).
+/// Touch drags with long-press + move; desktop mouse with press + move.
 enum _DragKind { channel, client }
 
 class ChannelTree extends StatefulWidget {
@@ -54,8 +56,8 @@ class ChannelTree extends StatefulWidget {
   /// "create channel"). Null disables both gestures on the node.
   final VoidCallback? onServerMenu;
 
-  /// Invoked when a long-press-dragged channel is released on a valid drop
-  /// target: [parentId] 0 = server root; [afterId] = the sibling the channel
+  /// Invoked when a dragged channel is released on a valid drop target:
+  /// [parentId] 0 = server root; [afterId] = the sibling the channel
   /// is placed after (0 = first, null = appended at the end). Null disables
   /// dragging entirely.
   final void Function(int draggedId, int parentId, int? afterId)? onChannelDrop;
@@ -65,8 +67,8 @@ class ChannelTree extends StatefulWidget {
   /// tap-to-join flow (no move permission involved). Null = self unknown.
   final int? ownClientId;
 
-  /// Invoked when a long-press-dragged client is released on a channel row:
-  /// moves that user into the channel (`clientmove`). Null disables client
+  /// Invoked when a dragged client is released on a channel row: moves
+  /// that user into the channel (`clientmove`). Null disables client
   /// dragging entirely.
   final void Function(int clientId, int channelId)? onClientDrop;
 
@@ -101,7 +103,7 @@ class _ChannelTreeState extends State<ChannelTree> {
   /// members of other channels are reachable without extra taps).
   final Set<int> _collapsed = {};
 
-  // ─── Long-press drag (channelmove / clientmove) ─────────────────────
+  // ─── Drag (channelmove / clientmove) ────────────────────────────────
 
   /// Sentinel row id for the server root tile (a drop target for top level).
   static const _serverRowId = -1;
@@ -227,8 +229,52 @@ class _ChannelTreeState extends State<ChannelTree> {
     _resolveDrop();
   }
 
-  void _onRowLongPressCancel() {
+  void _onDragCancel() {
     if (_dragActive) setState(_clearDrag);
+  }
+
+  /// Starts a drag straight from a mouse press-move (desktop): the same
+  /// state the touch path reaches through its long-press handlers.
+  void _beginDrag(_DragKind kind, int id, Offset global) {
+    setState(() {
+      _dragKind = kind;
+      _draggingId = id;
+    });
+    _dragPos.value = _toLocal(global);
+    _updateHover(global);
+  }
+
+  void _onDragPanUpdate(DragUpdateDetails d) {
+    if (!_dragActive) return;
+    _dragPos.value = _toLocal(d.globalPosition);
+    _updateHover(d.globalPosition);
+  }
+
+  void _onDragPanEnd(DragEndDetails d) {
+    if (_dragActive) _resolveDrop();
+  }
+
+  /// Mouse-only immediate-drag recognizer for a row: press + move drags at
+  /// once, no long-press hold (that stays the touch gesture). Restricting
+  /// to the mouse keeps trackpad scrolling owned by the scrollable and
+  /// touch devices untouched.
+  Map<Type, GestureRecognizerFactory> _mouseDragGestures(
+    void Function(DragStartDetails) onStart,
+  ) {
+    return {
+      PanGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
+            () => PanGestureRecognizer(),
+            (instance) {
+              instance
+                ..supportedDevices = const {PointerDeviceKind.mouse}
+                ..onStart = onStart
+                ..onUpdate = _onDragPanUpdate
+                ..onEnd = _onDragPanEnd
+                ..onCancel = _onDragCancel;
+            },
+          ),
+    };
   }
 
   /// Whether this client row may start a drag. Our own row always can —
@@ -518,6 +564,7 @@ class _ChannelTreeState extends State<ChannelTree> {
       child: InkWell(
         onTap: canOpenMenu ? widget.onServerMenu : null,
         onLongPress: canOpenMenu ? widget.onServerMenu : null,
+        onSecondaryTapUp: canOpenMenu ? (_) => widget.onServerMenu!() : null,
         child: Padding(
           padding: const EdgeInsets.only(
             left: 8,
@@ -570,179 +617,191 @@ class _ChannelTreeState extends State<ChannelTree> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Channel row — the outer GestureDetector owns the long press:
+        // Channel row — the outer GestureDetector owns the touch gestures:
         // hold still (then release) = menu, hold + move = drag the channel.
-        GestureDetector(
-          onLongPressStart: _onRowLongPressStart,
-          onLongPressMoveUpdate: (d) => _onRowLongPressMove(channel, d),
-          onLongPressEnd: (_) => _onRowLongPressEnd(channel),
-          onLongPressCancel: _onRowLongPressCancel,
-          child: Material(
-            key: _rowKeys.putIfAbsent(channel.id, () => GlobalKey()),
-            color: _hoverZone == _DropZone.into && _hoverRowId == channel.id
-                ? Colors.blue.withValues(alpha: 0.25)
-                : isSelected
-                ? Colors.blue.withValues(alpha: 0.15)
-                : Colors.transparent,
-            child: InkWell(
-              onTap: () {
-                // Permission gate: a channel we cannot join shows a hint
-                // instead of attempting the move (skip when we are already in
-                // it — the hints may lag behind the optimistic selection).
-                if (!mayJoin) {
-                  ScaffoldMessenger.of(context)
-                    ..hideCurrentSnackBar()
-                    ..showSnackBar(
-                      SnackBar(
-                        content: Text(al.channelsNoJoinPermission),
-                        duration: const Duration(seconds: 2),
-                      ),
-                    );
-                  return;
-                }
-                widget.onChannelTap(channel);
-                // Auto-expand the channel when joining it (also clears a
-                // manual collapse so the member we "joined to meet" shows).
-                if (canCollapse && !isExpanded) {
-                  setState(() {
-                    _expanded.add(channel.id);
-                    _collapsed.remove(channel.id);
-                  });
-                }
-              },
-              child: Padding(
-                padding: EdgeInsets.only(
-                  left: 8.0 + depth * 20.0,
-                  top: 10,
-                  bottom: 10,
-                  right: 8,
-                ),
-                child: Row(
-                  children: [
-                    // Expand/collapse arrow for foldable channels
-                    if (canCollapse)
-                      GestureDetector(
-                        onTap: () {
-                          setState(() {
-                            if (isExpanded) {
-                              // Remember the collapse against whichever
-                              // default currently applies to the channel.
-                              if (hasClients) {
-                                _collapsed.add(channel.id);
-                              } else {
-                                _expanded.remove(channel.id);
-                              }
-                            } else {
-                              if (hasClients) {
-                                _collapsed.remove(channel.id);
-                              } else {
-                                _expanded.add(channel.id);
-                              }
-                            }
-                          });
-                        },
-                        child: Icon(
-                          isExpanded
-                              ? Icons.keyboard_arrow_down
-                              : Icons.keyboard_arrow_right,
-                          size: 18,
-                          color: Colors.grey,
+        // The RawGestureDetector adds the desktop mouse drag: press + move.
+        RawGestureDetector(
+          gestures: _mouseDragGestures(
+            (d) => _beginDrag(_DragKind.channel, channel.id, d.globalPosition),
+          ),
+          child: GestureDetector(
+            onLongPressStart: _onRowLongPressStart,
+            onLongPressMoveUpdate: (d) => _onRowLongPressMove(channel, d),
+            onLongPressEnd: (_) => _onRowLongPressEnd(channel),
+            onLongPressCancel: _onDragCancel,
+            // Desktop right-click: the menu directly, never the drag state.
+            onSecondaryTapUp: (_) => widget.onChannelMenu?.call(channel),
+            child: Material(
+              key: _rowKeys.putIfAbsent(channel.id, () => GlobalKey()),
+              color: _hoverZone == _DropZone.into && _hoverRowId == channel.id
+                  ? Colors.blue.withValues(alpha: 0.25)
+                  : isSelected
+                  ? Colors.blue.withValues(alpha: 0.15)
+                  : Colors.transparent,
+              child: InkWell(
+                onTap: () {
+                  // Permission gate: a channel we cannot join shows a hint
+                  // instead of attempting the move (skip when we are already in
+                  // it — the hints may lag behind the optimistic selection).
+                  if (!mayJoin) {
+                    ScaffoldMessenger.of(context)
+                      ..hideCurrentSnackBar()
+                      ..showSnackBar(
+                        SnackBar(
+                          content: Text(al.channelsNoJoinPermission),
+                          duration: const Duration(seconds: 2),
                         ),
-                      )
-                    else
-                      const SizedBox(width: 18),
-                    const SizedBox(width: 4),
-                    // Channel icon
-                    Icon(
-                      hasChildren ? Icons.folder : Icons.tag,
-                      size: 16,
-                      color: isSelected ? Colors.blue : Colors.grey,
-                    ),
-                    const SizedBox(width: 6),
-                    // Channel name with a trailing lock badge: closed = needs
-                    // a password, open = already entered in this session.
-                    Expanded(
-                      child: Row(
-                        children: [
-                          Flexible(
-                            child: Text(
-                              channel.name,
-                              style: TextStyle(
-                                color: isSelected ? Colors.blue : Colors.white,
-                                fontWeight: isSelected
-                                    ? FontWeight.bold
-                                    : FontWeight.normal,
-                                fontSize: 14,
+                      );
+                    return;
+                  }
+                  widget.onChannelTap(channel);
+                  // Auto-expand the channel when joining it (also clears a
+                  // manual collapse so the member we "joined to meet" shows).
+                  if (canCollapse && !isExpanded) {
+                    setState(() {
+                      _expanded.add(channel.id);
+                      _collapsed.remove(channel.id);
+                    });
+                  }
+                },
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    left: 8.0 + depth * 20.0,
+                    top: 10,
+                    bottom: 10,
+                    right: 8,
+                  ),
+                  child: Row(
+                    children: [
+                      // Expand/collapse arrow for foldable channels
+                      if (canCollapse)
+                        GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              if (isExpanded) {
+                                // Remember the collapse against whichever
+                                // default currently applies to the channel.
+                                if (hasClients) {
+                                  _collapsed.add(channel.id);
+                                } else {
+                                  _expanded.remove(channel.id);
+                                }
+                              } else {
+                                if (hasClients) {
+                                  _collapsed.remove(channel.id);
+                                } else {
+                                  _expanded.add(channel.id);
+                                }
+                              }
+                            });
+                          },
+                          child: Icon(
+                            isExpanded
+                                ? Icons.keyboard_arrow_down
+                                : Icons.keyboard_arrow_right,
+                            size: 18,
+                            color: Colors.grey,
+                          ),
+                        )
+                      else
+                        const SizedBox(width: 18),
+                      const SizedBox(width: 4),
+                      // Channel icon
+                      Icon(
+                        hasChildren ? Icons.folder : Icons.tag,
+                        size: 16,
+                        color: isSelected ? Colors.blue : Colors.grey,
+                      ),
+                      const SizedBox(width: 6),
+                      // Channel name with a trailing lock badge: closed = needs
+                      // a password, open = already entered in this session.
+                      Expanded(
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                channel.name,
+                                style: TextStyle(
+                                  color: isSelected
+                                      ? Colors.blue
+                                      : Colors.white,
+                                  fontWeight: isSelected
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                  fontSize: 14,
+                                ),
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              overflow: TextOverflow.ellipsis,
                             ),
-                          ),
-                          if (channel.hasPassword) ...[
-                            const SizedBox(width: 4),
-                            Icon(
-                              (widget.sessionPasswordKnown?.call(channel.id) ??
-                                      false)
-                                  ? Icons.lock_open
-                                  : Icons.lock,
-                              size: 12,
-                              color: Colors.grey.withValues(alpha: 0.8),
-                            ),
+                            if (channel.hasPassword) ...[
+                              const SizedBox(width: 4),
+                              Icon(
+                                (widget.sessionPasswordKnown?.call(
+                                          channel.id,
+                                        ) ??
+                                        false)
+                                    ? Icons.lock_open
+                                    : Icons.lock,
+                                size: 12,
+                                color: Colors.grey.withValues(alpha: 0.8),
+                              ),
+                            ],
                           ],
-                        ],
-                      ),
-                    ),
-                    // Permission indicators: cannot join at all (only shown once the
-                    // server has actually denied it), or our talk power is too
-                    // low to speak in the channel.
-                    if (hintsKnown && !channel.canJoin && !isSelected) ...[
-                      const SizedBox(width: 6),
-                      Tooltip(
-                        message: al.channelsNoJoinPermission,
-                        child: Icon(
-                          Icons.block,
-                          size: 13,
-                          color: Colors.redAccent,
                         ),
                       ),
-                    ],
-                    if (channel.neededTalkPower > widget.ownTalkPower &&
-                        !isSelected) ...[
-                      const SizedBox(width: 6),
-                      Tooltip(
-                        message: al.channelTalkPowerNeeded(
-                          channel.neededTalkPower,
-                        ),
-                        child: Icon(
-                          Icons.mic_off,
-                          size: 12,
-                          color: Colors.amber,
-                        ),
-                      ),
-                    ],
-                    // Client count badge — redundant while the members are
-                    // visible, so only shown on a folded channel.
-                    if (channel.clientCount > 0 &&
-                        !(isExpanded && hasClients)) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          '${channel.clientCount}',
-                          style: TextStyle(
-                            color: isSelected ? Colors.blue : Colors.grey,
-                            fontSize: 11,
+                      // Permission indicators: cannot join at all (only shown once the
+                      // server has actually denied it), or our talk power is too
+                      // low to speak in the channel.
+                      if (hintsKnown && !channel.canJoin && !isSelected) ...[
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: al.channelsNoJoinPermission,
+                          child: Icon(
+                            Icons.block,
+                            size: 13,
+                            color: Colors.redAccent,
                           ),
                         ),
-                      ),
+                      ],
+                      if (channel.neededTalkPower > widget.ownTalkPower &&
+                          !isSelected) ...[
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: al.channelTalkPowerNeeded(
+                            channel.neededTalkPower,
+                          ),
+                          child: Icon(
+                            Icons.mic_off,
+                            size: 12,
+                            color: Colors.amber,
+                          ),
+                        ),
+                      ],
+                      // Client count badge — redundant while the members are
+                      // visible, so only shown on a folded channel.
+                      if (channel.clientCount > 0 &&
+                          !(isExpanded && hasClients)) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            '${channel.clientCount}',
+                            style: TextStyle(
+                              color: isSelected ? Colors.blue : Colors.grey,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -752,25 +811,40 @@ class _ChannelTreeState extends State<ChannelTree> {
         // sub-channels), then the sub-channels — only while expanded.
         if (isExpanded) ...[
           for (final client in clientsInChannel)
-            // The outer GestureDetector owns the long press, mirroring the
-            // channel rows: hold + move = drag the client onto a channel,
-            // hold still (then release) = open the per-client sheet. The
-            // inner ListTile keeps the tap.
-            GestureDetector(
-              onLongPressStart: _onRowLongPressStart,
-              onLongPressMoveUpdate: (d) => _onClientLongPressMove(client, d),
-              onLongPressEnd: (_) => _onClientLongPressEnd(client),
-              onLongPressCancel: _onRowLongPressCancel,
-              child: ClientRow(
-                client: client,
-                // Talk power is per channel: use THIS channel's restriction.
-                channelNeededTalkPower: channel.neededTalkPower,
-                serverGroups: widget.serverGroups,
-                // Align roughly with the channel icon of this depth.
-                indent: 30.0 + depth * 20.0,
-                onTap: widget.onClientTap == null
-                    ? null
-                    : () => widget.onClientTap!(client.id),
+            // The outer GestureDetector owns the touch gestures, mirroring
+            // the channel rows: hold + move = drag the client onto a
+            // channel, hold still (then release) = open the per-client
+            // sheet. The RawGestureDetector adds the desktop mouse drag;
+            // without move permission there is nothing to drag, so the
+            // recognizer stays off.
+            RawGestureDetector(
+              gestures: _canDragClient(client)
+                  ? _mouseDragGestures(
+                      (d) => _beginDrag(
+                        _DragKind.client,
+                        client.id,
+                        d.globalPosition,
+                      ),
+                    )
+                  : const {},
+              child: GestureDetector(
+                onLongPressStart: _onRowLongPressStart,
+                onLongPressMoveUpdate: (d) => _onClientLongPressMove(client, d),
+                onLongPressEnd: (_) => _onClientLongPressEnd(client),
+                onLongPressCancel: _onDragCancel,
+                // Desktop right-click: same sheet as a hold-still long press.
+                onSecondaryTapUp: (_) => widget.onClientTap?.call(client.id),
+                child: ClientRow(
+                  client: client,
+                  // Talk power is per channel: use THIS channel's restriction.
+                  channelNeededTalkPower: channel.neededTalkPower,
+                  serverGroups: widget.serverGroups,
+                  // Align roughly with the channel icon of this depth.
+                  indent: 30.0 + depth * 20.0,
+                  onTap: widget.onClientTap == null
+                      ? null
+                      : () => widget.onClientTap!(client.id),
+                ),
               ),
             ),
           ...children.map((ch) => _buildTile(ch, depth + 1)),

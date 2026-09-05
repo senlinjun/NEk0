@@ -495,8 +495,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     _reportOp(error, al.channelDeleted);
   }
 
-  /// Drop handler for the tree's long-press drag: re-parent (or re-order)
-  /// the dragged channel via a single `channelmove`.
+  /// Drop handler for the tree's drag (long-press on touch, mouse
+  /// press-drag on desktop): re-parent (or re-order) the dragged channel
+  /// via a single `channelmove`.
   Future<void> _onChannelDrop(int draggedId, int parentId, int? afterId) async {
     // Double-check the target is not the channel itself or inside its own
     // subtree (the tree filters these too; this guards against stale data).
@@ -601,8 +602,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                         .firstOrNull
                         ?.talkPower ??
                     0,
-                // Fixed gestures: short tap joins, long press opens the
-                // menu, long-press drag moves the channel (see onChannelDrop).
+                // Fixed gestures: short tap joins, long press / right-click
+                // opens the menu, drag moves the channel (see onChannelDrop).
                 onChannelTap: _onChannelTap,
                 onChannelMenu: _onChannelMenu,
                 // Open-lock hint for channels whose password is already
@@ -858,6 +859,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             key: _micKey,
             onTap: () => notifier.toggleInputMute(),
             onLongPress: () => _showVoiceSettings(notifier),
+            onSecondaryTapUp: (_) => _showVoiceSettings(notifier),
             child: Icon(Icons.mic, color: micColor, size: 28),
           ),
           const SizedBox(width: 24),

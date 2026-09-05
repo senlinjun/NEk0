@@ -783,36 +783,40 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
         itemCount: _entries.length,
         itemBuilder: (context, index) {
           final entry = _entries[index];
-          return ListTile(
-            dense: true,
-            leading: Icon(
-              _iconFor(entry),
-              size: 20,
-              color: entry.isFile ? Colors.blueGrey : Colors.amber.shade300,
+          return GestureDetector(
+            // Desktop right-click: the same actions sheet as a long press.
+            onSecondaryTapUp: (_) => _showEntryActions(entry),
+            child: ListTile(
+              dense: true,
+              leading: Icon(
+                _iconFor(entry),
+                size: 20,
+                color: entry.isFile ? Colors.blueGrey : Colors.amber.shade300,
+              ),
+              title: Text(
+                entry.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white, fontSize: 14),
+              ),
+              subtitle: entry.isFile
+                  ? Text(
+                      '${_formatSize(entry.size)}   '
+                              '${DateTime.fromMillisecondsSinceEpoch(entry.datetime * 1000)}'
+                          .trim(),
+                      style: const TextStyle(color: Colors.grey, fontSize: 11),
+                    )
+                  : null,
+              trailing: const SizedBox(width: 0),
+              onTap: () {
+                if (entry.isFile) {
+                  _showEntryActions(entry);
+                } else {
+                  _navigate(_join(_currentPath, entry.name));
+                }
+              },
+              onLongPress: () => _showEntryActions(entry),
             ),
-            title: Text(
-              entry.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-            ),
-            subtitle: entry.isFile
-                ? Text(
-                    '${_formatSize(entry.size)}   '
-                            '${DateTime.fromMillisecondsSinceEpoch(entry.datetime * 1000)}'
-                        .trim(),
-                    style: const TextStyle(color: Colors.grey, fontSize: 11),
-                  )
-                : null,
-            trailing: const SizedBox(width: 0),
-            onTap: () {
-              if (entry.isFile) {
-                _showEntryActions(entry);
-              } else {
-                _navigate(_join(_currentPath, entry.name));
-              }
-            },
-            onLongPress: () => _showEntryActions(entry),
           );
         },
       ),
