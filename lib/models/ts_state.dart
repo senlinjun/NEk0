@@ -1248,6 +1248,13 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   Future<String?> removeFromServerGroup(int dbid, int sgid) =>
       _permOp((t) => TsNative.serverGroupDelClient(dbid, sgid, t));
 
+  /// Clears our own avatar: announces an empty `client_flag_avatar` (the
+  /// server broadcasts "no avatar", so every client — us included, via the
+  /// regular poll — drops the image) and removes the stored avatar file
+  /// server-side. null = success, else the error text.
+  Future<String?> deleteAvatar(String uid) =>
+      _permOp((t) => TsNative.deleteAvatar(uid, t));
+
   /// Set a client's channel group in a channel. null = success.
   Future<String?> setChannelGroup(int dbid, int cgid, int channelId) =>
       _permOp((t) => TsNative.channelGroupSet(dbid, channelId, cgid, t));

@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,6 +15,7 @@ import '../models/privilege.dart';
 import '../models/server_info.dart';
 import '../models/ts_state.dart';
 import '../services/avatar_cache.dart';
+import '../services/avatar_upload.dart';
 import '../services/foreground_service.dart';
 import '../services/ts_ffi.dart';
 import '../widgets/channel_edit_screen.dart';
@@ -1035,11 +1038,182 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
           child: Consumer(
             builder: (ctx, ref, _) {
               final live = ref.watch(tsConnectionProvider);
-              return VoiceSettingsPanel(conn: live, notifier: notifier);
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _AvatarSection(conn: live, notifier: notifier),
+                  const Divider(color: Colors.white12, height: 24),
+                  VoiceSettingsPanel(conn: live, notifier: notifier),
+                ],
+              );
             },
           ),
         );
       },
+    );
+  }
+}
+
+// ─── Self avatar (upload entry in the tap-yourself sheet) ───────────
+
+/// Avatar row shown above the voice settings when tapping yourself: live
+/// preview of the current avatar plus the upload action. The upload
+/// compresses the picked image under the server's avatar size cap and hands
+/// it to the native transfer machinery; the refreshed avatar then shows up
+/// everywhere through the regular avatar-cache round-trip.
+class _AvatarSection extends ConsumerStatefulWidget {
+  final TsConnectionState conn;
+  final TsConnectionNotifier notifier;
+
+  const _AvatarSection({required this.conn, required this.notifier});
+
+  @override
+  ConsumerState<_AvatarSection> createState() => _AvatarSectionState();
+}
+
+class _AvatarSectionState extends ConsumerState<_AvatarSection> {
+  bool _uploading = false;
+  bool _deleting = false;
+
+  Future<void> _pickAndUpload() async {
+    final conn = ref.read(tsConnectionProvider);
+    final uid = conn.clients
+        .where((c) => c.id == conn.ownClientId)
+        .firstOrNull
+        ?.uid;
+    if (uid == null || uid.isEmpty) return;
+    PlatformFile? picked;
+    try {
+      picked = await FilePicker.pickFile(type: FileType.image);
+    } catch (_) {
+      picked = null;
+    }
+    if (!mounted || picked == null) return;
+    Uint8List? bytes;
+    try {
+      bytes = await picked.readAsBytes();
+    } catch (_) {
+      bytes = null;
+    }
+    if (!mounted || bytes == null || bytes.isEmpty) return;
+    final al = AppLocalizations.of(context);
+    setState(() => _uploading = true);
+    try {
+      await AvatarUploadService.upload(bytes, uid);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(al.avatarUploaded)));
+    } on AvatarUploadException catch (e) {
+      if (!mounted) return;
+      final text = switch (e.cause) {
+        AvatarUploadFailure.invalidImage => al.avatarInvalidImage,
+        AvatarUploadFailure.couldNotStart => al.avatarUploadFailed(
+          al.permNotConnected,
+        ),
+        AvatarUploadFailure.transferFailed => al.avatarUploadFailed(
+          e.reason ?? al.permFailedUnknown,
+        ),
+      };
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(al.avatarUploadFailed(e.toString()))),
+      );
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
+  /// Clears the avatar: the announce gets the server's real answer through
+  /// the perm_op receipt; the preview (and the delete button) then
+  /// disappear on their own once the server's echo reaches the poll.
+  Future<void> _deleteAvatar() async {
+    final conn = ref.read(tsConnectionProvider);
+    final uid = conn.clients
+        .where((c) => c.id == conn.ownClientId)
+        .firstOrNull
+        ?.uid;
+    if (uid == null || uid.isEmpty) return;
+    final al = AppLocalizations.of(context);
+    setState(() => _deleting = true);
+    try {
+      final error = await widget.notifier.deleteAvatar(uid);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error != null ? al.avatarDeleteFailed(error) : al.avatarDeleted,
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _deleting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final al = AppLocalizations.of(context);
+    final self = widget.conn.clients
+        .where((c) => c.id == widget.conn.ownClientId)
+        .firstOrNull;
+    return Row(
+      children: [
+        // Same 36 px avatar treatment as the per-client sheet.
+        Consumer(
+          builder: (context, ref, _) {
+            final avatarPath = ref.watch(avatarCacheProvider)[self?.avatarHash];
+            if (avatarPath == null) {
+              return const Icon(Icons.person, color: Colors.grey, size: 36);
+            }
+            return ClipOval(
+              child: Image.file(
+                File(avatarPath),
+                width: 36,
+                height: 36,
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.low,
+                gaplessPlayback: true,
+              ),
+            );
+          },
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            self?.nickname ?? '',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        if (_uploading || _deleting)
+          const Padding(
+            padding: EdgeInsets.only(right: 12),
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        // Deleting only makes sense while an avatar is actually set.
+        if (self?.avatarHash != null)
+          IconButton(
+            tooltip: al.avatarDelete,
+            onPressed: (_uploading || _deleting) ? null : _deleteAvatar,
+            icon: const Icon(Icons.delete_outline, size: 20),
+          ),
+        TextButton.icon(
+          onPressed: (_uploading || _deleting) ? null : _pickAndUpload,
+          icon: const Icon(Icons.upload, size: 18),
+          label: Text(al.avatarUpload),
+        ),
+      ],
     );
   }
 }

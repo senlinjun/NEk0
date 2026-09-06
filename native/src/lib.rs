@@ -121,6 +121,15 @@ pub enum Command {
     /// protocol transfer id happens here once the request was sent out.
     FtDownload { cid: u64, path: String, password: Option<String>, task_id: u32 },
     FtUpload { cid: u64, path: String, password: Option<String>, task_id: u32 },
+    /// Announce our new avatar (clientupdate `client_flag_avatar` = MD5 of the
+    /// uploaded file). Queued by the transfer machinery after a successful
+    /// avatar upload — the server does not infer the hash from the upload.
+    SetAvatarHash { hash: String },
+    /// Clear our own avatar: announce an EMPTY `client_flag_avatar` (tracked
+    /// via `token` → PermOp so Dart gets the server's real answer) and
+    /// best-effort remove the stored `/avatar_<uid>` file from the channel-0
+    /// storage.
+    DeleteAvatar { path: String, token: String },
 }
 
 // ─── File transfers (channel file management) ────────────────────────
@@ -145,6 +154,10 @@ pub struct FtTask {
     /// The client-side transfer id used in ftinit* commands, so a
     /// StreamItem::FiletransferFailed can be attributed back to this task.
     pub client_ft_id: AtomicU16,
+    /// For avatar uploads: the MD5 of the file content. Once the transfer is
+    /// confirmed, it is announced via Command::SetAvatarHash so the server
+    /// broadcasts the new avatar to every client.
+    pub avatar_md5: Option<String>,
     /// Last progress event publish time — throttles events.
     pub last_event: Mutex<Option<Instant>>,
 }

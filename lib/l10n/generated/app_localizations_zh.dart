@@ -937,4 +937,43 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get positionReset => '重置位置';
+
+  @override
+  String get avatarUpload => '上传头像';
+
+  @override
+  String get avatarUploaded => '头像已更新';
+
+  @override
+  String avatarUploadFailed(String error) {
+    return '头像上传失败：$error';
+  }
+
+  @override
+  String get avatarInvalidImage => '不支持的图片文件';
+
+  @override
+  String get avatarDelete => '删除头像';
+
+  @override
+  String get avatarDeleted => '头像已删除';
+
+  @override
+  String avatarDeleteFailed(String error) {
+    return '头像删除失败：$error';
+  }
+
+  @override
+  String get about => '关于';
+
+  @override
+  String appVersion(String version) {
+    return '版本 $version';
+  }
+
+  @override
+  String get viewOnGitHub => '在 GitHub 上查看';
+
+  @override
+  String get openLinkFailed => '无法打开链接';
 }

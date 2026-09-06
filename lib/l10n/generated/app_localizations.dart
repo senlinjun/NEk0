@@ -1891,6 +1891,72 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Reset position'**
   String get positionReset;
+
+  /// No description provided for @avatarUpload.
+  ///
+  /// In en, this message translates to:
+  /// **'Upload avatar'**
+  String get avatarUpload;
+
+  /// No description provided for @avatarUploaded.
+  ///
+  /// In en, this message translates to:
+  /// **'Avatar updated'**
+  String get avatarUploaded;
+
+  /// No description provided for @avatarUploadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Avatar upload failed: {error}'**
+  String avatarUploadFailed(String error);
+
+  /// No description provided for @avatarInvalidImage.
+  ///
+  /// In en, this message translates to:
+  /// **'Unsupported image file'**
+  String get avatarInvalidImage;
+
+  /// No description provided for @avatarDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete avatar'**
+  String get avatarDelete;
+
+  /// No description provided for @avatarDeleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Avatar removed'**
+  String get avatarDeleted;
+
+  /// No description provided for @avatarDeleteFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed to delete avatar: {error}'**
+  String avatarDeleteFailed(String error);
+
+  /// No description provided for @about.
+  ///
+  /// In en, this message translates to:
+  /// **'About'**
+  String get about;
+
+  /// No description provided for @appVersion.
+  ///
+  /// In en, this message translates to:
+  /// **'Version {version}'**
+  String appVersion(String version);
+
+  /// No description provided for @viewOnGitHub.
+  ///
+  /// In en, this message translates to:
+  /// **'View on GitHub'**
+  String get viewOnGitHub;
+
+  /// No description provided for @openLinkFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not open the link'**
+  String get openLinkFailed;
 }
 
 class _AppLocalizationsDelegate

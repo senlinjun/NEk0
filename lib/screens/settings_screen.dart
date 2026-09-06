@@ -4,7 +4,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../l10n/generated/app_localizations.dart';
 import '../models/app_locale.dart';
@@ -24,10 +26,12 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   static const _languageOptions = ['system', 'en', 'zh'];
+  static const _githubUrl = 'https://github.com/senlinjun/NEk0';
 
   final OtaSettings _ota = OtaSettings();
   bool _otaLoaded = false;
   String _languageCode = 'system';
+  String _version = '';
 
   AudioService? _testAudio;
   bool _micTest = false;
@@ -45,6 +49,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     super.initState();
     _ota.load().then((_) {
       if (mounted) setState(() => _otaLoaded = true);
+    });
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _version = info.version);
     });
     _loadLanguage();
     _loadSfxNames();
@@ -205,6 +212,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       );
     } else {
       await showUpdateDialog(context, info);
+    }
+  }
+
+  /// Opens the project repository via the platform's external browser/app.
+  Future<void> _openGitHub() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final failed = AppLocalizations.of(context).openLinkFailed;
+    try {
+      final launched = await launchUrl(
+        Uri.parse(_githubUrl),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) {
+        messenger.showSnackBar(SnackBar(content: Text(failed)));
+      }
+    } catch (_) {
+      messenger.showSnackBar(SnackBar(content: Text(failed)));
     }
   }
 
@@ -760,6 +784,93 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
               ),
             ],
+            // About: app identity + version + project link, all platforms
+            // (the OTA section above is Android-only).
+            const SizedBox(height: 24),
+            _SectionHeader(AppLocalizations.of(context).about),
+            const SizedBox(height: 8),
+            Card(
+              color: const Color(0xFF1A1A2E),
+              margin: EdgeInsets.zero,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.asset(
+                            'assets/logo.png',
+                            width: 56,
+                            height: 56,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'NEk0',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              if (_version.isNotEmpty)
+                                Text(
+                                  AppLocalizations.of(
+                                    context,
+                                  ).appVersion(_version),
+                                  style: const TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 20, color: Color(0xFF2A2A4A)),
+                    InkWell(
+                      onTap: _openGitHub,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.code,
+                              color: Colors.grey,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                AppLocalizations.of(context).viewOnGitHub,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
+                            const Icon(
+                              Icons.open_in_new,
+                              color: Colors.grey,
+                              size: 16,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       ),

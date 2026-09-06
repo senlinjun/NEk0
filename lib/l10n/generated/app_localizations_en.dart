@@ -955,4 +955,43 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get positionReset => 'Reset position';
+
+  @override
+  String get avatarUpload => 'Upload avatar';
+
+  @override
+  String get avatarUploaded => 'Avatar updated';
+
+  @override
+  String avatarUploadFailed(String error) {
+    return 'Avatar upload failed: $error';
+  }
+
+  @override
+  String get avatarInvalidImage => 'Unsupported image file';
+
+  @override
+  String get avatarDelete => 'Delete avatar';
+
+  @override
+  String get avatarDeleted => 'Avatar removed';
+
+  @override
+  String avatarDeleteFailed(String error) {
+    return 'Failed to delete avatar: $error';
+  }
+
+  @override
+  String get about => 'About';
+
+  @override
+  String appVersion(String version) {
+    return 'Version $version';
+  }
+
+  @override
+  String get viewOnGitHub => 'View on GitHub';
+
+  @override
+  String get openLinkFailed => 'Could not open the link';
 }

@@ -113,6 +113,39 @@ fn maybe_publish_ft_progress(task_id: u32, task: &crate::FtTask, force: bool) {
     }
 }
 
+/// After a confirmed avatar upload, announce the new avatar (clientupdate
+/// `client_flag_avatar` = MD5 of the uploaded file) — the server does not
+/// infer the hash from the transfer, so without this the avatar never shows
+/// up on any client. Queued as a command so it works both from the event
+/// loop and from a transfer worker thread.
+fn publish_avatar_hash(md5: String) {
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        let _ = tx.send(Command::SetAvatarHash { hash: md5 });
+    }
+}
+
+/// MD5 of a local file as lowercase hex. Avatars are tiny; chunked anyway
+/// so a mispointed path cannot blow up memory.
+fn md5_file_hex(path: &str) -> std::io::Result<String> {
+    use md5::{Digest, Md5};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Md5::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect())
+}
+
 /// Downloads the payload of an accepted ftinitdownload onto the local disk.
 /// Runs on its own OS thread with blocking IO — the connection event loop is
 /// untouched by the (potentially long) transfer.
@@ -215,6 +248,11 @@ fn spawn_upload_worker(task_id: u32, mut stream: std::net::TcpStream, src: Strin
                     crate::finish_ft_task(task_id, false, Some("canceled".into()));
                     return Ok(());
                 }
+            }
+            // Avatar upload: announce the hash before the task is removed —
+            // the status handler never ran, so this is the only success path.
+            if let Some(md5) = FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone()) {
+                publish_avatar_hash(md5);
             }
             crate::finish_ft_task(task_id, true, None);
             Ok(())
@@ -1950,6 +1988,27 @@ fn encoded_cpw(password: &Option<String>) -> String {
         .unwrap_or_default()
 }
 
+/// Builds an ftdeletefile command — every entry is one part of the same
+/// packet, so multiple paths die with one server round-trip.
+fn ft_delete_cmd(cid: u64, names: &[String], password: &Option<String>) -> OutCommand {
+    let mut packet = OutCommand::new(
+        Direction::C2S,
+        Flags::empty(),
+        PacketType::Command,
+        "ftdeletefile",
+    );
+    let cpw = encoded_cpw(password);
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            packet.start_new_part();
+        }
+        packet.write_arg("cid", &cid);
+        packet.write_arg("cpw", &cpw);
+        packet.write_arg("name", name);
+    }
+    packet
+}
+
 /// Schedules the deferred finalize of a listing. The server streams the
 /// rows after the result frame, and our event pipeline may surface those
 /// rows one or two poll ticks late — so the finalize waits long enough for
@@ -2422,6 +2481,14 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                     let kind = FT_TASKS.get(&task_id).map(|t| t.kind);
                     match kind {
                         Some(k) if k == FT_KIND_UPLOAD && ok_status => {
+                            // Avatar upload: the status confirmation is the
+                            // success signal — announce the hash so the server
+                            // broadcasts the new avatar.
+                            if let Some(md5) =
+                                FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone())
+                            {
+                                publish_avatar_hash(md5);
+                            }
                             crate::finish_ft_task(task_id, true, None);
                         }
                         _ => {
@@ -2656,6 +2723,57 @@ async fn event_loop(
                         badges: None,
                     };
                     let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
+                }
+                Command::SetAvatarHash { hash } => {
+                    let part = OutClientUpdatePart {
+                        name: None,
+                        input_muted: None,
+                        output_muted: None,
+                        is_away: None,
+                        away_message: None,
+                        input_hardware_enabled: None,
+                        output_hardware_enabled: None,
+                        is_channel_commander: None,
+                        avatar_hash: Some(Cow::Owned(hash)),
+                        phonetic_name: None,
+                        talk_power_request: None,
+                        talk_power_request_message: None,
+                        is_recording: None,
+                        badges: None,
+                    };
+                    let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
+                }
+                Command::DeleteAvatar { path, token } => {
+                    push_diag(&format!("avatar delete {}: {}", token, path));
+                    // 1. Announce "no avatar": client_flag_avatar present but
+                    //    EMPTY, which write_arg serializes as the bare flag
+                    //    the server itself broadcasts for avatar-less clients.
+                    //    Tracked via perm_op_send so Dart gets the server's
+                    //    real answer for the token.
+                    let part = OutClientUpdatePart {
+                        name: None,
+                        input_muted: None,
+                        output_muted: None,
+                        is_away: None,
+                        away_message: None,
+                        input_hardware_enabled: None,
+                        output_hardware_enabled: None,
+                        is_channel_commander: None,
+                        avatar_hash: Some(Cow::Borrowed("")),
+                        phonetic_name: None,
+                        talk_power_request: None,
+                        talk_power_request_message: None,
+                        is_recording: None,
+                        badges: None,
+                    };
+                    let result = OutClientUpdateMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                    // 2. Best-effort removal of the stored file — not tracked:
+                    //    an orphan in channel-0 storage is harmless and gets
+                    //    overwritten by the next upload.
+                    let packet = ft_delete_cmd(0, std::slice::from_ref(&path), &None);
+                    let _ = RawCmd(packet).send(&mut con);
                 }
                 Command::SendPoke { client_id, message } => {
                     // Poke is a dedicated clientpoke request message.
@@ -3212,21 +3330,7 @@ async fn event_loop(
                 Command::FtDelete { cid, names, password, token } => {
                     push_diag(&format!("ft delete {}: {} path(s)", token, names.len()));
                     // Every deleted entry is one part of a single ftdeletefile.
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "ftdeletefile",
-                    );
-                    let cpw = encoded_cpw(&password);
-                    for (i, name) in names.iter().enumerate() {
-                        if i > 0 {
-                            packet.start_new_part();
-                        }
-                        packet.write_arg("cid", &cid);
-                        packet.write_arg("cpw", &cpw);
-                        packet.write_arg("name", name);
-                    }
+                    let packet = ft_delete_cmd(cid, &names, &password);
                     push_wire_diag(&format!("delete {}", token), &packet);
                     match RawCmd(packet).send_with_result(&mut con) {
                         Ok(handle) => {
@@ -4967,6 +5071,7 @@ fn ft_new_task(kind: u8, name: String, local_path: String, total: u64) -> u32 {
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Placeholder until the event loop binds the protocol id.
             client_ft_id: std::sync::atomic::AtomicU16::new(u16::MAX),
+            avatar_md5: None,
             last_event: parking_lot::Mutex::new(None),
         }),
     );
@@ -5163,6 +5268,18 @@ pub extern "C" fn ts_ft_download(
     task_id
 }
 
+/// The `/avatar_<uid>` remote path for a wire-format uid (base64), or None
+/// when the uid is malformed. Shared by avatar download / upload / delete —
+/// avatars live in the channel-0 file storage without a password.
+fn avatar_remote_path(uid: &str) -> Option<String> {
+    let raw = BASE64_STANDARD.decode(uid.as_bytes()).ok()?;
+    let path = normalize_remote_path(&format!(
+        "/avatar_{}",
+        tsproto_types::Uid::from_bytes(&raw).as_avatar()
+    ));
+    valid_remote_path(&path).then_some(path)
+}
+
 /// Starts downloading a client's avatar into `dest` (local absolute path).
 /// The remote path follows the TS3 convention: `/avatar_<uid>` where the uid
 /// is base64-decoded and hex-encoded with the alphabet [a-p]
@@ -5175,17 +5292,9 @@ pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) ->
         return 0;
     }
     let uid = unsafe { cstr_to_string(uid) };
-    let raw = match BASE64_STANDARD.decode(uid.as_bytes()) {
-        Ok(raw) => raw,
-        Err(_) => return 0,
-    };
-    let path = normalize_remote_path(&format!(
-        "/avatar_{}",
-        tsproto_types::Uid::from_bytes(&raw).as_avatar()
-    ));
-    if !valid_remote_path(&path) {
+    let Some(path) = avatar_remote_path(&uid) else {
         return 0;
-    }
+    };
     let dest = unsafe { cstr_to_string(dest) };
     if dest.is_empty() {
         return 0;
@@ -5208,6 +5317,64 @@ pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) ->
         }
     }
     // Event loop unreachable — fail the task immediately so no job hangs.
+    crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
+    task_id
+}
+
+/// Starts uploading the local file `src` as our own avatar. The remote path
+/// follows the TS3 convention: `/avatar_<uid>` (uid base64-decoded, hex-
+/// encoded with the alphabet [a-p] via `Uid::as_avatar`), written into the
+/// channel-0 file storage without a password, overwriting the previous
+/// avatar. On success the transfer machinery additionally announces the
+/// file's MD5 via clientupdate (`client_flag_avatar`) — without that the
+/// new avatar never becomes visible. Returns the task id (>0) for
+/// progress/cancel tracking, 0 when not queued (not connected, malformed
+/// uid, missing source file).
+#[no_mangle]
+pub extern "C" fn ts_upload_avatar(uid: *const c_char, src: *const c_char) -> u32 {
+    if !ft_ready() || src.is_null() {
+        return 0;
+    }
+    let uid = unsafe { cstr_to_string(uid) };
+    let Some(path) = avatar_remote_path(&uid) else {
+        return 0;
+    };
+    let src = unsafe { cstr_to_string(src) };
+    let meta = std::fs::metadata(&src);
+    // Only existing local files are accepted.
+    if src.is_empty() || meta.as_ref().map(|m| !m.is_file()).unwrap_or(true) {
+        return 0;
+    }
+    // Hash BEFORE queueing: the announced hash must match the uploaded
+    // bytes, and Dart must not touch the file between the two.
+    let md5 = match md5_file_hex(&src) {
+        Ok(md5) => md5,
+        Err(_) => return 0,
+    };
+    let total = meta.map(|m| m.len()).unwrap_or(0);
+    let name = remote_basename(&path);
+    let task_id = ft_new_task(FT_KIND_UPLOAD, name.clone(), src.clone(), total);
+    if let Some(mut t) = FT_TASKS.get_mut(&task_id) {
+        // Still exclusively held in the map — no worker has touched it yet.
+        if let Some(task) = Arc::get_mut(&mut t) {
+            task.avatar_md5 = Some(md5);
+        }
+    }
+    ft_push_started(task_id);
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        if tx
+            .send(Command::FtUpload {
+                cid: 0,
+                path,
+                password: None,
+                task_id,
+            })
+            .is_ok()
+        {
+            return task_id;
+        }
+    }
     crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
     task_id
 }
@@ -5254,6 +5421,36 @@ pub extern "C" fn ts_ft_upload(
     }
     crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
     task_id
+}
+
+/// Clears our own avatar: announces an EMPTY `client_flag_avatar` (the
+/// server broadcasts "no avatar" and every client drops the image) and
+/// best-effort removes the stored `/avatar_<uid>` file from the channel-0
+/// storage. The Dart caller receives the server's real answer for the
+/// announce via the `perm_op` event for `token`; the file removal is not
+/// tracked (an orphan is harmless and overwritten by the next upload).
+/// Returns 1 when queued, 0 when not connected / malformed uid / token.
+#[no_mangle]
+pub extern "C" fn ts_delete_avatar(uid: *const c_char, token: *const c_char) -> u8 {
+    if !ft_ready() || token.is_null() {
+        return 0;
+    }
+    let uid = unsafe { cstr_to_string(uid) };
+    let Some(path) = avatar_remote_path(&uid) else {
+        return 0;
+    };
+    let token = unsafe { cstr_to_string(token) };
+    if token.is_empty() {
+        return 0;
+    }
+    let tx = COMMAND_TX.lock();
+    match tx
+        .as_ref()
+        .map(|tx| tx.send(Command::DeleteAvatar { path, token }))
+    {
+        Some(Ok(())) => 1,
+        _ => 0,
+    }
 }
 
 /// Requests cancellation of an active transfer (cooperative flag).

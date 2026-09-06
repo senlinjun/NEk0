@@ -242,6 +242,14 @@ typedef _FtCancelDart = int Function(int);
 typedef _DownloadAvatarNative = Uint32 Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _DownloadAvatarDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
 
+// ts_upload_avatar(uid, src_local_path) -> task_id
+typedef _UploadAvatarNative = Uint32 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _UploadAvatarDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
+// ts_delete_avatar(uid, token) -> bool
+typedef _DeleteAvatarNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _DeleteAvatarDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
 // ─── Permission management ──────────────────────────────────────────
 
 // ts_get_server_groups() / ts_get_channel_groups() / ts_get_server_info()
@@ -456,6 +464,10 @@ final _downloadAvatar = _lib
     .lookupFunction<_DownloadAvatarNative, _DownloadAvatarDart>(
       'ts_download_avatar',
     );
+final _uploadAvatar = _lib
+    .lookupFunction<_UploadAvatarNative, _UploadAvatarDart>('ts_upload_avatar');
+final _deleteAvatar = _lib
+    .lookupFunction<_DeleteAvatarNative, _DeleteAvatarDart>('ts_delete_avatar');
 final _getServerGroups = _lib.lookupFunction<_GetGroupsNative, _GetGroupsDart>(
   'ts_get_server_groups',
 );
@@ -1032,6 +1044,40 @@ class TsNative {
     } finally {
       malloc.free(u);
       malloc.free(d);
+    }
+  }
+
+  /// Starts uploading `srcLocalPath` as our own avatar (the Rust side builds
+  /// the `/avatar_<uid>` remote path, streams the file and announces the MD5
+  /// via clientupdate once the transfer is confirmed). Returns a task id for
+  /// completion tracking, or 0 when the request could not start (not
+  /// connected / malformed uid / unreadable source file).
+  static int uploadAvatar(String uid, String srcLocalPath) {
+    debugLog('uploadAvatar($uid)');
+    final u = _strToPtr(uid);
+    final s = _strToPtr(srcLocalPath);
+    try {
+      return _uploadAvatar(u, s);
+    } finally {
+      malloc.free(u);
+      malloc.free(s);
+    }
+  }
+
+  /// Clears our own avatar: announces an empty `client_flag_avatar` (the
+  /// server broadcasts "no avatar" to everyone) and asks the server to
+  /// remove the stored avatar file. The server's answer for the announce
+  /// arrives as a `perm_op` event carrying [token]. Returns false when the
+  /// request could not be queued (not connected / malformed uid).
+  static bool deleteAvatar(String uid, String token) {
+    debugLog('deleteAvatar($uid)');
+    final u = _strToPtr(uid);
+    final t = _strToPtr(token);
+    try {
+      return _deleteAvatar(u, t) != 0;
+    } finally {
+      malloc.free(u);
+      malloc.free(t);
     }
   }
 

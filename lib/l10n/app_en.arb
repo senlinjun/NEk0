@@ -394,5 +394,31 @@
   "positionSelf": "Me",
   "positionHint": "Drag to place them around you: up is in front of you, farther away is quieter. Plain stereo cannot tell front from back — distance carries that.",
   "positionUnset": "No position set — plays centered",
-  "positionReset": "Reset position"
+  "positionReset": "Reset position",
+  "avatarUpload": "Upload avatar",
+  "avatarUploaded": "Avatar updated",
+  "avatarUploadFailed": "Avatar upload failed: {error}",
+  "@avatarUploadFailed": {
+    "placeholders": {
+      "error": { "type": "String" }
+    }
+  },
+  "avatarInvalidImage": "Unsupported image file",
+  "avatarDelete": "Delete avatar",
+  "avatarDeleted": "Avatar removed",
+  "avatarDeleteFailed": "Failed to delete avatar: {error}",
+  "@avatarDeleteFailed": {
+    "placeholders": {
+      "error": { "type": "String" }
+    }
+  },
+  "about": "About",
+  "appVersion": "Version {version}",
+  "@appVersion": {
+    "placeholders": {
+      "version": { "type": "String" }
+    }
+  },
+  "viewOnGitHub": "View on GitHub",
+  "openLinkFailed": "Could not open the link"
 }
