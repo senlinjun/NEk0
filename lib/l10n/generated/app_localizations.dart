@@ -1100,6 +1100,54 @@ abstract class AppLocalizations {
   /// **'Server'**
   String get menuServerTitle;
 
+  /// No description provided for @menuEditServer.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit server'**
+  String get menuEditServer;
+
+  /// No description provided for @serverSettingsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Server Settings'**
+  String get serverSettingsTitle;
+
+  /// No description provided for @serverMaxClientsLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Max clients'**
+  String get serverMaxClientsLabel;
+
+  /// No description provided for @serverPasswordLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Server password'**
+  String get serverPasswordLabel;
+
+  /// No description provided for @serverPasswordHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Leave empty to keep the current one'**
+  String get serverPasswordHelper;
+
+  /// No description provided for @serverPasswordRemove.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove server password'**
+  String get serverPasswordRemove;
+
+  /// No description provided for @serverSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Server updated'**
+  String get serverSaved;
+
+  /// No description provided for @serverReadOnlyHint.
+  ///
+  /// In en, this message translates to:
+  /// **'You do not have permission to change server settings'**
+  String get serverReadOnlyHint;
+
   /// No description provided for @menuCreateChannel.
   ///
   /// In en, this message translates to:

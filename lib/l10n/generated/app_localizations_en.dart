@@ -536,6 +536,31 @@ class AppLocalizationsEn extends AppLocalizations {
   String get menuServerTitle => 'Server';
 
   @override
+  String get menuEditServer => 'Edit server';
+
+  @override
+  String get serverSettingsTitle => 'Server Settings';
+
+  @override
+  String get serverMaxClientsLabel => 'Max clients';
+
+  @override
+  String get serverPasswordLabel => 'Server password';
+
+  @override
+  String get serverPasswordHelper => 'Leave empty to keep the current one';
+
+  @override
+  String get serverPasswordRemove => 'Remove server password';
+
+  @override
+  String get serverSaved => 'Server updated';
+
+  @override
+  String get serverReadOnlyHint =>
+      'You do not have permission to change server settings';
+
+  @override
   String get menuCreateChannel => 'Create channel';
 
   @override

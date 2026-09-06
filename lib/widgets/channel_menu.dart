@@ -12,8 +12,9 @@ const channelMenuMoveUp = 'move_up';
 const channelMenuMoveDown = 'move_down';
 const channelMenuDelete = 'delete';
 
-/// Result value of [showServerMenu].
+/// Result values of [showServerMenu].
 const serverMenuCreateChannel = 'create_channel';
+const serverMenuEditServer = 'edit_server';
 
 /// Bottom sheet opened by a long press (or swapped short tap) on a channel
 /// row. First entry joins the channel, second opens its file management —
@@ -188,14 +189,16 @@ Future<String?> showChannelMenu(
   );
 }
 
-/// Bottom sheet for a long-press on the server root node. Currently only
-/// offers channel creation; pops [serverMenuCreateChannel], or null when
-/// [canCreateChannel] is false (nothing to offer — do not open the sheet).
+/// Bottom sheet for a tap / long-press / right-click on the server root
+/// node. Always opens — the server row has no permission hints, so the
+/// entries decide visibility themselves: "edit server" opens the server
+/// settings page (read-only when we look unprivileged), channel creation
+/// follows [canCreateChannel]. Pops [serverMenuEditServer],
+/// [serverMenuCreateChannel], or null when dismissed.
 Future<String?> showServerMenu(
   BuildContext context, {
   required bool canCreateChannel,
 }) async {
-  if (!canCreateChannel) return null;
   final al = AppLocalizations.of(context);
   return showModalBottomSheet<String>(
     context: context,
@@ -209,6 +212,7 @@ Future<String?> showServerMenu(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Small drag handle like the other sheets in the app.
             Container(
               width: 36,
               height: 4,
@@ -241,16 +245,29 @@ Future<String?> showServerMenu(
             const Divider(height: 1, color: Color(0xFF2A2A4A)),
             ListTile(
               leading: const Icon(
-                Icons.add_circle_outline,
+                Icons.tune,
                 size: 22,
                 color: Colors.blueAccent,
               ),
               title: Text(
-                al.menuCreateChannel,
+                al.menuEditServer,
                 style: const TextStyle(color: Colors.white, fontSize: 14),
               ),
-              onTap: () => Navigator.of(ctx).pop(serverMenuCreateChannel),
+              onTap: () => Navigator.of(ctx).pop(serverMenuEditServer),
             ),
+            if (canCreateChannel)
+              ListTile(
+                leading: const Icon(
+                  Icons.add_circle_outline,
+                  size: 22,
+                  color: Colors.blueAccent,
+                ),
+                title: Text(
+                  al.menuCreateChannel,
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                ),
+                onTap: () => Navigator.of(ctx).pop(serverMenuCreateChannel),
+              ),
             const SizedBox(height: 8),
           ],
         ),

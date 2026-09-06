@@ -10,6 +10,7 @@ import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/group.dart';
 import '../models/privilege.dart';
+import '../models/server_info.dart';
 import '../models/ts_state.dart';
 import '../services/avatar_cache.dart';
 import '../services/foreground_service.dart';
@@ -23,6 +24,7 @@ import '../screens/file_manager_screen.dart';
 import '../widgets/channel_menu.dart';
 import '../widgets/position_edit_screen.dart';
 import '../widgets/privilege_key_dialog.dart';
+import '../widgets/server_edit_screen.dart';
 import '../widgets/spotlight_tour.dart';
 import '../widgets/voice_settings_panel.dart';
 
@@ -371,15 +373,60 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     _reportOp(error, AppLocalizations.of(context).channelMoved);
   }
 
-  /// Long-press (or tap) on the server root node. Currently only channel
-  /// creation; the sheet is not opened at all when we look unprivileged.
+  /// Tap/long-press/right-click on the server root node: pops the server
+  /// menu first — "edit server" opens the settings page (read-only without
+  /// the admin heuristics), "create channel" reuses the shared channel form
+  /// at top level (parentId 0).
   Future<void> _onServerMenu() async {
-    final result = await showServerMenu(
+    final action = await showServerMenu(
       context,
       canCreateChannel: _canCreateChannels,
     );
-    if (!mounted || result != serverMenuCreateChannel) return;
-    await _createChannel(parentId: 0);
+    if (!mounted) return;
+    switch (action) {
+      case serverMenuEditServer:
+        await _openServerSettings();
+      case serverMenuCreateChannel:
+        await _createChannel(parentId: 0);
+    }
+  }
+
+  /// Opens the server settings page (see [pushServerEditPage]) and submits
+  /// the edits as a `serveredit`. The create-channel entry pops a sentinel
+  /// and is handled like the menu's own entry.
+  Future<void> _openServerSettings() async {
+    // Prefill snapshot from the native book cache; falls back to the
+    // connection state when the native library is stale (missing symbol).
+    TsServerInfo info;
+    try {
+      info = TsServerInfo.fromJson(TsNative.getServerInfo());
+    } catch (_) {
+      info = TsServerInfo(name: ref.read(tsConnectionProvider).serverName);
+    }
+    final result = await pushServerEditPage(
+      context,
+      info: info,
+      // The same admin heuristic gates both the editable form and the
+      // create-channel entry (a wrong guess surfaces as a server rejection
+      // in the perm_op receipt).
+      canEdit: _canCreateChannels,
+      canCreateChannel: _canCreateChannels,
+    );
+    if (!mounted || result == null) return;
+    switch (result.action) {
+      case ServerEditAction.createChannel:
+        await _createChannel(parentId: 0);
+      case ServerEditAction.save:
+        final error = await ref
+            .read(tsConnectionProvider.notifier)
+            .editServer(
+              name: result.name,
+              password: result.password,
+              maxClients: result.maxClients,
+            );
+        if (!mounted) return;
+        _reportOp(error, AppLocalizations.of(context).serverSaved);
+    }
   }
 
   /// Opens the shared channel form to create a channel under [parentId]
@@ -616,10 +663,11 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                 // Server groups for the privileged-identity badges; empty
                 // while the group list is unavailable.
                 serverGroups: _serverGroups,
-                // TS3-style server root node; its menu (create channel)
-                // only exists when we look privileged enough.
+                // TS3-style server root node; tapping / long-pressing /
+                // right-clicking it always pops the server menu (edit
+                // server / create channel), no permission gating.
                 serverName: conn.serverName,
-                onServerMenu: _canCreateChannels ? _onServerMenu : null,
+                onServerMenu: _onServerMenu,
                 // Long-press drag: re-parent / re-order the dragged channel.
                 onChannelDrop: _onChannelDrop,
                 // Long-press drag of a user row: move them into the target

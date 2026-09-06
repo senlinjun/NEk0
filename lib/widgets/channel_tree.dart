@@ -52,8 +52,9 @@ class ChannelTree extends StatefulWidget {
   /// the channel list (kept visible even while the roster is still empty).
   final String serverName;
 
-  /// Invoked on tap/long-press of the server root node (server menu, e.g.
-  /// "create channel"). Null disables both gestures on the node.
+  /// Invoked on tap / long-press / right-click of the server root node —
+  /// opens the server menu (edit server / create channel; there is nothing
+  /// to "join" on the server itself). Null disables all gestures on the node.
   final VoidCallback? onServerMenu;
 
   /// Invoked when a dragged channel is released on a valid drop target:
@@ -553,7 +554,7 @@ class _ChannelTreeState extends State<ChannelTree> {
     );
   }
 
-  /// The TS3-style server root node above the channel list. Both gestures
+  /// The TS3-style server root node above the channel list. All gestures
   /// open the server menu (there is nothing to "join" on the server itself).
   Widget _buildServerTile() {
     final canOpenMenu = widget.onServerMenu != null;

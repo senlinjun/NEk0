@@ -181,6 +181,10 @@ typedef _ChannelEditNative =
     Uint8 Function(Uint32, Pointer<Utf8>, Pointer<Utf8>);
 typedef _ChannelEditDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>);
 
+// ts_server_edit(args_json, token) -> bool
+typedef _ServerEditNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _ServerEditDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
 // ts_channel_delete(channel_id: u32, force: u8, token) -> bool
 typedef _ChannelDeleteNative = Uint8 Function(Uint32, Uint8, Pointer<Utf8>);
 typedef _ChannelDeleteDart = int Function(int, int, Pointer<Utf8>);
@@ -232,7 +236,8 @@ typedef _DownloadAvatarDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
 
 // ─── Permission management ──────────────────────────────────────────
 
-// ts_get_server_groups() / ts_get_channel_groups() -> *char (JSON array)
+// ts_get_server_groups() / ts_get_channel_groups() / ts_get_server_info()
+// -> *char (JSON)
 typedef _GetGroupsNative = Pointer<Utf8> Function();
 typedef _GetGroupsDart = Pointer<Utf8> Function();
 
@@ -405,6 +410,9 @@ final _channelCreate = _lib
 final _channelEdit = _lib.lookupFunction<_ChannelEditNative, _ChannelEditDart>(
   'ts_channel_edit',
 );
+final _serverEdit = _lib.lookupFunction<_ServerEditNative, _ServerEditDart>(
+  'ts_server_edit',
+);
 final _channelDelete = _lib
     .lookupFunction<_ChannelDeleteNative, _ChannelDeleteDart>(
       'ts_channel_delete',
@@ -434,6 +442,9 @@ final _downloadAvatar = _lib
     );
 final _getServerGroups = _lib.lookupFunction<_GetGroupsNative, _GetGroupsDart>(
   'ts_get_server_groups',
+);
+final _getServerInfo = _lib.lookupFunction<_GetGroupsNative, _GetGroupsDart>(
+  'ts_get_server_info',
 );
 final _getChannelGroups = _lib.lookupFunction<_GetGroupsNative, _GetGroupsDart>(
   'ts_get_channel_groups',
@@ -812,6 +823,22 @@ class TsNative {
     }
   }
 
+  /// Edits server properties. [args] is a `ServerEditArgs` map (see
+  /// native/src/lib.rs); absent keys are left untouched, an empty password
+  /// clears the server password. [token] is required (see [createChannel]).
+  /// Returns true when the request was queued.
+  static bool serverEdit(Map<String, Object?> args, {required String token}) {
+    debugLog('serverEdit(keys=${args.keys.toList()})');
+    final ptr = _strToPtr(jsonEncode(args));
+    final tok = _strToPtr(token);
+    try {
+      return _serverEdit(ptr, tok) != 0;
+    } finally {
+      malloc.free(ptr);
+      malloc.free(tok);
+    }
+  }
+
   /// Deletes a channel. [force] also removes a channel that still has
   /// clients in it (requires the force-delete permission). [token] is
   /// required (see [createChannel]). Returns true when the request was queued.
@@ -985,6 +1012,16 @@ class TsNative {
   static List<Map<String, dynamic>> getServerGroups() {
     final str = _ptrToString(_getServerGroups());
     return (jsonDecode(str) as List).cast<Map<String, dynamic>>();
+  }
+
+  /// Server property snapshot (`name` / `max_clients` (null when unknown) /
+  /// `welcome_message`) for the server-settings dialog prefill. Refreshed by
+  /// the book, so a successful [serverEdit] shows up on the next event. The
+  /// password is never readable. Empty map when not connected.
+  static Map<String, dynamic> getServerInfo() {
+    final str = _ptrToString(_getServerInfo());
+    if (str.isEmpty) return {};
+    return (jsonDecode(str) as Map).cast<String, dynamic>();
   }
 
   /// All channel groups known locally (JSON array).

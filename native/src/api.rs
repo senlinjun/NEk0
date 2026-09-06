@@ -257,6 +257,17 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                 sort_id: g.sort_id,
             })
             .collect();
+        // Server property snapshot for the server-settings dialog prefill;
+        // `notifyserveredited` updates the book, so a successful serveredit
+        // lands here on the next book event batch.
+        state.server_name = book.server.name.clone();
+        state.server_max_clients = Some(book.server.max_clients);
+        state.server_welcome_message = book.server.welcome_message.clone();
+        state.server_has_password = book
+            .server
+            .optional_data
+            .as_ref()
+            .map(|o| o.has_password);
     }
     let channels = book
         .channels
@@ -2826,6 +2837,67 @@ async fn event_loop(
                         .send_with_result(&mut con);
                     perm_op_send(result, &token);
                 }
+                Command::ServerEdit { args, token } => {
+                    // password: None = untouched, Some("") = clear,
+                    // Some(p) = set (hashed, same encoding as the channel
+                    // password — see ChannelCreate/ChannelEdit).
+                    let password = match args.password {
+                        None => None,
+                        Some(ref p) if p.is_empty() => Some(Cow::Borrowed("")),
+                        Some(ref p) => Some(Cow::Owned(
+                            tsproto_types::crypto::encode_password(p.as_bytes()),
+                        )),
+                    };
+                    let part = OutServerEditPart {
+                        server_id: None,
+                        name: args.name.map(Cow::Owned),
+                        welcome_message: args.welcome_message.map(Cow::Owned),
+                        max_clients: args.max_clients,
+                        password,
+                        hostmessage: None,
+                        hostmessage_mode: None,
+                        hostbanner_url: None,
+                        hostbanner_gfx_url: None,
+                        hostbanner_gfx_interval: None,
+                        hostbutton_tooltip: None,
+                        hostbutton_url: None,
+                        hostbutton_gfx_url: None,
+                        icon: None,
+                        reserved_slots: None,
+                        hostbanner_mode: None,
+                        nickname: None,
+                        max_download_bandwidth_total: None,
+                        max_upload_bandwidth_total: None,
+                        download_quota: None,
+                        upload_quota: None,
+                        antiflood_points_tick_reduce: None,
+                        antiflood_points_to_command_block: None,
+                        antiflood_points_to_ip_block: None,
+                        codec_encryption_mode: None,
+                        needed_identity_security_level: None,
+                        default_server_group: None,
+                        default_channel_group: None,
+                        default_channel_admin_group: None,
+                        complain_autoban_count: None,
+                        complain_autoban_time: None,
+                        complain_remove_time: None,
+                        min_clients_in_channel_before_forced_silence: None,
+                        priority_speaker_dimm_modificator: None,
+                        phonetic_name: None,
+                        temp_channel_default_delete_delay: None,
+                        weblist_enabled: None,
+                        log_client: None,
+                        log_query: None,
+                        log_channel: None,
+                        log_permissions: None,
+                        log_server: None,
+                        log_filetransfer: None,
+                    };
+                    push_diag("server edit: sent");
+                    let result = OutServerEditMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
                 Command::ChannelDelete {
                     channel_id,
                     force,
@@ -4378,6 +4450,28 @@ pub extern "C" fn ts_channel_edit(
     }
 }
 
+/// Edits server properties (`serveredit`). `args_json` is a
+/// [crate::ServerEditArgs] (absent fields stay untouched, an empty password
+/// clears it). The outcome arrives as a `perm_op` event carrying `token`.
+/// Returns 1 when queued, 0 when not connected / bad arguments.
+#[no_mangle]
+pub extern "C" fn ts_server_edit(args_json: *const c_char, token: *const c_char) -> u8 {
+    if args_json.is_null() || token.is_null() {
+        return 0;
+    }
+    unsafe {
+        let token = cstr_to_string(token);
+        if token.is_empty() {
+            return 0;
+        }
+        let args: crate::ServerEditArgs = match serde_json::from_str(&cstr_to_string(args_json)) {
+            Ok(a) => a,
+            Err(_) => return 0,
+        };
+        try_send_cmd(Command::ServerEdit { args, token }) as u8
+    }
+}
+
 /// Deletes a channel. `force != 0` also removes a channel that still has
 /// clients in it (they are moved to the default channel; requires the
 /// force-delete permission). Returns 1 when queued, 0 when not connected.
@@ -4528,6 +4622,25 @@ pub extern "C" fn ts_get_server_groups() -> *mut c_char {
         return to_c_str("[]".to_string());
     }
     to_c_str(serde_json::to_string(&state.server_groups).unwrap_or_else(|_| "[]".into()))
+}
+
+/// Server property snapshot (from InitServer, refreshed on every book event
+/// batch — see `refresh_from_book`). JSON `TsServerInfo`; used to prefill
+/// the server-settings page. The password is never readable and has no
+/// entry — only `has_password` (null while unknown).
+#[no_mangle]
+pub extern "C" fn ts_get_server_info() -> *mut c_char {
+    let state = STATE.lock();
+    if !state.connected {
+        return to_c_str("{}".to_string());
+    }
+    let info = crate::TsServerInfo {
+        name: state.server_name.clone(),
+        welcome_message: state.server_welcome_message.clone(),
+        max_clients: state.server_max_clients,
+        has_password: state.server_has_password,
+    };
+    to_c_str(serde_json::to_string(&info).unwrap_or_else(|_| "{}".into()))
 }
 
 /// All channel groups known to the book (empty until `channelgrouplist` was

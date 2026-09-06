@@ -522,6 +522,30 @@ class AppLocalizationsZh extends AppLocalizations {
   String get menuServerTitle => '服务器';
 
   @override
+  String get menuEditServer => '编辑服务器';
+
+  @override
+  String get serverSettingsTitle => '服务器设置';
+
+  @override
+  String get serverMaxClientsLabel => '最大用户数';
+
+  @override
+  String get serverPasswordLabel => '服务器密码';
+
+  @override
+  String get serverPasswordHelper => '留空保持当前密码不变';
+
+  @override
+  String get serverPasswordRemove => '移除服务器密码';
+
+  @override
+  String get serverSaved => '服务器已更新';
+
+  @override
+  String get serverReadOnlyHint => '你没有修改服务器设置的权限';
+
+  @override
   String get menuCreateChannel => '新建频道';
 
   @override

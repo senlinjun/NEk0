@@ -906,6 +906,31 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     );
   }
 
+  /// Edits server properties (`serveredit`). Null fields are left untouched;
+  /// an empty [password] clears it (null keeps it). Returns null on success
+  /// or an error description. On success with a [name], the local server
+  /// name is updated optimistically so tree and app bar refresh at once —
+  /// the authoritative value arrives via the book either way.
+  Future<String?> editServer({
+    String? name,
+    String? password,
+    int? maxClients,
+    String? welcomeMessage,
+  }) async {
+    final error = await _permOp(
+      (t) => TsNative.serverEdit({
+        if (name != null) 'name': name,
+        if (password != null) 'password': password,
+        if (maxClients != null) 'max_clients': maxClients,
+        if (welcomeMessage != null) 'welcome_message': welcomeMessage,
+      }, token: t),
+    );
+    if (error == null && name != null) {
+      state = state.copyWith(serverName: name);
+    }
+    return error;
+  }
+
   /// Deletes a channel ([force] also removes one that still has clients —
   /// its occupants are moved to the default channel). Returns null on
   /// success or an error description.

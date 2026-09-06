@@ -57,6 +57,10 @@ pub enum Command {
     ChannelCreate { args: ChannelArgs, token: String },
     /// Edit channel properties (`channeledit`). See [ChannelArgs].
     ChannelEdit { channel_id: u32, args: ChannelArgs, token: String },
+    /// Edit server properties (`serveredit`). See [ServerEditArgs]; every
+    /// field is optional — absent = leave untouched. `token` correlates the
+    /// server's answer (see ChannelCreate).
+    ServerEdit { args: ServerEditArgs, token: String },
     /// Delete a channel (`channeldelete`). `force` also removes a channel
     /// that still has clients in it (needs the force-delete permission).
     ChannelDelete {
@@ -357,6 +361,34 @@ pub struct ChannelArgs {
     pub order: Option<u32>,
 }
 
+/// Body of the `args_json` parameter of `ts_server_edit`. Every field is
+/// optional: an absent field leaves the server property untouched.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ServerEditArgs {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// None = untouched; Some("") = clear; Some(p) = set (hashed like the
+    /// channel password, see [ChannelArgs::password]).
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub max_clients: Option<u16>,
+    #[serde(default)]
+    pub welcome_message: Option<String>,
+}
+
+/// Server property snapshot served by `ts_get_server_info` for the
+/// server-settings page prefill (see [TsConnection] fields it is built
+/// from). The password itself is never readable — only whether one is set
+/// (null while the server has not sent the optional data block).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TsServerInfo {
+    pub name: String,
+    pub welcome_message: String,
+    pub max_clients: Option<u16>,
+    pub has_password: Option<bool>,
+}
+
 /// A server group (from the book's `server_groups` map, which is populated
 /// by `servergrouplist` — requested by us on connect).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -503,6 +535,15 @@ pub struct TsConnection {
     pub connected: bool,
     pub connecting: bool,
     pub server_name: String,
+    /// Server property snapshot for the server-settings dialog prefill
+    /// (`ts_get_server_info`). Refreshed by `refresh_from_book`, so a
+    /// successful `serveredit` shows up on the next book event. The password
+    /// is never readable and has no snapshot.
+    pub server_max_clients: Option<u16>,
+    pub server_welcome_message: String,
+    /// From `optional_data` (sent by `notifyserverupdated` — we never request
+    /// server variables, so this usually stays null).
+    pub server_has_password: Option<bool>,
     pub nickname: String,
     pub own_client_id: u32,
     pub channels: Vec<TsChannel>,
@@ -551,6 +592,9 @@ impl TsConnection {
             connected: false,
             connecting: false,
             server_name: String::new(),
+            server_max_clients: None,
+            server_welcome_message: String::new(),
+            server_has_password: None,
             nickname: String::new(),
             own_client_id: 0,
             channels: Vec::new(),
