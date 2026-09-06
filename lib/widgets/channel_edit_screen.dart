@@ -205,7 +205,7 @@ class _ChannelEditScreenState extends State<ChannelEditScreen> {
     final al = AppLocalizations.of(context);
     final hasName = _name.text.trim().isNotEmpty;
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F23),
+      // Transparent so the app-wide custom background shows through.
       appBar: AppBar(
         title: Text(
           _isEdit ? al.channelEditTitle : al.channelCreateTitle,

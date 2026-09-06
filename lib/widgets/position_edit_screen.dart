@@ -68,7 +68,7 @@ class _PositionEditScreenState extends ConsumerState<PositionEditScreen> {
     final al = AppLocalizations.of(context);
     final positioned = _x != null && _y != null;
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F23),
+      // Transparent so the app-wide custom background shows through.
       appBar: AppBar(
         title: Text(
           al.positionTitle,
