@@ -4,7 +4,8 @@ use crate::{
     COMMAND_TX, FRAME_SIZE, FT_CLIENT_FT, FT_KIND_DOWNLOAD, FT_KIND_UPLOAD, FT_LISTS, FT_OPS,
     FT_TASK_BY_RC, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, PERM_OPS, PLAYED_SAMPLES,
     ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
-    SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, OUTPUT_RESTART_REQUESTED, PendingFtList,
+    SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
+    PendingFtList,
 };
 
 use futures::prelude::*;
@@ -2122,6 +2123,7 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
+                                        to_client_id: 0,
                                         target_mode: 3u8,
                                         message: message.clone(),
                                     });
@@ -2130,14 +2132,20 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
+                                        to_client_id: 0,
                                         target_mode: 2u8,
                                         message: message.clone(),
                                     });
                                 }
-                                tsclientlib::MessageTarget::Client(_) => {
+                                tsclientlib::MessageTarget::Client(target_id) => {
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
+                                        // The echo of our own sent PM carries the
+                                        // OTHER party here — that is what lets
+                                        // Dart file the message under the right
+                                        // conversation.
+                                        to_client_id: target_id.0 as u32,
                                         target_mode: 1u8,
                                         message: message.clone(),
                                     });
@@ -2227,6 +2235,7 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                         STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                             from_client: p.invoker_name.clone(),
                             from_client_id: p.invoker_id.0 as u32,
+                            to_client_id: p.target_client_id.map(|c| c.0 as u32).unwrap_or(0),
                             target_mode: p.target as u8,
                             message: p.message.clone(),
                         });
@@ -2309,6 +2318,21 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                         ok: res.is_ok(),
                         error: err_text.clone(),
                     });
+                }
+                // A text-message send that the server refused (missing send
+                // permission etc.) — tell Dart instead of dropping the
+                // message silently.
+                if TEXT_SENDS.lock().remove(&handle.0) {
+                    if let Some(e) = res.as_ref().err() {
+                        let reason = match e.missing_permission {
+                            Some(perm) => format!("missing permission {}", perm.0),
+                            None => format!("{:?}", e.error),
+                        };
+                        push_diag(&format!("text message rejected: {}", reason));
+                        STATE.lock().pending_events.push_back(TsEvent::SendFailed {
+                            error: reason,
+                        });
+                    }
                 }
                 if let Some(op) = FT_OPS.lock().remove(&handle.0) {
                     push_diag(&format!(
@@ -2502,6 +2526,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
             }
             return;
@@ -2511,18 +2536,34 @@ async fn event_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 Command::SendMessage {
-                    target_mode: _,
-                    target_cid: _,
+                    target_mode,
+                    target_cid,
                     message,
                 } => {
+                    // target_mode follows the wire encoding: 1=Client, 2=Channel
+                    // (default), 3=Server.
+                    let (target, target_client_id) = match target_mode {
+                        1 => (
+                            tsclientlib::TextMessageTargetMode::Client,
+                            Some(ClientId(target_cid as u16)),
+                        ),
+                        3 => (tsclientlib::TextMessageTargetMode::Server, None),
+                        _ => (tsclientlib::TextMessageTargetMode::Channel, None),
+                    };
                     let part = OutSendTextMessagePart {
-                        target: tsclientlib::TextMessageTargetMode::Channel,
-                        target_client_id: None,
+                        target,
+                        target_client_id,
                         message: Cow::Owned(message),
                     };
+                    // send_with_result attaches a return_code so the server's
+                    // answer (e.g. a permission rejection) resolves through
+                    // StreamItem::MessageResult instead of a bare CommandError;
+                    // TEXT_SENDS marks which return_codes are ours.
                     let result =
-                        OutSendTextMessageMessage::new(&mut std::iter::once(part)).send(&mut con);
-                    if result.is_ok() {
+                        OutSendTextMessageMessage::new(&mut std::iter::once(part))
+                            .send_with_result(&mut con);
+                    if let Ok(handle) = result {
+                        TEXT_SENDS.lock().insert(handle.0);
                         // Outbound chat sound (the server echoes the message
                         // back; the inbound sound skips our own echoes).
                         push_sfx(SFX_CHAT_OUTBOUND, "message sent");
@@ -3293,6 +3334,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                     }
                     return;
@@ -3413,6 +3455,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                 }
                 // The stream errored out (same termination as Ok(None)):
@@ -3447,6 +3490,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                 }
                 // The stream is truly over — do not fall through to the
@@ -3491,6 +3535,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                     }
                     // The stream errored out — return immediately instead of
@@ -3546,6 +3591,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
             }
             return;
@@ -3717,6 +3763,60 @@ pub extern "C" fn ts_send_channel_message(_cid: u32, msg: *const c_char) -> u8 {
         if tx
             .send(Command::SendMessage {
                 target_mode: 2,
+                target_cid: 0,
+                message: msg,
+            })
+            .is_ok()
+        {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ts_send_private_message(client_id: u16, msg: *const c_char) -> u8 {
+    let msg = unsafe { std::ffi::CStr::from_ptr(msg) }
+        .to_string_lossy()
+        .into_owned();
+    if !STATE.lock().connected {
+        return 0;
+    }
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        if tx
+            .send(Command::SendMessage {
+                target_mode: 1,
+                target_cid: client_id as u64,
+                message: msg,
+            })
+            .is_ok()
+        {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ts_send_server_message(msg: *const c_char) -> u8 {
+    let msg = unsafe { std::ffi::CStr::from_ptr(msg) }
+        .to_string_lossy()
+        .into_owned();
+    if !STATE.lock().connected {
+        return 0;
+    }
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        if tx
+            .send(Command::SendMessage {
+                target_mode: 3,
                 target_cid: 0,
                 message: msg,
             })

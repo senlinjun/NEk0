@@ -36,8 +36,6 @@ class ServerScreen extends ConsumerStatefulWidget {
 }
 
 class _ServerScreenState extends ConsumerState<ServerScreen> {
-  int _lastSeenMessageCount = 0;
-
   /// Cached server-group list for the user-list privilege badges. Refreshed
   /// only when the server (name) changes or the list is still empty (the
   /// group list arrives shortly after connect, not with the first roster).
@@ -803,13 +801,17 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             .canManagePermissions,
         ownPrivilegeTier: ownPrivilegeTier,
         channels: conn.channels,
+        onOpenChat: () => _openPrivateChat(client.id),
       ),
     );
   }
 
   void _openChat() async {
-    final conn = ref.read(tsConnectionProvider);
-    if (conn.selectedChannelId == null) return;
+    // Offer the server-chat tab whenever our (low-threshold) permission hint
+    // doesn't rule it out — an actual rejection still surfaces as a
+    // snackbar from the chat panel.
+    final notifier = ref.read(tsConnectionProvider.notifier);
+    if (notifier.canServerChat) notifier.openServerChat();
 
     await showModalBottomSheet(
       context: context,
@@ -820,19 +822,48 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       ),
       builder: (ctx) => SizedBox(
         height: MediaQuery.of(context).size.height * 0.75,
-        child: ChatPanel(channelId: conn.selectedChannelId!),
+        child: const ChatPanel(),
       ),
     );
-    // Reset badge after sheet closes (re-read for latest count)
+    // Every open conversation counts as seen once the sheet closes.
     if (mounted) {
-      final latest = ref.read(tsConnectionProvider);
-      setState(() => _lastSeenMessageCount = latest.messages.length);
+      ref.read(tsConnectionProvider.notifier).markAllConversationsSeen();
+      setState(() {}); // refresh the chat bar badge
     }
+  }
+
+  /// Entry point from the client sheet: open the PM tab for [clientId] and
+  /// bring the chat panel up on it.
+  void _openPrivateChat(int clientId) {
+    ref.read(tsConnectionProvider.notifier).openPrivateChat(clientId);
+    _openChat();
+  }
+
+  /// Prefix for the chat bar preview when the newest message is not a
+  /// channel message (null = plain channel chat, shown without a prefix).
+  String? _conversationPrefix(TsConnectionState conn, String conversation) {
+    if (conversation == 'server') {
+      return AppLocalizations.of(context).chatServer;
+    }
+    if (conversation.startsWith('pm:')) {
+      final id = int.parse(conversation.substring(3));
+      return conn.conversationTitles[conversation] ??
+          conn.clients.where((c) => c.id == id).firstOrNull?.nickname;
+    }
+    return null;
   }
 
   Widget _buildChatBar(TsConnectionState conn) {
     final lastMsg = conn.messages.isNotEmpty ? conn.messages.last : null;
-    final unread = conn.messages.length - _lastSeenMessageCount;
+    final unread = ref.read(tsConnectionProvider.notifier).unreadCount();
+    final prefix = lastMsg == null
+        ? null
+        : _conversationPrefix(conn, lastMsg.conversationId);
+    final preview = lastMsg == null
+        ? null
+        : prefix == null
+        ? '${lastMsg.fromClient}: ${lastMsg.message}'
+        : '$prefix · ${lastMsg.fromClient}: ${lastMsg.message}';
 
     return GestureDetector(
       key: _chatKey,
@@ -849,11 +880,16 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
               AppLocalizations.of(context).chat,
               style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
-            const Spacer(),
-            if (lastMsg != null)
-              Flexible(
+            // The preview must sit flush against the right edge: an Expanded
+            // right-aligned Text does that in both the short (text hugs the
+            // right) and the long (ellipsis at the right) case. Spacer +
+            // Flexible would split the free space 50/50 and let unused space
+            // pile up at the row's end, drifting the cluster leftwards.
+            if (preview != null)
+              Expanded(
                 child: Text(
-                  '${lastMsg.fromClient}: ${lastMsg.message}',
+                  preview,
+                  textAlign: TextAlign.right,
                   style: const TextStyle(
                     color: Color(0xFF555577),
                     fontSize: 11,
@@ -861,7 +897,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                   overflow: TextOverflow.ellipsis,
                   maxLines: 1,
                 ),
-              ),
+              )
+            else
+              const Spacer(),
             if (unread > 0) ...[
               const SizedBox(width: 6),
               Container(
@@ -1032,6 +1070,10 @@ class _ClientVolumeSheet extends StatefulWidget {
   /// Snapshot of the channel roster for the move-to-channel picker.
   final List<TsChannel> channels;
 
+  /// Opens the chat panel on this client's private conversation (the screen
+  /// closes this sheet first).
+  final VoidCallback onOpenChat;
+
   const _ClientVolumeSheet({
     required this.client,
     required this.notifier,
@@ -1040,6 +1082,7 @@ class _ClientVolumeSheet extends StatefulWidget {
     required this.ownCanManagePermissions,
     required this.ownPrivilegeTier,
     required this.channels,
+    required this.onOpenChat,
   });
 
   @override
@@ -1173,6 +1216,22 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
                 onPressed: () => pushPositionEditPage(context, c),
               ),
             ],
+            // ── Private chat (a communication entry, not a moderation
+            // action; ServerQuery clients cannot take part) ──
+            if (!isSelf && _canShowPrivateMessage(c)) ...[
+              const SizedBox(height: 8),
+              _actionButton(
+                context,
+                icon: Icons.chat_bubble_outline,
+                label: al.sendMessageAction,
+                onPressed: () {
+                  // Close this sheet first — the chat panel opens as the
+                  // next sheet on the same route stack.
+                  Navigator.of(context).pop();
+                  widget.onOpenChat();
+                },
+              ),
+            ],
             const SizedBox(height: 20),
             // ── Permission-gated actions (never for ourselves) ──
             if (!isSelf && _hasAnyAction(c)) ...[
@@ -1250,6 +1309,12 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
   /// (`permissionHints == 0`) it is shown by default; once hints are known,
   /// the POKE bit gates it.
   bool _canShowPoke(TsClient c) => c.permissionHints == 0 || c.canPoke;
+
+  /// Private messaging follows the same "unknown → optimistic" policy as
+  /// poke, and ServerQuery clients (clientType != 0) never get the entry —
+  /// they cannot take part in client chat.
+  bool _canShowPrivateMessage(TsClient c) =>
+      c.clientType == 0 && (c.permissionHints == 0 || c.canPrivateMessage);
 
   /// Moderation actions are "unknown → optimistic": while the server has not
   /// pushed the client's permission-hint bits (`permissionHints == 0`) the

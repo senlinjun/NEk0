@@ -409,6 +409,20 @@ class AppLocalizationsEn extends AppLocalizations {
   String get sendMessageHint => 'Send a message...';
 
   @override
+  String get chatChannel => 'Channel';
+
+  @override
+  String get chatServer => 'Server';
+
+  @override
+  String get sendMessageAction => 'Send message';
+
+  @override
+  String messageSendFailed(String error) {
+    return 'Message not sent: $error';
+  }
+
+  @override
   String get addServerTitle => 'Add Server';
 
   @override

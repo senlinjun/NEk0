@@ -866,6 +866,30 @@ abstract class AppLocalizations {
   /// **'Send a message...'**
   String get sendMessageHint;
 
+  /// No description provided for @chatChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel'**
+  String get chatChannel;
+
+  /// No description provided for @chatServer.
+  ///
+  /// In en, this message translates to:
+  /// **'Server'**
+  String get chatServer;
+
+  /// No description provided for @sendMessageAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Send message'**
+  String get sendMessageAction;
+
+  /// No description provided for @messageSendFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Message not sent: {error}'**
+  String messageSendFailed(String error);
+
   /// No description provided for @addServerTitle.
   ///
   /// In en, this message translates to:

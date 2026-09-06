@@ -32,6 +32,27 @@ class TsConnectionState {
   final List<ChatMessage> messages;
   final int? selectedChannelId;
 
+  /// Chat conversations that exist this session (`channel`, `server`,
+  /// `pm:<clid>`), in tab order. `channel` is always open; `server` opens
+  /// when permitted; PM conversations open on demand / on first message.
+  final List<String> openConversations;
+
+  /// The conversation the chat panel currently displays.
+  final String selectedConversation;
+
+  /// Display names for conversations (`pm:<clid>` -> peer nickname), so a
+  /// tab label survives the peer leaving the server.
+  final Map<String, String> conversationTitles;
+
+  /// Unread messages per conversation, keyed by message id. Only messages
+  /// from OTHER people ever enter the set — the echo of our own sends is
+  /// seen by definition and never counts as new.
+  final Map<String, Set<int>> unreadIds;
+
+  /// The last text-message send the server rejected (raw reason). Transient
+  /// marker consumed by the chat panel to show a snackbar.
+  final String? sendFailedError;
+
   /// Channel id whose join was just rejected because of a wrong password.
   /// Transient marker consumed by the server screen to re-open the prompt.
   final int? failedPasswordChannelId;
@@ -63,6 +84,11 @@ class TsConnectionState {
     this.clients = const [],
     this.messages = const [],
     this.selectedChannelId,
+    this.openConversations = const ['channel'],
+    this.selectedConversation = 'channel',
+    this.conversationTitles = const {},
+    this.unreadIds = const {},
+    this.sendFailedError,
     this.failedPasswordChannelId,
     this.askForPrivilegeKey = false,
     this.error,
@@ -88,6 +114,11 @@ class TsConnectionState {
     List<TsChannel>? channels,
     List<TsClient>? clients,
     List<ChatMessage>? messages,
+    List<String>? openConversations,
+    String? selectedConversation,
+    Map<String, String>? conversationTitles,
+    Map<String, Set<int>>? unreadIds,
+    Object? sendFailedError = _sentinel,
     Object? selectedChannelId = _sentinel,
     Object? failedPasswordChannelId = _sentinel,
     bool? askForPrivilegeKey,
@@ -112,6 +143,13 @@ class TsConnectionState {
     channels: channels ?? this.channels,
     clients: clients ?? this.clients,
     messages: messages ?? this.messages,
+    openConversations: openConversations ?? this.openConversations,
+    selectedConversation: selectedConversation ?? this.selectedConversation,
+    conversationTitles: conversationTitles ?? this.conversationTitles,
+    unreadIds: unreadIds ?? this.unreadIds,
+    sendFailedError: sendFailedError == _sentinel
+        ? this.sendFailedError
+        : sendFailedError as String?,
     selectedChannelId: selectedChannelId == _sentinel
         ? this.selectedChannelId
         : selectedChannelId as int?,
@@ -198,6 +236,19 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         p.name == PermNames.groupMemberAdd ||
         p.name == PermNames.channelPermissionModify;
   });
+
+  /// Whether the server-chat tab is offered. `clientpermlist` only lists
+  /// DIRECTLY-assigned perms, so an empty list means "unknown" — same
+  /// low-threshold policy as [canManagePermissions] (show the tab; if the
+  /// server disagrees the send fails with an explicit `send_failed`
+  /// snackbar). A listed-but-negative permission hides it.
+  bool get canServerChat {
+    final entry = _ownPerms
+        .where((p) => p.name == PermNames.serverTextMessageSend)
+        .firstOrNull;
+    if (entry == null) return true;
+    return entry.effectivePositive;
+  }
 
   /// Localized strings without a BuildContext (same pattern as the
   /// notification labels).
@@ -461,15 +512,59 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         break;
 
       case 'text_message':
+        final fromClientId = event['from_client_id'] as int;
+        final targetMode = event['target_mode'] as int;
+        final toClientId = (event['to_client_id'] as int?) ?? 0;
+        final conversation = _conversationId(
+          targetMode,
+          fromClientId,
+          toClientId,
+        );
+        // A conversation that first appears through an incoming message
+        // (someone PMs us, a server-chat bot) opens itself so its tab shows
+        // up; the sender's nickname labels the tab.
+        var open = state.openConversations;
+        var titles = state.conversationTitles;
+        if (!open.contains(conversation)) {
+          open = [...open, conversation];
+        }
+        if (targetMode == 1 &&
+            fromClientId != state.ownClientId &&
+            titles[conversation] != event['from_client']) {
+          titles = {...titles, conversation: event['from_client'] as String};
+        }
         final msg = ChatMessage(
           id: state.messages.length,
           fromClient: event['from_client'] as String,
-          fromClientId: event['from_client_id'] as int,
-          targetMode: event['target_mode'] as int,
+          fromClientId: fromClientId,
+          targetMode: targetMode,
+          conversationId: conversation,
           message: event['message'] as String,
           timestamp: DateTime.now(),
         );
-        state = state.copyWith(messages: [...state.messages, msg]);
+        // Only messages from OTHER people ever become unread — the echo of
+        // our own send is seen by definition, even when the chat panel is
+        // closed and the echo lands after it.
+        Map<String, Set<int>>? unread = state.unreadIds;
+        if (fromClientId != state.ownClientId) {
+          unread = {
+            ...unread,
+            conversation: {...(unread[conversation] ?? const <int>{}), msg.id},
+          };
+        }
+        state = state.copyWith(
+          messages: [...state.messages, msg],
+          openConversations: open,
+          conversationTitles: titles,
+          unreadIds: unread,
+        );
+        break;
+
+      case 'send_failed':
+        // The server refused a text message (e.g. missing server-chat
+        // permission) — surface it in the chat panel instead of letting the
+        // message vanish.
+        state = state.copyWith(sendFailedError: event['error'] as String?);
         break;
 
       case 'poke':
@@ -597,15 +692,142 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
 
   Future<void> sendPrivateMessage(int clientId, String text) async {
     if (!state.connected || text.isEmpty) return;
-    final msg = ChatMessage(
-      id: state.messages.length,
-      fromClient: state.nickname,
-      fromClientId: state.ownClientId,
-      targetMode: 1,
-      message: text,
-      timestamp: DateTime.now(),
+    TsNative.sendPrivateMessage(clientId, text);
+    // Don't add optimistically — the server echoes our own PM back as a
+    // text_message event (invoker = us, target = the peer)
+  }
+
+  Future<void> sendServerMessage(String text) async {
+    if (!state.connected || text.isEmpty) return;
+    TsNative.sendServerMessage(text);
+    // Same echo behavior as channel/private messages
+  }
+
+  // ─── Chat conversations ─────────────────────────────────────────────
+
+  /// Conversation key a text message belongs to: channel and server chat are
+  /// single rooms; a PM belongs to the OTHER party — the sender for incoming
+  /// messages, the `target` client for the server's echo of our own sends.
+  String _conversationId(int targetMode, int fromClientId, int toClientId) {
+    switch (targetMode) {
+      case 1:
+        return 'pm:${fromClientId == state.ownClientId ? toClientId : fromClientId}';
+      case 3:
+        return 'server';
+      default:
+        return 'channel';
+    }
+  }
+
+  /// Opens (or focuses) the private conversation with [clientId], titled
+  /// with their current nickname. Called when starting a PM from the client
+  /// sheet — switches the chat panel to it.
+  void openPrivateChat(int clientId) {
+    final client = state.clients.where((c) => c.id == clientId).firstOrNull;
+    openConversation(
+      'pm:$clientId',
+      title: client?.nickname ?? '',
+      select: true,
     );
-    state = state.copyWith(messages: [...state.messages, msg]);
+  }
+
+  /// Ensures the server conversation tab exists (called when the chat panel
+  /// opens and we are allowed to participate in server chat). Does not
+  /// switch to it.
+  void openServerChat() => openConversation('server');
+
+  /// Adds [conversation] to the open tabs. [select] additionally focuses it
+  /// and marks it read; without it (incoming PM / server tab at panel open)
+  /// the current selection stays untouched and the tab just shows up with an
+  /// unread badge if applicable.
+  void openConversation(
+    String conversation, {
+    String? title,
+    bool select = false,
+  }) {
+    var open = state.openConversations;
+    var titles = state.conversationTitles;
+    if (!open.contains(conversation)) open = [...open, conversation];
+    if (title != null &&
+        title.isNotEmpty &&
+        conversation != 'channel' &&
+        conversation != 'server' &&
+        titles[conversation] != title) {
+      titles = {...titles, conversation: title};
+    }
+    if (select) {
+      state = state.copyWith(
+        openConversations: open,
+        conversationTitles: titles,
+        selectedConversation: conversation,
+        unreadIds: _markSeen(conversation),
+      );
+    } else {
+      state = state.copyWith(
+        openConversations: open,
+        conversationTitles: titles,
+      );
+    }
+  }
+
+  void selectConversation(String conversation) {
+    if (!state.openConversations.contains(conversation)) return;
+    state = state.copyWith(
+      selectedConversation: conversation,
+      unreadIds: _markSeen(conversation),
+    );
+  }
+
+  void closeConversation(String conversation) {
+    if (conversation == 'channel') return; // always present
+    final open = state.openConversations
+        .where((c) => c != conversation)
+        .toList();
+    state = state.copyWith(
+      openConversations: open,
+      selectedConversation: state.selectedConversation == conversation
+          ? 'channel'
+          : state.selectedConversation,
+      unreadIds: {...state.unreadIds}..remove(conversation),
+    );
+  }
+
+  /// Marks [conversation] as read — used by the chat panel for the
+  /// conversation currently on screen.
+  void markConversationSeen(String conversation) {
+    if (state.unreadIds[conversation]?.isEmpty ?? true) return;
+    state = state.copyWith(unreadIds: _markSeen(conversation));
+  }
+
+  /// Marks [conversation] as read (clears its unread set). Returns the new
+  /// unread map, or the existing one when there is nothing to clear — either
+  /// way it is safe to hand to copyWith.
+  Map<String, Set<int>> _markSeen(String conversation) {
+    if (state.unreadIds[conversation]?.isEmpty ?? true) {
+      return state.unreadIds;
+    }
+    return {...state.unreadIds, conversation: const <int>{}};
+  }
+
+  /// Marks every conversation as read (used when the chat panel closes).
+  void markAllConversationsSeen() {
+    if (!state.unreadIds.values.any((ids) => ids.isNotEmpty)) return;
+    state = state.copyWith(unreadIds: const {});
+  }
+
+  void clearSendFailure() {
+    if (state.sendFailedError != null) {
+      state = state.copyWith(sendFailedError: null);
+    }
+  }
+
+  /// Unread messages across all open conversations — the chat bar badge.
+  int unreadCount() {
+    var total = 0;
+    for (final conversation in state.openConversations) {
+      total += state.unreadIds[conversation]?.length ?? 0;
+    }
+    return total;
   }
 
   /// The password entered for a locked channel during this session

@@ -64,6 +64,14 @@ typedef _GetClientsDart = Pointer<Utf8> Function();
 typedef _SendChannelMsgNative = Uint8 Function(Uint32, Pointer<Utf8>);
 typedef _SendChannelMsgDart = int Function(int, Pointer<Utf8>);
 
+// ts_send_private_message(client_id, message) -> bool
+typedef _SendPrivateMsgNative = Uint8 Function(Uint16, Pointer<Utf8>);
+typedef _SendPrivateMsgDart = int Function(int, Pointer<Utf8>);
+
+// ts_send_server_message(message) -> bool
+typedef _SendServerMsgNative = Uint8 Function(Pointer<Utf8>);
+typedef _SendServerMsgDart = int Function(Pointer<Utf8>);
+
 // ts_move_to_channel(channel_id, password) -> bool
 // password: null/empty for unlocked channels; plaintext, hashed in Rust.
 typedef _MoveToChannelNative = Uint8 Function(Uint32, Pointer<Utf8>);
@@ -312,6 +320,14 @@ final _sendChannelMsg = _lib
     .lookupFunction<_SendChannelMsgNative, _SendChannelMsgDart>(
       'ts_send_channel_message',
     );
+final _sendPrivateMsg = _lib
+    .lookupFunction<_SendPrivateMsgNative, _SendPrivateMsgDart>(
+      'ts_send_private_message',
+    );
+final _sendServerMsg = _lib
+    .lookupFunction<_SendServerMsgNative, _SendServerMsgDart>(
+      'ts_send_server_message',
+    );
 final _moveToChannel = _lib
     .lookupFunction<_MoveToChannelNative, _MoveToChannelDart>(
       'ts_move_to_channel',
@@ -559,6 +575,20 @@ class TsNative {
     debugLog('sendChannelMessage(cid=$channelId, len=${message.length})');
     final result = _sendChannelMsg(channelId, _strToPtr(message));
     debugLog('sendChannelMessage -> $result');
+    return result != 0;
+  }
+
+  static bool sendPrivateMessage(int clientId, String message) {
+    debugLog('sendPrivateMessage(clid=$clientId, len=${message.length})');
+    final result = _sendPrivateMsg(clientId, _strToPtr(message));
+    debugLog('sendPrivateMessage -> $result');
+    return result != 0;
+  }
+
+  static bool sendServerMessage(String message) {
+    debugLog('sendServerMessage(len=${message.length})');
+    final result = _sendServerMsg(_strToPtr(message));
+    debugLog('sendServerMessage -> $result');
     return result != 0;
   }
 

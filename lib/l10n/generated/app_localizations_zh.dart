@@ -398,6 +398,20 @@ class AppLocalizationsZh extends AppLocalizations {
   String get sendMessageHint => '发送消息...';
 
   @override
+  String get chatChannel => '频道';
+
+  @override
+  String get chatServer => '服务器';
+
+  @override
+  String get sendMessageAction => '发送消息';
+
+  @override
+  String messageSendFailed(String error) {
+    return '消息发送失败：$error';
+  }
+
+  @override
   String get addServerTitle => '添加服务器';
 
   @override

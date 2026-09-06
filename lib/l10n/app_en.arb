@@ -147,6 +147,17 @@
 
   "noMessagesYet": "No messages yet",
   "sendMessageHint": "Send a message...",
+  "chatChannel": "Channel",
+  "chatServer": "Server",
+  "sendMessageAction": "Send message",
+  "messageSendFailed": "Message not sent: {error}",
+  "@messageSendFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
 
   "addServerTitle": "Add Server",
   "editServerTitle": "Edit Server",

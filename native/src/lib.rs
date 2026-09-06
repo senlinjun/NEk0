@@ -5,7 +5,7 @@ use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64};
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -247,8 +247,22 @@ pub enum TsEvent {
     Connected { server_name: String, client_id: u32, ask_for_privilegekey: bool },
     #[serde(rename = "disconnected")]
     Disconnected { reason: String },
+    /// `to_client_id` is the PM target (0 for channel/server messages): our
+    /// own id when someone private-messages us, the other party's id for the
+    /// server's echo of our own sent PMs — the piece that attributes an echo
+    /// to the right conversation on the Dart side.
     #[serde(rename = "text_message")]
-    TextMessage { from_client: String, from_client_id: u32, target_mode: u8, message: String },
+    TextMessage {
+        from_client: String,
+        from_client_id: u32,
+        to_client_id: u32,
+        target_mode: u8,
+        message: String,
+    },
+    /// The server rejected a text-message send (tracked via return_code,
+    /// see `TEXT_SENDS`) — e.g. missing `b_client_server_textmessage_send`.
+    #[serde(rename = "send_failed")]
+    SendFailed { error: String },
     #[serde(rename = "poke")]
     Poke { from_client: String, from_client_id: u32, message: String },
     #[serde(rename = "client_joined")]
@@ -432,6 +446,13 @@ pub struct TsPerm {
 /// `PermOp` event (same pattern as `FT_OPS`).
 pub static PERM_OPS: Lazy<Mutex<HashMap<u16, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Return_codes of in-flight text-message sends (`send_with_result`). A
+/// matching `MessageResult` with an error resolves into a `SendFailed` event
+/// so the UI can tell the user the message was rejected (e.g. missing
+/// `b_client_server_textmessage_send`) instead of it silently vanishing.
+pub static TEXT_SENDS: Lazy<Mutex<HashSet<u16>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TsClient {

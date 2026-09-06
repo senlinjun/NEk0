@@ -142,6 +142,17 @@
 
   "noMessagesYet": "暂无消息",
   "sendMessageHint": "发送消息...",
+  "chatChannel": "频道",
+  "chatServer": "服务器",
+  "sendMessageAction": "发送消息",
+  "messageSendFailed": "消息发送失败：{error}",
+  "@messageSendFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
 
   "addServerTitle": "添加服务器",
   "editServerTitle": "编辑服务器",
