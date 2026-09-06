@@ -82,6 +82,11 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
 - Kotlin gotcha: `android.app.Notification` has NO `setMediaSession()`/`mediaSession` member
   (verified via javap on the SDK jar). The session token attaches only through
   `Notification.MediaStyle().setMediaSession(token)` on the Builder (`buildNotification`).
+- `ndk-context` MUST be initialized before any cpal stream is built on Android: cpal/oboe
+  resolve the JVM through it (AudioTrack/AudioRecord buffer-size queries go through JNI)
+  and panic with "android context was not initialized" otherwise. A Flutter FFI app has
+  no ndk-glue, so `MainActivity.onCreate` calls the `tsInitAndroid` JNI export (see
+  `native/src/api.rs`) at the very top. Keep that ordering intact when touching startup.
 - Kotlin sources live under `kotlin/com/example/teamspeak_apk/` but declare
   `package com.senlinjun.nek0` (the applicationId). Keep the package, not the directory.
 

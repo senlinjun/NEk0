@@ -12,6 +12,7 @@ import android.media.MediaRecorder
 import android.net.Uri
 import android.app.PendingIntent
 import android.os.Build
+import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
@@ -24,6 +25,26 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class MainActivity : FlutterActivity() {
+    companion object {
+        init {
+            // Load the native library at app start so tsInitAndroid can bind
+            // before anything else. KeepAliveService loads it again later,
+            // which is a no-op.
+            try { System.loadLibrary("tsclient") } catch (_: Exception) {}
+        }
+    }
+
+    // Hands the JVM + application context to the Rust audio stack
+    // (ndk-context). cpal/oboe need it to build streams on Android; it must
+    // be initialized before the first connection, so it runs at the very top
+    // of onCreate.
+    private external fun tsInitAndroid(context: Context)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        tsInitAndroid(applicationContext)
+        super.onCreate(savedInstanceState)
+    }
+
     private var audioRecord: AudioRecord? = null
     @Volatile var isRecording = false
 

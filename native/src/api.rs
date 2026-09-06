@@ -1297,7 +1297,23 @@ fn pick_device(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
 /// and jitter/decoders are rebuilt on the next incoming audio. Called on
 /// connect and, from the maintenance task, when `OUTPUT_RESTART_REQUESTED`
 /// is set (device route change or stream error).
+///
+/// The rebuild runs inside `catch_unwind`: cpal's Android backend touches
+/// JNI-dependent paths (device probing, buffer-size queries), and a panic
+/// here must degrade to "no audio" instead of killing the enclosing task —
+/// on the connect path that task also owns the event loop, so its death
+/// would leave the UI without the channel tree. The panic hook still records
+/// the message (flushed to Dart as a Diag event).
 fn restart_output_stream() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        restart_output_stream_inner();
+    }));
+    if result.is_err() {
+        eprintln!("cpal: output stream rebuild panicked; audio stays off until the next restart");
+    }
+}
+
+fn restart_output_stream_inner() {
     // Drop the old stream first so the new one is the only active consumer.
     AUDIO_STREAM.lock().unwrap().0 = None;
     crate::clear_sfx_queue();
@@ -3796,6 +3812,48 @@ pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsRestartAudioOu
     _class: *mut std::ffi::c_void,
 ) {
     ts_restart_audio_output();
+}
+
+/// JNI entry called once from MainActivity.onCreate: hands the JVM and the
+/// application context to `ndk-context`, which cpal/oboe consult when they
+/// build audio streams on Android (the AudioTrack/AudioRecord buffer-size
+/// queries go through JNI). A plain Flutter FFI app has no ndk-glue, so
+/// nothing else initializes it — without this the first stream build panics
+/// with "android context was not initialized". Android-only.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_senlinjun_nek0_MainActivity_tsInitAndroid(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    context: jni::objects::JObject,
+) {
+    // initialize_android_context asserts when called twice; the guard also
+    // turns repeated MainActivity.onCreate calls (activity recreation) into
+    // no-ops.
+    static INITIALIZED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if INITIALIZED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let init = || -> Result<(), jni::errors::Error> {
+        let vm = env.get_java_vm()?;
+        // Leak the global reference on purpose: ndk-context stores the raw
+        // jobject for the process lifetime, so the ref must never be freed.
+        let gref = env.new_global_ref(&context)?;
+        let raw = gref.as_raw();
+        std::mem::forget(gref);
+        unsafe {
+            ndk_context::initialize_android_context(
+                vm.get_java_vm_pointer() as *mut std::ffi::c_void,
+                raw as *mut std::ffi::c_void,
+            );
+        }
+        Ok(())
+    };
+    match init() {
+        Ok(()) => eprintln!("tsInitAndroid: ndk-context initialized"),
+        Err(e) => eprintln!("tsInitAndroid failed: {}", e),
+    }
 }
 
 // ─── Poll / Getters ─────────────────────────────────────────────────

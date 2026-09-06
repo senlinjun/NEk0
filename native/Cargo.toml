@@ -36,6 +36,13 @@ base64 = "0.22"
 # the clientupdate that makes the new avatar visible to everyone.
 md-5 = "0.10"
 
+# Android-only: cpal/oboe resolve the JVM through ndk-context and query
+# AudioTrack buffer sizes via JNI when building streams. The context is
+# handed over by MainActivity via the tsInitAndroid JNI export (see api.rs).
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
 [patch."https://github.com/ReSpeak/tsclientlib.git"]
 tsclientlib = { path = "local_tsclientlib/tsclientlib" }
 tsproto = { path = "local_tsclientlib/tsproto" }
