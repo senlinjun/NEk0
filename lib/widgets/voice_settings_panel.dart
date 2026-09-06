@@ -29,6 +29,12 @@ class VoiceSettingsPanel extends StatefulWidget {
 }
 
 class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
+  /// Raw RMS that maps to a full level bar. Typical mics peak around 0.1,
+  /// so ×5 (full scale 0.2) leaves headroom for hotter mics; the bar and the
+  /// threshold slider are shown on this display scale, while the stored
+  /// threshold and the Rust VAD still use raw RMS.
+  static const double _meterFullScale = 0.2;
+
   late bool _pttMode;
   late bool _vadEnabled;
   late double _vadThreshold;
@@ -102,13 +108,14 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
           ],
         ),
         const SizedBox(height: 12),
-        // Threshold slider stacked on mic level bar (same 0–1 scale)
+        // Threshold slider stacked on mic level bar (×5 display scale over
+        // raw RMS 0.._meterFullScale)
         Builder(
           builder: (_) {
             final s = widget.conn;
             final micActive = !s.inputMuted && (!s.pttMode || s.pttPressed);
             final rms = widget.levelOverride ?? (micActive ? s.micRms : 0.0);
-            final fill = rms.clamp(0.0, 1.0);
+            final fill = (rms / _meterFullScale).clamp(0.0, 1.0);
             final over = rms >= _vadThreshold && _vadThreshold > 0.0;
             return Row(
               children: [
@@ -141,14 +148,21 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
                           disabledThumbColor: Colors.grey,
                         ),
                         child: Slider(
-                          value: _vadThreshold,
+                          value: (_vadThreshold / _meterFullScale).clamp(
+                            0.0,
+                            1.0,
+                          ),
                           min: 0.0,
                           max: 1.0,
                           onChanged: (_pttMode || !_vadEnabled)
                               ? null
                               : (v) {
-                                  setState(() => _vadThreshold = v);
-                                  widget.notifier.setVadThreshold(v);
+                                  final raw = (v * _meterFullScale).clamp(
+                                    0.0,
+                                    1.0,
+                                  );
+                                  setState(() => _vadThreshold = raw);
+                                  widget.notifier.setVadThreshold(raw);
                                 },
                         ),
                       ),
@@ -158,7 +172,7 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
                 SizedBox(
                   width: 42,
                   child: Text(
-                    _vadThreshold.toStringAsFixed(3),
+                    (_vadThreshold / _meterFullScale).toStringAsFixed(3),
                     style: const TextStyle(color: Colors.grey, fontSize: 11),
                   ),
                 ),
