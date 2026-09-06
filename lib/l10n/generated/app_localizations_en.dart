@@ -994,4 +994,19 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get openLinkFailed => 'Could not open the link';
+
+  @override
+  String get backgroundSection => 'Background';
+
+  @override
+  String get bgPickImage => 'Pick Image';
+
+  @override
+  String get bgDim => 'Dim';
+
+  @override
+  String get bgOpacity => 'Opacity';
+
+  @override
+  String get bgReset => 'Reset';
 }

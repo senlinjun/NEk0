@@ -1957,6 +1957,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Could not open the link'**
   String get openLinkFailed;
+
+  /// No description provided for @backgroundSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Background'**
+  String get backgroundSection;
+
+  /// No description provided for @bgPickImage.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick Image'**
+  String get bgPickImage;
+
+  /// No description provided for @bgDim.
+  ///
+  /// In en, this message translates to:
+  /// **'Dim'**
+  String get bgDim;
+
+  /// No description provided for @bgOpacity.
+  ///
+  /// In en, this message translates to:
+  /// **'Opacity'**
+  String get bgOpacity;
+
+  /// No description provided for @bgReset.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset'**
+  String get bgReset;
 }
 
 class _AppLocalizationsDelegate

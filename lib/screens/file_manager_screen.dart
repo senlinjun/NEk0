@@ -580,7 +580,6 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
     final connected = widget.connected;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F23),
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,

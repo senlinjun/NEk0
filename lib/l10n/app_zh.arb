@@ -385,5 +385,10 @@
   "about": "关于",
   "appVersion": "版本 {version}",
   "viewOnGitHub": "在 GitHub 上查看",
-  "openLinkFailed": "无法打开链接"
+  "openLinkFailed": "无法打开链接",
+  "backgroundSection": "背景",
+  "bgPickImage": "选择图片",
+  "bgDim": "背景变暗",
+  "bgOpacity": "背景不透明度",
+  "bgReset": "恢复默认"
 }

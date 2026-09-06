@@ -420,5 +420,10 @@
     }
   },
   "viewOnGitHub": "View on GitHub",
-  "openLinkFailed": "Could not open the link"
+  "openLinkFailed": "Could not open the link",
+  "backgroundSection": "Background",
+  "bgPickImage": "Pick Image",
+  "bgDim": "Dim",
+  "bgOpacity": "Opacity",
+  "bgReset": "Reset"
 }

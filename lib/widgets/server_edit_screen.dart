@@ -134,7 +134,7 @@ class _ServerEditScreenState extends State<ServerEditScreen> {
     final canEdit = widget.canEdit;
     final hasName = _name.text.trim().isNotEmpty;
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F23),
+      // Transparent so the app-wide custom background shows through.
       appBar: AppBar(
         title: Text(
           al.serverSettingsTitle,

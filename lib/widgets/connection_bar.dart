@@ -21,7 +21,8 @@ class ConnectionBar extends StatelessWidget {
     return Container(
       height: 44,
       padding: const EdgeInsets.symmetric(horizontal: 12),
-      color: const Color(0xFF16213E),
+      // Translucent so a custom background tints through.
+      color: const Color(0xD916213E),
       child: Row(
         children: [
           Icon(

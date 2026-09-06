@@ -80,7 +80,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final serverState = ref.watch(serverListProvider);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F23),
       appBar: AppBar(
         title: const Text('NEk0'),
         backgroundColor: const Color(0xFF16213E),

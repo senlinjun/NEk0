@@ -244,7 +244,6 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     final connNotifier = ref.read(tsConnectionProvider.notifier);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F23),
       body: SafeArea(
         child: Column(
           children: [
@@ -610,7 +609,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     TsConnectionNotifier notifier,
   ) {
     return Container(
-      color: const Color(0xFF12122A),
+      // Transparent root so the app-wide custom background shows through
+      // behind the channel tree and the user list; the section headers above
+      // and below stay opaque as visual anchors.
       child: Column(
         children: [
           Container(
@@ -873,7 +874,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       onTap: _openChat,
       child: Container(
         height: 36,
-        color: const Color(0xFF16213E),
+        // Translucent so a custom background tints through (same for the
+        // other bars on this screen).
+        color: const Color(0xD916213E),
         padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Row(
           children: [
@@ -938,7 +941,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
 
     return Container(
       height: 52,
-      color: const Color(0xFF16213E),
+      // Translucent so a custom background tints through.
+      color: const Color(0xD916213E),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
