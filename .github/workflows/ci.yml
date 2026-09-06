@@ -127,5 +127,5 @@ jobs:
           files: Nek0_${{github.ref_name}}_windows_x64.zip
     - name: Gitee Release
       run: |
-          sudo apt install python3-requests
-          python3 release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file Nek0_${{github.ref_name}}_windows_x64.zip
+          pip install requests
+          python release_to_gitee.py --token ${{ secrets.GITEE_TOKEN}} --tag ${{github.ref_name}} --server ${{ secrets.PROXY_SERVER }} --psw ${{ secrets.PSW }} --file Nek0_${{github.ref_name}}_windows_x64.zip
