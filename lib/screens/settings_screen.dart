@@ -1,18 +1,22 @@
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../l10n/generated/app_localizations.dart';
 import '../models/app_locale.dart';
-import '../models/app_settings.dart';
+import '../models/background_settings.dart';
 import '../models/ts_state.dart';
 import '../services/audio_service.dart';
 import '../services/background_service.dart';
 import '../services/ota_service.dart';
 import '../services/sfx_service.dart';
+import '../services/ts_ffi.dart';
 import '../widgets/voice_settings_panel.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -24,10 +28,12 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   static const _languageOptions = ['system', 'en', 'zh'];
+  static const _githubUrl = 'https://github.com/senlinjun/NEk0';
 
   final OtaSettings _ota = OtaSettings();
   bool _otaLoaded = false;
   String _languageCode = 'system';
+  String _version = '';
 
   AudioService? _testAudio;
   bool _micTest = false;
@@ -35,15 +41,102 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final Map<int, String?> _sfxNames = {};
   String? _bgName;
 
+  // Audio device picker (desktop only; '' = system default).
+  List<Map<String, dynamic>> _outputDevices = [];
+  List<Map<String, dynamic>> _inputDevices = [];
+  String _outputDevice = '';
+  String _inputDevice = '';
+
   @override
   void initState() {
     super.initState();
     _ota.load().then((_) {
       if (mounted) setState(() => _otaLoaded = true);
     });
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _version = info.version);
+    });
     _loadLanguage();
     _loadSfxNames();
     _loadBgName();
+    if (!Platform.isAndroid) _loadAudioDevices();
+  }
+
+  /// Restores the persisted device choice and fetches the device list.
+  /// The Rust-side selection is (re)applied here so a choice made in an
+  /// earlier session takes effect before the first connect.
+  Future<void> _loadAudioDevices() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final out = prefs.getString('audio_output_device') ?? '';
+      final inp = prefs.getString('audio_input_device') ?? '';
+      TsNative.setAudioOutputDevice(out);
+      TsNative.setAudioInputDevice(inp);
+      final devs = TsNative.getAudioDevices();
+      if (!mounted) return;
+      setState(() {
+        _outputDevice = out;
+        _inputDevice = inp;
+        _outputDevices = (devs['outputs'] as List? ?? const [])
+            .cast<Map<String, dynamic>>();
+        _inputDevices = (devs['inputs'] as List? ?? const [])
+            .cast<Map<String, dynamic>>();
+      });
+    } catch (e) {
+      debugPrint('SettingsScreen: audio device load failed: $e');
+    }
+  }
+
+  Future<void> _onOutputDeviceChanged(String value) async {
+    setState(() => _outputDevice = value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('audio_output_device', value);
+    TsNative.setAudioOutputDevice(value);
+  }
+
+  Future<void> _onInputDeviceChanged(String value) async {
+    setState(() => _inputDevice = value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('audio_input_device', value);
+    TsNative.setAudioInputDevice(value);
+  }
+
+  Widget _deviceDropdown(
+    String label,
+    String current,
+    List<Map<String, dynamic>> devices,
+    ValueChanged<String> onChanged,
+  ) {
+    final al = AppLocalizations.of(context);
+    final items = <DropdownMenuItem<String>>[
+      DropdownMenuItem(value: '', child: Text(al.audioSystemDefault)),
+      for (final d in devices)
+        DropdownMenuItem(
+          value: d['name'] as String,
+          child: Text(d['name'] as String, overflow: TextOverflow.ellipsis),
+        ),
+    ];
+    return Row(
+      children: [
+        SizedBox(
+          width: 110,
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.grey, fontSize: 13),
+          ),
+        ),
+        Expanded(
+          child: DropdownButton<String>(
+            value: current,
+            isExpanded: true,
+            underline: const SizedBox.shrink(),
+            dropdownColor: const Color(0xFF1A1A2E),
+            items: items,
+            onChanged: (v) => onChanged(v ?? ''),
+          ),
+        ),
+      ],
+    );
   }
 
   Future<void> _loadLanguage() async {
@@ -106,6 +199,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _checkNow() async {
+    if (!OtaService.isSupported) return;
     final source = _ota.source;
     final messenger = ScaffoldMessenger.of(context);
     messenger.showSnackBar(
@@ -122,6 +216,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       );
     } else {
       await showUpdateDialog(context, info);
+    }
+  }
+
+  /// Opens the project repository via the platform's external browser/app.
+  Future<void> _openGitHub() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final failed = AppLocalizations.of(context).openLinkFailed;
+    try {
+      final launched = await launchUrl(
+        Uri.parse(_githubUrl),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched) {
+        messenger.showSnackBar(SnackBar(content: Text(failed)));
+      }
+    } catch (_) {
+      messenger.showSnackBar(SnackBar(content: Text(failed)));
     }
   }
 
@@ -207,24 +318,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   void _previewSfx(int kind) {
     SfxService.preview(kind);
-  }
-
-  Future<void> _loadBgName() async {
-    final name = await BackgroundService.customName();
-    if (mounted) setState(() => _bgName = name);
-  }
-
-  Future<void> _pickBackground() async {
-    final path = await BackgroundService.pickAndStore();
-    if (!mounted || path == null) return;
-    await ref.read(appSettingsProvider.notifier).setBackground(path);
-    if (mounted) await _loadBgName();
-  }
-
-  Future<void> _resetBackground() async {
-    await BackgroundService.reset();
-    await ref.read(appSettingsProvider.notifier).clearBackground();
-    if (mounted) setState(() => _bgName = null);
   }
 
   String _sfxLabel(AppLocalizations al, int kind) {
@@ -400,6 +493,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       ];
 
+  Future<void> _loadBgName() async {
+    final name = await BackgroundService.customName();
+    if (mounted) setState(() => _bgName = name);
+  }
+
+  Future<void> _pickBackground() async {
+    final path = await BackgroundService.pickAndStore();
+    if (!mounted || path == null) return;
+    await ref.read(backgroundSettingsProvider.notifier).setPath(path);
+    if (mounted) await _loadBgName();
+  }
+
+  Future<void> _resetBackground() async {
+    await BackgroundService.reset();
+    await ref.read(backgroundSettingsProvider.notifier).setPath(null);
+    if (mounted) setState(() => _bgName = null);
+  }
+
   Widget _buildSfxSection(BuildContext context) {
     final al = AppLocalizations.of(context);
     return Column(
@@ -432,6 +543,109 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
         ],
+      ],
+    );
+  }
+
+  /// User-custom background image: pick / reset + dimming slider. The image
+  /// itself is rendered app-wide by the background layer in main.dart.
+  Widget _buildBackgroundSection(BuildContext context) {
+    final al = AppLocalizations.of(context);
+    final settings = ref.watch(backgroundSettingsProvider);
+    final hasBg = settings.path != null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionHeader(al.backgroundSection),
+        const SizedBox(height: 8),
+        Card(
+          color: const Color(0xFF1A1A2E),
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        hasBg ? (_bgName ?? al.sfxDefault) : al.sfxDefault,
+                        style: TextStyle(
+                          color: hasBg ? Colors.blueAccent : Colors.grey,
+                          fontSize: 12,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: hasBg ? _resetBackground : null,
+                      tooltip: al.bgReset,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.all(6),
+                      icon: const Icon(Icons.restore, size: 20),
+                      color: Colors.blueAccent,
+                    ),
+                    const SizedBox(width: 4),
+                    OutlinedButton(
+                      onPressed: _pickBackground,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.blueAccent,
+                        side: const BorderSide(color: Color(0xFF2A2A4A)),
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      child: Text(
+                        al.bgPickImage,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Text(
+                      al.bgDim,
+                      style: const TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
+                    Expanded(
+                      child: Slider(
+                        value: settings.dim,
+                        min: 0.0,
+                        max: 0.8,
+                        activeColor: Colors.blue,
+                        onChanged: (v) => ref
+                            .read(backgroundSettingsProvider.notifier)
+                            .setDim(v),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Text(
+                      al.bgOpacity,
+                      style: const TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
+                    Expanded(
+                      child: Slider(
+                        value: settings.opacity,
+                        min: 0.1,
+                        max: 1.0,
+                        activeColor: Colors.blue,
+                        onChanged: (v) => ref
+                            .read(backgroundSettingsProvider.notifier)
+                            .setOpacity(v),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -521,162 +735,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  /// The short-tap / long-press role swap for channel rows.
-  Widget _buildGestureSection(BuildContext context) {
-    final al = AppLocalizations.of(context);
-    final settings = ref.watch(appSettingsProvider);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionHeader(al.gestureSection),
-        const SizedBox(height: 8),
-        Card(
-          color: const Color(0xFF1A1A2E),
-          margin: EdgeInsets.zero,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: RadioGroup<bool>(
-              groupValue: settings.channelGestureSwap,
-              onChanged: (swap) {
-                if (swap == null) return;
-                ref
-                    .read(appSettingsProvider.notifier)
-                    .setChannelGestureSwap(swap);
-              },
-              child: Column(
-                children: [
-                  RadioListTile<bool>(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    activeColor: Colors.blue,
-                    title: Text(
-                      al.gestureDefault,
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
-                    ),
-                    value: false,
-                  ),
-                  RadioListTile<bool>(
-                    contentPadding: EdgeInsets.zero,
-                    dense: true,
-                    activeColor: Colors.blue,
-                    title: Text(
-                      al.gestureSwapped,
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
-                    ),
-                    value: true,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// User-custom background image: pick / reset + dimming slider. The image
-  /// itself is rendered app-wide by the background layer in main.dart.
-  Widget _buildBackgroundSection(BuildContext context) {
-    final al = AppLocalizations.of(context);
-    final settings = ref.watch(appSettingsProvider);
-    final hasBg = settings.backgroundPath != null;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionHeader(al.backgroundSection),
-        const SizedBox(height: 8),
-        Card(
-          color: const Color(0xFF1A1A2E),
-          margin: EdgeInsets.zero,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        hasBg ? (_bgName ?? al.sfxDefault) : al.sfxDefault,
-                        style: TextStyle(
-                          color: hasBg ? Colors.blueAccent : Colors.grey,
-                          fontSize: 12,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: hasBg ? _resetBackground : null,
-                      tooltip: al.bgReset,
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.all(6),
-                      icon: const Icon(Icons.restore, size: 20),
-                      color: Colors.blueAccent,
-                    ),
-                    const SizedBox(width: 4),
-                    OutlinedButton(
-                      onPressed: _pickBackground,
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.blueAccent,
-                        side: const BorderSide(color: Color(0xFF2A2A4A)),
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      child: Text(
-                        al.bgPickImage,
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Text(
-                      al.bgDim,
-                      style: const TextStyle(color: Colors.grey, fontSize: 12),
-                    ),
-                    Expanded(
-                      child: Slider(
-                        value: settings.backgroundDim,
-                        min: 0.0,
-                        max: 0.8,
-                        activeColor: Colors.blue,
-                        onChanged: (v) => ref
-                            .read(appSettingsProvider.notifier)
-                            .setBackgroundDim(v),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Text(
-                      al.bgOpacity,
-                      style: const TextStyle(color: Colors.grey, fontSize: 12),
-                    ),
-                    Expanded(
-                      child: Slider(
-                        value: settings.backgroundOpacity,
-                        min: 0.1,
-                        max: 1.0,
-                        activeColor: Colors.blue,
-                        onChanged: (v) => ref
-                            .read(appSettingsProvider.notifier)
-                            .setBackgroundOpacity(v),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -693,8 +751,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // Voice parameters + mic test + channel sounds, folded away by
             // default (see _buildAudioSection).
             _buildAudioSection(context),
-            const SizedBox(height: 24),
-            _buildGestureSection(context),
             const SizedBox(height: 24),
             _buildBackgroundSection(context),
             const SizedBox(height: 24),
@@ -733,8 +789,131 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
               ),
             ),
+            // Desktop device picker: choose which output/input device the
+            // Rust audio engine uses ('' = follow the system default).
+            if (!Platform.isAndroid) ...[
+              const SizedBox(height: 24),
+              _SectionHeader(AppLocalizations.of(context).audioDevicesSection),
+              const SizedBox(height: 8),
+              Card(
+                color: const Color(0xFF1A1A2E),
+                margin: EdgeInsets.zero,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      _deviceDropdown(
+                        AppLocalizations.of(context).audioOutputDevice,
+                        _outputDevice,
+                        _outputDevices,
+                        _onOutputDeviceChanged,
+                      ),
+                      const SizedBox(height: 8),
+                      _deviceDropdown(
+                        AppLocalizations.of(context).audioInputDevice,
+                        _inputDevice,
+                        _inputDevices,
+                        _onInputDeviceChanged,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            // OTA = APK downloads from the release channel — Android-only.
+            if (OtaService.isSupported) ...[
+              const SizedBox(height: 24),
+              _SectionHeader(AppLocalizations.of(context).updateSection),
+              const SizedBox(height: 8),
+              Card(
+                color: const Color(0xFF1A1A2E),
+                margin: EdgeInsets.zero,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            AppLocalizations.of(context).checkForUpdates,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                            ),
+                          ),
+                          Switch(
+                            value: _ota.enabled,
+                            activeTrackColor: Colors.blue,
+                            onChanged: (v) {
+                              setState(() => _ota.enabled = v);
+                              _ota.setEnabled(v);
+                            },
+                          ),
+                        ],
+                      ),
+                      const Divider(height: 20, color: Color(0xFF2A2A4A)),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          AppLocalizations.of(context).updateSource,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      RadioGroup<OtaSource>(
+                        groupValue: _ota.source,
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setState(() => _ota.source = v);
+                          _ota.setSource(v);
+                        },
+                        child: Column(
+                          children: [
+                            for (final source in OtaSource.values)
+                              RadioListTile<OtaSource>(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                activeColor: Colors.blue,
+                                title: Text(
+                                  source == OtaSource.auto
+                                      ? AppLocalizations.of(
+                                          context,
+                                        ).updateSourceAuto
+                                      : source.label,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                value: source,
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _otaLoaded ? _checkNow : null,
+                          icon: const Icon(Icons.system_update_alt, size: 18),
+                          label: Text(AppLocalizations.of(context).checkNow),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            // About: app identity + version + project link, all platforms
+            // (the OTA section above is Android-only).
             const SizedBox(height: 24),
-            _SectionHeader(AppLocalizations.of(context).updateSection),
+            _SectionHeader(AppLocalizations.of(context).about),
             const SizedBox(height: 8),
             Card(
               color: const Color(0xFF1A1A2E),
@@ -744,75 +923,73 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 child: Column(
                   children: [
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(
-                          AppLocalizations.of(context).checkForUpdates,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 14,
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.asset(
+                            'assets/logo.png',
+                            width: 56,
+                            height: 56,
+                            fit: BoxFit.cover,
                           ),
                         ),
-                        Switch(
-                          value: _ota.enabled,
-                          activeTrackColor: Colors.blue,
-                          onChanged: (v) {
-                            setState(() => _ota.enabled = v);
-                            _ota.setEnabled(v);
-                          },
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'NEk0',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              if (_version.isNotEmpty)
+                                Text(
+                                  AppLocalizations.of(
+                                    context,
+                                  ).appVersion(_version),
+                                  style: const TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                     const Divider(height: 20, color: Color(0xFF2A2A4A)),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        AppLocalizations.of(context).updateSource,
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                    RadioGroup<OtaSource>(
-                      groupValue: _ota.source,
-                      onChanged: (v) {
-                        if (v == null) return;
-                        setState(() => _ota.source = v);
-                        _ota.setSource(v);
-                      },
-                      child: Column(
-                        children: [
-                          for (final source in OtaSource.values)
-                            RadioListTile<OtaSource>(
-                              contentPadding: EdgeInsets.zero,
-                              dense: true,
-                              activeColor: Colors.blue,
-                              title: Text(
-                                source == OtaSource.auto
-                                    ? AppLocalizations.of(
-                                        context,
-                                      ).updateSourceAuto
-                                    : source.label,
+                    InkWell(
+                      onTap: _openGitHub,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.code,
+                              color: Colors.grey,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                AppLocalizations.of(context).viewOnGitHub,
                                 style: const TextStyle(
                                   color: Colors.white,
                                   fontSize: 14,
                                 ),
                               ),
-                              value: source,
                             ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        onPressed: _otaLoaded ? _checkNow : null,
-                        icon: const Icon(Icons.system_update_alt, size: 18),
-                        label: Text(AppLocalizations.of(context).checkNow),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Colors.blue,
+                            const Icon(
+                              Icons.open_in_new,
+                              color: Colors.grey,
+                              size: 16,
+                            ),
+                          ],
                         ),
                       ),
                     ),

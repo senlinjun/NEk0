@@ -1,26 +1,33 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../l10n/generated/app_localizations.dart';
 
-import '../models/app_settings.dart';
 import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/group.dart';
 import '../models/privilege.dart';
+import '../models/server_info.dart';
 import '../models/ts_state.dart';
 import '../services/avatar_cache.dart';
+import '../services/avatar_upload.dart';
 import '../services/foreground_service.dart';
 import '../services/ts_ffi.dart';
+import '../widgets/channel_edit_screen.dart';
 import '../widgets/channel_password_dialog.dart';
 import '../widgets/channel_tree.dart';
 import '../widgets/chat_panel.dart';
 import '../widgets/connection_bar.dart';
 import '../screens/file_manager_screen.dart';
 import '../widgets/channel_menu.dart';
+import '../widgets/position_edit_screen.dart';
+import '../widgets/privilege_key_dialog.dart';
+import '../widgets/server_edit_screen.dart';
 import '../widgets/spotlight_tour.dart';
 import '../widgets/voice_settings_panel.dart';
 
@@ -32,8 +39,6 @@ class ServerScreen extends ConsumerStatefulWidget {
 }
 
 class _ServerScreenState extends ConsumerState<ServerScreen> {
-  int _lastSeenMessageCount = 0;
-
   /// Cached server-group list for the user-list privilege badges. Refreshed
   /// only when the server (name) changes or the list is still empty (the
   /// group list arrives shortly after connect, not with the first roster).
@@ -82,6 +87,66 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     await _maybeShowOemGuide();
     if (!mounted) return;
     await _maybeAutoShowGuide();
+    if (!mounted) return;
+    // The server asked for a privilege key (typically the very first login
+    // on a fresh server): prompt after the guides so the dialogs don't
+    // overlap. No-op when a token was already submitted with clientinit.
+    if (ref.read(tsConnectionProvider).askForPrivilegeKey) {
+      await _showPrivilegeKeyDialog();
+    }
+  }
+
+  /// Opens the privilege-key prompt and, on submit, redeems the key.
+  Future<void> _showPrivilegeKeyDialog() async {
+    ref.read(tsConnectionProvider.notifier).clearAskForPrivilegeKey();
+    if (!mounted) return;
+    final token = await showPrivilegeKeyDialog(context);
+    if (!mounted || token == null || token.trim().isEmpty) return;
+    await _submitPrivilegeKey(token.trim());
+  }
+
+  /// Sends the key and reports the outcome. The server only acks the
+  /// command — an invalid or used key may be silently ignored, so the own
+  /// server groups are polled for a change before claiming success.
+  Future<void> _submitPrivilegeKey(String token) async {
+    final al = AppLocalizations.of(context);
+    final before = _ownServerGroups();
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .usePrivilegeKey(token);
+    if (!mounted) return;
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error), backgroundColor: Colors.red),
+      );
+      return;
+    }
+    var granted = false;
+    for (var i = 0; i < 12; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
+      final now = _ownServerGroups();
+      if (now.length != before.length || now.any((g) => !before.contains(g))) {
+        granted = true;
+        break;
+      }
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          granted ? al.privilegeKeyGranted : al.privilegeKeyNoEffect,
+        ),
+        backgroundColor: granted ? Colors.green : Colors.orange,
+      ),
+    );
+  }
+
+  /// The own client's current server group ids (empty when unknown).
+  Set<int> _ownServerGroups() {
+    final st = ref.read(tsConnectionProvider);
+    final own = st.clients.where((c) => c.id == st.ownClientId).firstOrNull;
+    return own?.serverGroupIds.toSet() ?? {};
   }
 
   Future<void> _showGuide() async {
@@ -228,7 +293,18 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   /// The join action reuses [_onChannelTap] so password handling stays in
   /// one place regardless of which gesture summoned the menu.
   Future<void> _onChannelMenu(TsChannel channel) async {
-    final result = await showChannelMenu(context, channel);
+    // Move availability: a neighbor must exist, and re-ordering needs
+    // modify rights (no dedicated hint bit — use the modify convention).
+    final canMove = channel.permissionHints == 0 || channel.canModify;
+    final siblings = _channelSiblings(channel);
+    final idx = siblings.indexWhere((c) => c.id == channel.id);
+    final result = await showChannelMenu(
+      context,
+      channel,
+      canCreateChannel: _canCreateChannels,
+      canMoveUp: canMove && idx > 0,
+      canMoveDown: canMove && idx >= 0 && idx < siblings.length - 1,
+    );
     if (!mounted || result == null) return;
     switch (result) {
       case channelMenuJoin:
@@ -246,20 +322,296 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             ),
           ),
         );
+      case channelMenuCreateSub:
+        await _createChannel(parentId: channel.id);
+      case channelMenuEdit:
+        await _editChannel(channel);
+      case channelMenuMoveUp:
+        await _moveChannel(channel, up: true);
+      case channelMenuMoveDown:
+        await _moveChannel(channel, up: false);
+      case channelMenuDelete:
+        await _confirmDeleteChannel(channel);
     }
+  }
+
+  /// The channel's siblings in server display order (TS3 linked-list order).
+  List<TsChannel> _channelSiblings(TsChannel channel) {
+    final conn = ref.read(tsConnectionProvider);
+    return TsChannel.resolveOrder(
+      conn.channels.where((c) => c.parentId == channel.parentId).toList()
+        ..sort((a, b) => a.id.compareTo(b.id)),
+    );
+  }
+
+  /// Moves a channel one slot among its siblings. TS3 orders siblings as a
+  /// linked list (each channel stores the id it comes after), so a move
+  /// rewrites two entries: the moved channel points past its neighbor and
+  /// the neighbor takes the moved channel's old predecessor. Both edits run
+  /// sequentially with their own receipt; the result is reported once.
+  Future<void> _moveChannel(TsChannel channel, {required bool up}) async {
+    final siblings = _channelSiblings(channel);
+    final idx = siblings.indexWhere((c) => c.id == channel.id);
+    if (idx < 0 || (up ? idx == 0 : idx >= siblings.length - 1)) return;
+    final notifier = ref.read(tsConnectionProvider.notifier);
+    final String? error;
+    if (up) {
+      final prev = siblings[idx - 1];
+      error =
+          await notifier.editChannel(
+            channel.id,
+            order: idx >= 2 ? siblings[idx - 2].id : 0,
+          ) ??
+          await notifier.editChannel(prev.id, order: channel.id);
+    } else {
+      final next = siblings[idx + 1];
+      error =
+          await notifier.editChannel(channel.id, order: next.id) ??
+          await notifier.editChannel(next.id, order: channel.order);
+    }
+    if (!mounted) return;
+    _reportOp(error, AppLocalizations.of(context).channelMoved);
+  }
+
+  /// Tap/long-press/right-click on the server root node: pops the server
+  /// menu first — "edit server" opens the settings page (read-only without
+  /// the admin heuristics), "create channel" reuses the shared channel form
+  /// at top level (parentId 0).
+  Future<void> _onServerMenu() async {
+    final action = await showServerMenu(
+      context,
+      canCreateChannel: _canCreateChannels,
+    );
+    if (!mounted) return;
+    switch (action) {
+      case serverMenuEditServer:
+        await _openServerSettings();
+      case serverMenuCreateChannel:
+        await _createChannel(parentId: 0);
+    }
+  }
+
+  /// Opens the server settings page (see [pushServerEditPage]) and submits
+  /// the edits as a `serveredit`. The create-channel entry pops a sentinel
+  /// and is handled like the menu's own entry.
+  Future<void> _openServerSettings() async {
+    // Prefill snapshot from the native book cache; falls back to the
+    // connection state when the native library is stale (missing symbol).
+    TsServerInfo info;
+    try {
+      info = TsServerInfo.fromJson(TsNative.getServerInfo());
+    } catch (_) {
+      info = TsServerInfo(name: ref.read(tsConnectionProvider).serverName);
+    }
+    final result = await pushServerEditPage(
+      context,
+      info: info,
+      // The same admin heuristic gates both the editable form and the
+      // create-channel entry (a wrong guess surfaces as a server rejection
+      // in the perm_op receipt).
+      canEdit: _canCreateChannels,
+      canCreateChannel: _canCreateChannels,
+    );
+    if (!mounted || result == null) return;
+    switch (result.action) {
+      case ServerEditAction.createChannel:
+        await _createChannel(parentId: 0);
+      case ServerEditAction.save:
+        final error = await ref
+            .read(tsConnectionProvider.notifier)
+            .editServer(
+              name: result.name,
+              password: result.password,
+              maxClients: result.maxClients,
+            );
+        if (!mounted) return;
+        _reportOp(error, AppLocalizations.of(context).serverSaved);
+    }
+  }
+
+  /// Opens the shared channel form to create a channel under [parentId]
+  /// (0 = top level). On success the tree refreshes itself through the
+  /// `channels_updated` event the server's answer triggers.
+  Future<void> _createChannel({required int parentId}) async {
+    final al = AppLocalizations.of(context);
+    final form = await pushChannelEditPage(context);
+    if (!mounted || form == null) return;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .createChannel(
+          // Never null in create mode: the save button requires a name.
+          parentId,
+          form.name!,
+          topic: form.topic.isEmpty ? null : form.topic,
+          password: form.password.isEmpty ? null : form.password,
+          maxClients: form.maxClients,
+          isPermanent: form.isPermanent,
+          isSemiPermanent: form.isSemiPermanent,
+          description: form.description,
+          maxFamilyClients: form.maxFamilyClients,
+          isDefault: form.isDefault,
+          deleteDelay: form.deleteDelay,
+        );
+    if (!mounted) return;
+    _reportOp(error, al.channelCreated);
+  }
+
+  /// Opens the shared channel form prefilled with the channel's current
+  /// settings and submits the changes as a `channeledit`.
+  Future<void> _editChannel(TsChannel channel) async {
+    final al = AppLocalizations.of(context);
+    final form = await pushChannelEditPage(context, channel: channel);
+    if (!mounted || form == null) return;
+    // Password tri-state: an empty field clears the password of a locked
+    // channel (the real password is never known client-side) and is a no-op
+    // for an unlocked one.
+    final password = form.password.isEmpty
+        ? (channel.hasPassword ? '' : null)
+        : form.password;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .editChannel(
+          channel.id,
+          name: form.name,
+          topic: form.topic,
+          password: password,
+          maxClients: form.maxClients,
+          isPermanent: form.isPermanent,
+          isSemiPermanent: form.isSemiPermanent,
+          description: form.description,
+          maxFamilyClients: form.maxFamilyClients,
+          isDefault: form.isDefault,
+          deleteDelay: form.deleteDelay,
+          neededTalkPower: form.neededTalkPower,
+        );
+    if (!mounted) return;
+    _reportOp(error, al.channelSaved);
+  }
+
+  /// Delete confirmation. A channel that still has members is force-deleted
+  /// (needs the force-delete permission); its occupants are moved to the
+  /// default channel.
+  Future<void> _confirmDeleteChannel(TsChannel channel) async {
+    final al = AppLocalizations.of(context);
+    final occupied = channel.clientCount > 0;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: Text(
+          al.deleteChannelTitle,
+          style: const TextStyle(color: Colors.white, fontSize: 18),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              al.deleteChannelBody(channel.name),
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+            if (occupied) ...[
+              const SizedBox(height: 8),
+              Text(
+                al.deleteChannelOccupied(channel.clientCount),
+                style: const TextStyle(color: Colors.amber, fontSize: 13),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(al.cancel, style: const TextStyle(color: Colors.grey)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(
+              al.delete,
+              style: const TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .deleteChannel(channel.id, force: occupied);
+    if (!mounted) return;
+    _reportOp(error, al.channelDeleted);
+  }
+
+  /// Drop handler for the tree's drag (long-press on touch, mouse
+  /// press-drag on desktop): re-parent (or re-order) the dragged channel
+  /// via a single `channelmove`.
+  Future<void> _onChannelDrop(int draggedId, int parentId, int? afterId) async {
+    // Double-check the target is not the channel itself or inside its own
+    // subtree (the tree filters these too; this guards against stale data).
+    final conn = ref.read(tsConnectionProvider);
+    final invalid = <int>{draggedId};
+    var grew = true;
+    while (grew) {
+      grew = false;
+      for (final c in conn.channels) {
+        if (invalid.contains(c.parentId) && invalid.add(c.id)) {
+          grew = true;
+        }
+      }
+    }
+    if (invalid.contains(parentId)) return;
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .moveChannel(draggedId, parentId: parentId, afterId: afterId);
+    if (!mounted) return;
+    _reportOp(error, AppLocalizations.of(context).channelMoved);
+  }
+
+  /// Drop handler for a long-press-dragged user. Dropping our own row is a
+  /// JOIN: it reuses the tap-to-join flow (password prompt, optimistic
+  /// selection, auto-expand) instead of a `clientmove`. Everyone else is
+  /// moved via a single `clientmove` whose perm_op receipt reports the
+  /// server's answer.
+  Future<void> _onClientDrop(int clientId, int channelId) async {
+    if (clientId == ref.read(tsConnectionProvider).ownClientId) {
+      final channel = ref
+          .read(tsConnectionProvider)
+          .channels
+          .where((c) => c.id == channelId)
+          .firstOrNull;
+      if (channel != null) {
+        await _onChannelTap(channel);
+        return;
+      }
+    }
+    final error = await ref
+        .read(tsConnectionProvider.notifier)
+        .moveClient(clientId, channelId);
+    if (!mounted) return;
+    _reportOp(error, AppLocalizations.of(context).moveSucceeded);
+  }
+
+  /// Green/red receipt SnackBar for the channel-management operations
+  /// (mirrors the client sheet's perm-op reporting).
+  void _reportOp(String? error, String okLabel) {
+    final al = AppLocalizations.of(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(error == null ? okLabel : al.permOpFailed(error)),
+        backgroundColor: error == null ? null : Colors.red.shade900,
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   Widget _buildLeftPanel(
     TsConnectionState conn,
     TsConnectionNotifier notifier,
   ) {
-    final gestureSwap = ref.watch(
-      appSettingsProvider.select((s) => s.channelGestureSwap),
-    );
-    // Transparent root so the app-wide custom background shows through
-    // behind the channel tree and the user list; the section headers above
-    // and below stay opaque as visual anchors.
     return Container(
+      // Transparent root so the app-wide custom background shows through
+      // behind the channel tree and the user list; the section headers above
+      // and below stay opaque as visual anchors.
       child: Column(
         children: [
           Container(
@@ -299,10 +651,10 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                         .firstOrNull
                         ?.talkPower ??
                     0,
-                // Gesture swap from settings: default short tap joins and a
-                // long press opens the menu; swapped, the roles are reversed.
-                onChannelTap: gestureSwap ? _onChannelMenu : _onChannelTap,
-                onChannelMenu: gestureSwap ? _onChannelTap : _onChannelMenu,
+                // Fixed gestures: short tap joins, long press / right-click
+                // opens the menu, drag moves the channel (see onChannelDrop).
+                onChannelTap: _onChannelTap,
+                onChannelMenu: _onChannelMenu,
                 // Open-lock hint for channels whose password is already
                 // cached for this session.
                 sessionPasswordKnown: (channelId) =>
@@ -313,12 +665,23 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                 // Server groups for the privileged-identity badges; empty
                 // while the group list is unavailable.
                 serverGroups: _serverGroups,
+                // TS3-style server root node; tapping / long-pressing /
+                // right-clicking it always pops the server menu (edit
+                // server / create channel), no permission gating.
+                serverName: conn.serverName,
+                onServerMenu: _onServerMenu,
+                // Long-press drag: re-parent / re-order the dragged channel.
+                onChannelDrop: _onChannelDrop,
+                // Long-press drag of a user row: move them into the target
+                // channel (dropping our own row joins it instead).
+                ownClientId: conn.ownClientId,
+                onClientDrop: _onClientDrop,
                 // Tapping yourself opens the same voice settings as
                 // long-pressing the mic; tapping others opens their
                 // per-client volume + poke sheet.
                 onClientTap: (clientId) {
                   if (clientId == conn.ownClientId) {
-                    _showVoiceSettings(conn, notifier);
+                    _showVoiceSettings(notifier);
                   } else {
                     _showClientVolume(clientId);
                   }
@@ -336,6 +699,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   /// The battery-optimization exemption is requested only AFTER the user
   /// acknowledges the dialog, so they know why the settings page opens.
   Future<void> _maybeShowOemGuide() async {
+    // OEM battery/auto-start quirks (MIUI/EMUI/...) are Android-only.
+    if (!Platform.isAndroid) return;
     final prefs = await SharedPreferences.getInstance();
     if (prefs.getBool('oem_guide_shown') ?? false) return;
     await prefs.setBool('oem_guide_shown', true);
@@ -366,6 +731,30 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     }
   }
 
+  /// Our own privilege level: query admin beats the server-group name tier.
+  /// Shared by the client sheet's permission gating and the channel
+  /// management entries (channel creation has no per-channel hint bit).
+  PrivilegeTier get _ownPrivilegeTier {
+    final conn = ref.read(tsConnectionProvider);
+    final ownClient = conn.clients
+        .where((c) => c.id == conn.ownClientId)
+        .firstOrNull;
+    if (ownClient?.isQueryAdmin ?? false) return PrivilegeTier.admin;
+    final ownGroupNames = _serverGroups
+        .where((g) => ownClient?.serverGroupIds.contains(g.id) ?? false)
+        .map((g) => g.name);
+    return privilegeTierOf(ownGroupNames);
+  }
+
+  /// Whether the channel-management entries (create channel / sub-channel)
+  /// are offered. Channel creation has no per-channel permission hint, so
+  /// this reuses the "are we privileged" heuristics of the client sheet
+  /// (_ownPrivilegeTier, or a management power in our own clientpermlist).
+  /// A wrong guess surfaces as a server rejection in the perm_op receipt.
+  bool get _canCreateChannels =>
+      _ownPrivilegeTier != PrivilegeTier.none ||
+      ref.read(tsConnectionProvider.notifier).canManagePermissions;
+
   void _showClientVolume(int clientId) {
     final conn = ref.read(tsConnectionProvider);
     final connNotifier = ref.read(tsConnectionProvider.notifier);
@@ -384,18 +773,13 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       'hints=${client.permissionHints}',
     );
 
-    // Our own privilege tier (from server-group names) is the last-resort
-    // gate for the permission-management entries when neither the target's
-    // permission hints nor our clientpermlist are available yet.
+    // Our own privilege tier (query admin / server-group name tier) is the
+    // last-resort gate for the permission-management entries when neither
+    // the target's permission hints nor our clientpermlist are available yet.
     final ownClient = conn.clients
         .where((c) => c.id == conn.ownClientId)
         .firstOrNull;
-    final ownGroupNames = _serverGroups
-        .where((g) => ownClient?.serverGroupIds.contains(g.id) ?? false)
-        .map((g) => g.name);
-    final ownPrivilegeTier = (ownClient?.isQueryAdmin ?? false)
-        ? PrivilegeTier.admin
-        : privilegeTierOf(ownGroupNames);
+    final ownPrivilegeTier = _ownPrivilegeTier;
 
     showModalBottomSheet(
       context: context,
@@ -421,13 +805,17 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
             .canManagePermissions,
         ownPrivilegeTier: ownPrivilegeTier,
         channels: conn.channels,
+        onOpenChat: () => _openPrivateChat(client.id),
       ),
     );
   }
 
   void _openChat() async {
-    final conn = ref.read(tsConnectionProvider);
-    if (conn.selectedChannelId == null) return;
+    // Offer the server-chat tab whenever our (low-threshold) permission hint
+    // doesn't rule it out — an actual rejection still surfaces as a
+    // snackbar from the chat panel.
+    final notifier = ref.read(tsConnectionProvider.notifier);
+    if (notifier.canServerChat) notifier.openServerChat();
 
     await showModalBottomSheet(
       context: context,
@@ -438,19 +826,48 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       ),
       builder: (ctx) => SizedBox(
         height: MediaQuery.of(context).size.height * 0.75,
-        child: ChatPanel(channelId: conn.selectedChannelId!),
+        child: const ChatPanel(),
       ),
     );
-    // Reset badge after sheet closes (re-read for latest count)
+    // Every open conversation counts as seen once the sheet closes.
     if (mounted) {
-      final latest = ref.read(tsConnectionProvider);
-      setState(() => _lastSeenMessageCount = latest.messages.length);
+      ref.read(tsConnectionProvider.notifier).markAllConversationsSeen();
+      setState(() {}); // refresh the chat bar badge
     }
+  }
+
+  /// Entry point from the client sheet: open the PM tab for [clientId] and
+  /// bring the chat panel up on it.
+  void _openPrivateChat(int clientId) {
+    ref.read(tsConnectionProvider.notifier).openPrivateChat(clientId);
+    _openChat();
+  }
+
+  /// Prefix for the chat bar preview when the newest message is not a
+  /// channel message (null = plain channel chat, shown without a prefix).
+  String? _conversationPrefix(TsConnectionState conn, String conversation) {
+    if (conversation == 'server') {
+      return AppLocalizations.of(context).chatServer;
+    }
+    if (conversation.startsWith('pm:')) {
+      final id = int.parse(conversation.substring(3));
+      return conn.conversationTitles[conversation] ??
+          conn.clients.where((c) => c.id == id).firstOrNull?.nickname;
+    }
+    return null;
   }
 
   Widget _buildChatBar(TsConnectionState conn) {
     final lastMsg = conn.messages.isNotEmpty ? conn.messages.last : null;
-    final unread = conn.messages.length - _lastSeenMessageCount;
+    final unread = ref.read(tsConnectionProvider.notifier).unreadCount();
+    final prefix = lastMsg == null
+        ? null
+        : _conversationPrefix(conn, lastMsg.conversationId);
+    final preview = lastMsg == null
+        ? null
+        : prefix == null
+        ? '${lastMsg.fromClient}: ${lastMsg.message}'
+        : '$prefix · ${lastMsg.fromClient}: ${lastMsg.message}';
 
     return GestureDetector(
       key: _chatKey,
@@ -469,11 +886,16 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
               AppLocalizations.of(context).chat,
               style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
-            const Spacer(),
-            if (lastMsg != null)
-              Flexible(
+            // The preview must sit flush against the right edge: an Expanded
+            // right-aligned Text does that in both the short (text hugs the
+            // right) and the long (ellipsis at the right) case. Spacer +
+            // Flexible would split the free space 50/50 and let unused space
+            // pile up at the row's end, drifting the cluster leftwards.
+            if (preview != null)
+              Expanded(
                 child: Text(
-                  '${lastMsg.fromClient}: ${lastMsg.message}',
+                  preview,
+                  textAlign: TextAlign.right,
                   style: const TextStyle(
                     color: Color(0xFF555577),
                     fontSize: 11,
@@ -481,7 +903,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                   overflow: TextOverflow.ellipsis,
                   maxLines: 1,
                 ),
-              ),
+              )
+            else
+              const Spacer(),
             if (unread > 0) ...[
               const SizedBox(width: 6),
               Container(
@@ -517,6 +941,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
 
     return Container(
       height: 52,
+      // Translucent so a custom background tints through.
       color: const Color(0xD916213E),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
@@ -526,7 +951,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
           GestureDetector(
             key: _micKey,
             onTap: () => notifier.toggleInputMute(),
-            onLongPress: () => _showVoiceSettings(conn, notifier),
+            onLongPress: () => _showVoiceSettings(notifier),
+            onSecondaryTapUp: (_) => _showVoiceSettings(notifier),
             child: Icon(Icons.mic, color: micColor, size: 28),
           ),
           const SizedBox(width: 24),
@@ -600,10 +1026,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     );
   }
 
-  void _showVoiceSettings(
-    TsConnectionState conn,
-    TsConnectionNotifier notifier,
-  ) {
+  void _showVoiceSettings(TsConnectionNotifier notifier) {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF12122A),
@@ -611,11 +1034,190 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
       ),
       builder: (ctx) {
+        // The modal route lives outside this screen's rebuild tree, so the
+        // captured conn snapshot would freeze the level bar; watch the
+        // provider here to keep the panel live.
         return Padding(
           padding: const EdgeInsets.all(20),
-          child: VoiceSettingsPanel(conn: conn, notifier: notifier),
+          child: Consumer(
+            builder: (ctx, ref, _) {
+              final live = ref.watch(tsConnectionProvider);
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _AvatarSection(conn: live, notifier: notifier),
+                  const Divider(color: Colors.white12, height: 24),
+                  VoiceSettingsPanel(conn: live, notifier: notifier),
+                ],
+              );
+            },
+          ),
         );
       },
+    );
+  }
+}
+
+// ─── Self avatar (upload entry in the tap-yourself sheet) ───────────
+
+/// Avatar row shown above the voice settings when tapping yourself: live
+/// preview of the current avatar plus the upload action. The upload
+/// compresses the picked image under the server's avatar size cap and hands
+/// it to the native transfer machinery; the refreshed avatar then shows up
+/// everywhere through the regular avatar-cache round-trip.
+class _AvatarSection extends ConsumerStatefulWidget {
+  final TsConnectionState conn;
+  final TsConnectionNotifier notifier;
+
+  const _AvatarSection({required this.conn, required this.notifier});
+
+  @override
+  ConsumerState<_AvatarSection> createState() => _AvatarSectionState();
+}
+
+class _AvatarSectionState extends ConsumerState<_AvatarSection> {
+  bool _uploading = false;
+  bool _deleting = false;
+
+  Future<void> _pickAndUpload() async {
+    final conn = ref.read(tsConnectionProvider);
+    final uid = conn.clients
+        .where((c) => c.id == conn.ownClientId)
+        .firstOrNull
+        ?.uid;
+    if (uid == null || uid.isEmpty) return;
+    PlatformFile? picked;
+    try {
+      picked = await FilePicker.pickFile(type: FileType.image);
+    } catch (_) {
+      picked = null;
+    }
+    if (!mounted || picked == null) return;
+    Uint8List? bytes;
+    try {
+      bytes = await picked.readAsBytes();
+    } catch (_) {
+      bytes = null;
+    }
+    if (!mounted || bytes == null || bytes.isEmpty) return;
+    final al = AppLocalizations.of(context);
+    setState(() => _uploading = true);
+    try {
+      await AvatarUploadService.upload(bytes, uid);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(al.avatarUploaded)));
+    } on AvatarUploadException catch (e) {
+      if (!mounted) return;
+      final text = switch (e.cause) {
+        AvatarUploadFailure.invalidImage => al.avatarInvalidImage,
+        AvatarUploadFailure.couldNotStart => al.avatarUploadFailed(
+          al.permNotConnected,
+        ),
+        AvatarUploadFailure.transferFailed => al.avatarUploadFailed(
+          e.reason ?? al.permFailedUnknown,
+        ),
+      };
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(al.avatarUploadFailed(e.toString()))),
+      );
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
+  /// Clears the avatar: the announce gets the server's real answer through
+  /// the perm_op receipt; the preview (and the delete button) then
+  /// disappear on their own once the server's echo reaches the poll.
+  Future<void> _deleteAvatar() async {
+    final conn = ref.read(tsConnectionProvider);
+    final uid = conn.clients
+        .where((c) => c.id == conn.ownClientId)
+        .firstOrNull
+        ?.uid;
+    if (uid == null || uid.isEmpty) return;
+    final al = AppLocalizations.of(context);
+    setState(() => _deleting = true);
+    try {
+      final error = await widget.notifier.deleteAvatar(uid);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error != null ? al.avatarDeleteFailed(error) : al.avatarDeleted,
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _deleting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final al = AppLocalizations.of(context);
+    final self = widget.conn.clients
+        .where((c) => c.id == widget.conn.ownClientId)
+        .firstOrNull;
+    return Row(
+      children: [
+        // Same 36 px avatar treatment as the per-client sheet.
+        Consumer(
+          builder: (context, ref, _) {
+            final avatarPath = ref.watch(avatarCacheProvider)[self?.avatarHash];
+            if (avatarPath == null) {
+              return const Icon(Icons.person, color: Colors.grey, size: 36);
+            }
+            return ClipOval(
+              child: Image.file(
+                File(avatarPath),
+                width: 36,
+                height: 36,
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.low,
+                gaplessPlayback: true,
+              ),
+            );
+          },
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            self?.nickname ?? '',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        if (_uploading || _deleting)
+          const Padding(
+            padding: EdgeInsets.only(right: 12),
+            child: SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        // Deleting only makes sense while an avatar is actually set.
+        if (self?.avatarHash != null)
+          IconButton(
+            tooltip: al.avatarDelete,
+            onPressed: (_uploading || _deleting) ? null : _deleteAvatar,
+            icon: const Icon(Icons.delete_outline, size: 20),
+          ),
+        TextButton.icon(
+          onPressed: (_uploading || _deleting) ? null : _pickAndUpload,
+          icon: const Icon(Icons.upload, size: 18),
+          label: Text(al.avatarUpload),
+        ),
+      ],
     );
   }
 }
@@ -646,6 +1248,10 @@ class _ClientVolumeSheet extends StatefulWidget {
   /// Snapshot of the channel roster for the move-to-channel picker.
   final List<TsChannel> channels;
 
+  /// Opens the chat panel on this client's private conversation (the screen
+  /// closes this sheet first).
+  final VoidCallback onOpenChat;
+
   const _ClientVolumeSheet({
     required this.client,
     required this.notifier,
@@ -654,6 +1260,7 @@ class _ClientVolumeSheet extends StatefulWidget {
     required this.ownCanManagePermissions,
     required this.ownPrivilegeTier,
     required this.channels,
+    required this.onOpenChat,
   });
 
   @override
@@ -777,6 +1384,32 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
                 ),
               ],
             ),
+            // ── Position (never for ourselves — we are the origin) ──
+            if (!isSelf) ...[
+              const SizedBox(height: 8),
+              _actionButton(
+                context,
+                icon: Icons.spatial_audio,
+                label: al.positionTitle,
+                onPressed: () => pushPositionEditPage(context, c),
+              ),
+            ],
+            // ── Private chat (a communication entry, not a moderation
+            // action; ServerQuery clients cannot take part) ──
+            if (!isSelf && _canShowPrivateMessage(c)) ...[
+              const SizedBox(height: 8),
+              _actionButton(
+                context,
+                icon: Icons.chat_bubble_outline,
+                label: al.sendMessageAction,
+                onPressed: () {
+                  // Close this sheet first — the chat panel opens as the
+                  // next sheet on the same route stack.
+                  Navigator.of(context).pop();
+                  widget.onOpenChat();
+                },
+              ),
+            ],
             const SizedBox(height: 20),
             // ── Permission-gated actions (never for ourselves) ──
             if (!isSelf && _hasAnyAction(c)) ...[
@@ -854,6 +1487,12 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
   /// (`permissionHints == 0`) it is shown by default; once hints are known,
   /// the POKE bit gates it.
   bool _canShowPoke(TsClient c) => c.permissionHints == 0 || c.canPoke;
+
+  /// Private messaging follows the same "unknown → optimistic" policy as
+  /// poke, and ServerQuery clients (clientType != 0) never get the entry —
+  /// they cannot take part in client chat.
+  bool _canShowPrivateMessage(TsClient c) =>
+      c.clientType == 0 && (c.permissionHints == 0 || c.canPrivateMessage);
 
   /// Moderation actions are "unknown → optimistic": while the server has not
   /// pushed the client's permission-hint bits (`permissionHints == 0`) the

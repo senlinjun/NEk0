@@ -4,7 +4,8 @@ use crate::{
     COMMAND_TX, FRAME_SIZE, FT_CLIENT_FT, FT_KIND_DOWNLOAD, FT_KIND_UPLOAD, FT_LISTS, FT_OPS,
     FT_TASK_BY_RC, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, PERM_OPS, PLAYED_SAMPLES,
     ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
-    SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, OUTPUT_RESTART_REQUESTED, PendingFtList,
+    SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
+    PendingFtList,
 };
 
 use futures::prelude::*;
@@ -112,6 +113,39 @@ fn maybe_publish_ft_progress(task_id: u32, task: &crate::FtTask, force: bool) {
     }
 }
 
+/// After a confirmed avatar upload, announce the new avatar (clientupdate
+/// `client_flag_avatar` = MD5 of the uploaded file) — the server does not
+/// infer the hash from the transfer, so without this the avatar never shows
+/// up on any client. Queued as a command so it works both from the event
+/// loop and from a transfer worker thread.
+fn publish_avatar_hash(md5: String) {
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        let _ = tx.send(Command::SetAvatarHash { hash: md5 });
+    }
+}
+
+/// MD5 of a local file as lowercase hex. Avatars are tiny; chunked anyway
+/// so a mispointed path cannot blow up memory.
+fn md5_file_hex(path: &str) -> std::io::Result<String> {
+    use md5::{Digest, Md5};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Md5::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect())
+}
+
 /// Downloads the payload of an accepted ftinitdownload onto the local disk.
 /// Runs on its own OS thread with blocking IO — the connection event loop is
 /// untouched by the (potentially long) transfer.
@@ -215,6 +249,11 @@ fn spawn_upload_worker(task_id: u32, mut stream: std::net::TcpStream, src: Strin
                     return Ok(());
                 }
             }
+            // Avatar upload: announce the hash before the task is removed —
+            // the status handler never ran, so this is the only success path.
+            if let Some(md5) = FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone()) {
+                publish_avatar_hash(md5);
+            }
             crate::finish_ft_task(task_id, true, None);
             Ok(())
         })();
@@ -257,6 +296,17 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                 sort_id: g.sort_id,
             })
             .collect();
+        // Server property snapshot for the server-settings dialog prefill;
+        // `notifyserveredited` updates the book, so a successful serveredit
+        // lands here on the next book event batch.
+        state.server_name = book.server.name.clone();
+        state.server_max_clients = Some(book.server.max_clients);
+        state.server_welcome_message = book.server.welcome_message.clone();
+        state.server_has_password = book
+            .server
+            .optional_data
+            .as_ref()
+            .map(|o| o.has_password);
     }
     let channels = book
         .channels
@@ -276,6 +326,23 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
             is_default: c.is_default.unwrap_or(false),
             permission_hints: c.permission_hints.map(|p| p.bits()).unwrap_or(0),
             needed_talk_power: c.needed_talk_power.unwrap_or(0),
+            max_clients: match c.max_clients {
+                Some(tsclientlib::MaxClients::Limited(n)) => n as i32,
+                _ => -1, // unlimited / inherited / not yet reported
+            },
+            is_permanent: c.channel_type == tsclientlib::ChannelType::Permanent,
+            is_semi_permanent: c.channel_type == tsclientlib::ChannelType::SemiPermanent,
+            description: c
+                .optional_data
+                .as_ref()
+                .map(|d| d.description.clone())
+                .unwrap_or_default(),
+            max_family_clients: match c.max_family_clients {
+                Some(tsclientlib::MaxClients::Limited(n)) => n as i32,
+                Some(tsclientlib::MaxClients::Unlimited) => 0,
+                _ => -1, // inherited / not yet reported
+            },
+            delete_delay: c.delete_delay.map(|d| d.whole_seconds()).unwrap_or(0),
         })
         .collect();
     let clients: Vec<_> = book
@@ -296,6 +363,31 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                 tsclientlib::ClientType::Normal => 0u8,
                 tsclientlib::ClientType::Query { admin: false } => 1u8,
                 tsclientlib::ClientType::Query { admin: true } => 2u8,
+            };
+            // Volume + 2D position — one STATE lock for both (both keyed by UID).
+            let (volume, pos) = {
+                let cid = c.id.0 as u16;
+                let state = STATE.lock();
+                // Primary source: persisted dB value keyed by the user UID
+                let persisted = c
+                    .uid
+                    .as_ref()
+                    .and_then(|uid| state.client_volumes.get(&uid.to_string()).copied());
+                let volume = persisted.unwrap_or_else(|| {
+                    // Fallback: convert linear gain from jitter buffer → dB
+                    crate::CLIENT_BUFFERS
+                        .get(&cid)
+                        .map(|b| {
+                            let gain = f32::from_bits(b.volume.load(Ordering::Relaxed));
+                            20.0 * gain.max(1e-10).log10()
+                        })
+                        .unwrap_or(0.0) // default: 0 dB = unity gain
+                });
+                let pos = c
+                    .uid
+                    .as_ref()
+                    .and_then(|uid| state.client_positions.get(&uid.to_string()).copied());
+                (volume, pos)
             };
             TsClient {
                 id: c.id.0 as u32,
@@ -328,26 +420,9 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                         .map(|t| t.elapsed().as_millis() < 500)
                         .unwrap_or(false)
                 },
-                volume: {
-                    let cid = c.id.0 as u16;
-                    let state = STATE.lock();
-                    // Primary source: persisted dB value keyed by the user UID
-                    let persisted = c
-                        .uid
-                        .as_ref()
-                        .and_then(|uid| state.client_volumes.get(&uid.to_string()).copied());
-                    drop(state);
-                    persisted.unwrap_or_else(|| {
-                        // Fallback: convert linear gain from jitter buffer → dB
-                        crate::CLIENT_BUFFERS
-                            .get(&cid)
-                            .map(|b| {
-                                let gain = f32::from_bits(b.volume.load(Ordering::Relaxed));
-                                20.0 * gain.max(1e-10).log10()
-                            })
-                            .unwrap_or(0.0) // default: 0 dB = unity gain
-                    })
-                },
+                volume,
+                pos_x: pos.map(|p| p.0),
+                pos_y: pos.map(|p| p.1),
             }
         })
         .collect();
@@ -384,6 +459,7 @@ pub extern "C" fn ts_connect(
     nickname: *const c_char,
     channel: *const c_char,
     password: *const c_char,
+    token: *const c_char,
 ) -> *mut c_char {
     let address = unsafe { std::ffi::CStr::from_ptr(address) }
         .to_string_lossy()
@@ -409,6 +485,15 @@ pub extern "C" fn ts_connect(
                 .into_owned(),
         )
     };
+    // Privilege key for the first login; empty means "no token".
+    let token = if token.is_null() {
+        None
+    } else {
+        let t = unsafe { std::ffi::CStr::from_ptr(token) }
+            .to_string_lossy()
+            .into_owned();
+        if t.is_empty() { None } else { Some(t) }
+    };
 
     eprintln!("ts_connect: address={}", address);
 
@@ -428,7 +513,7 @@ pub extern "C" fn ts_connect(
     drop(state);
 
     RUNTIME.spawn(async move {
-        if let Err(e) = do_connect(address, nickname, channel, password).await {
+        if let Err(e) = do_connect(address, nickname, channel, password, token).await {
             eprintln!("do_connect: ERROR {}", e);
             let mut state = STATE.lock();
             state.connecting = false;
@@ -446,6 +531,7 @@ async fn do_connect(
     nickname: String,
     channel: Option<String>,
     password: Option<String>,
+    token: Option<String>,
 ) -> Result<(), String> {
     crate::install_panic_hook();
     let mut opts = Connection::build(address).name(nickname);
@@ -459,6 +545,9 @@ async fn do_connect(
     }
     if let Some(pw) = password {
         opts = opts.password(pw);
+    }
+    if let Some(tok) = token {
+        opts = opts.token(tok);
     }
 
     let mut con = opts.connect().map_err(|e| format!("{}", e))?;
@@ -514,14 +603,19 @@ async fn do_connect(
 
     // Own the data we need before sending more commands: `get_state()` borrows
     // `con` immutably, and the permission-list request needs `&mut con`.
-    let (own_dbid, sname, oid) = {
+    let (own_dbid, sname, oid, ask_privilegekey) = {
         let book = con.get_state().map_err(|e| format!("{}", e))?;
         let own_dbid = book
             .clients
             .get(&book.own_client)
             .map(|c| c.database_id.0)
             .unwrap_or(0);
-        (own_dbid, book.server.name.clone(), book.own_client.0 as u32)
+        (
+            own_dbid,
+            book.server.name.clone(),
+            book.own_client.0 as u32,
+            book.server.ask_for_privilegekey,
+        )
     };
     // Ask for our own directly-assigned permission list — a low-threshold
     // hint used by the UI to decide whether to offer the permission-
@@ -562,6 +656,7 @@ async fn do_connect(
         state.pending_events.push_back(TsEvent::Connected {
             server_name: sname,
             client_id: oid,
+            ask_for_privilegekey: ask_privilegekey,
         });
     }
 
@@ -646,29 +741,33 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     // audio_data and audio are references — they get dropped naturally
     drop(audio_buf);
 
-    // Get or create per-client decoder (mono, fallback stereo) — DashMap, no STATE lock
-    let mut decoder = AUDIO_DECODERS.entry(from_id)
-        .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
-    let mut pcm_out = vec![0.0f32; FRAME];
-    let ok = match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
-        Ok(_) => true,
-        Err(_) => {
-            drop(decoder);
-            let mut stereo = AUDIO_DECODERS_STEREO.entry(from_id)
-                .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
-            let mut stereo_out = vec![0.0f32; FRAME * 2];
-            match stereo.decode(&opus_vec, FRAME, &mut stereo_out) {
-                Ok(decoded) => {
-                    let n = decoded.min(FRAME);
-                    for i in 0..n {
-                        pcm_out[i] = (stereo_out[i * 2] + stereo_out[i * 2 + 1]) * 0.5;
-                    }
-                    true
-                }
-                Err(e) => {
-                    eprintln!("opus decode error from client {}: {}", from_id, e);
-                    false
-                }
+    // Parse the Opus TOC byte: the top 5 bits are the config, bit 2 is the
+    // stereo flag, the low 2 bits the frame-count code. Decode with the
+    // matching channel count and keep the result stereo end-to-end — stereo
+    // sources (e.g. music bots) must reach the mixer as L/R so they can be
+    // positioned; never downmixed here. The frame stored in the jitter buffer
+    // carries 960 (mono) or 1920 (stereo interleaved) samples.
+    let stereo_packet = !opus_vec.is_empty() && (opus_vec[0] >> 2) & 1 == 1;
+    let out_len = if stereo_packet { FRAME * 2 } else { FRAME };
+    let mut pcm_out = vec![0.0f32; out_len];
+    let ok = if stereo_packet {
+        let mut decoder = AUDIO_DECODERS_STEREO.entry(from_id)
+            .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
+        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("opus stereo decode error from client {}: {}", from_id, e);
+                false
+            }
+        }
+    } else {
+        let mut decoder = AUDIO_DECODERS.entry(from_id)
+            .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
+        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("opus decode error from client {}: {}", from_id, e);
+                false
             }
         }
     };
@@ -676,7 +775,7 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     if !ok { return; }
 
     // Convert f32 → i16 (no volume post-gain — volume is applied as mixing weight in callback)
-    let mut frame = vec![0i16; FRAME];
+    let mut frame = vec![0i16; out_len];
     for (i, &s) in pcm_out.iter().enumerate() {
         frame[i] = (s.clamp(-1.0, 1.0) * 32767.0).clamp(-32768.0, 32767.0) as i16;
     }
@@ -684,20 +783,24 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     // Get or create per-client jitter buffer — DashMap, no STATE lock
     let buf = CLIENT_BUFFERS.entry(from_id).or_insert_with(|| {
         let b = crate::ClientJitterBuffer::new();
-        // Inherit persisted volume when creating a new jitter buffer: resolve
-        // the client's UID from the roster, then look up the UID-keyed table.
+        // Inherit persisted per-UID settings when creating a new jitter
+        // buffer: resolve the client's UID from the roster, then look up the
+        // UID-keyed tables (volume + 2D position survive reconnects).
         let state = STATE.lock();
-        let persisted_db = state
+        let uid = state
             .clients
             .iter()
             .find(|c| c.id as u16 == from_id)
-            .and_then(|c| c.uid.as_ref())
-            .and_then(|uid| state.client_volumes.get(uid.as_str()).copied());
-        drop(state);
-        if let Some(db) = persisted_db {
+            .and_then(|c| c.uid.as_ref());
+        if let Some(db) = uid.and_then(|uid| state.client_volumes.get(uid.as_str()).copied()) {
             let gain = 10.0_f32.powf(db / 20.0);
             b.volume.store(f32::to_bits(gain), Ordering::Release);
         }
+        if let Some(pos) = uid.and_then(|uid| state.client_positions.get(uid.as_str()).copied()) {
+            b.pos_x.store(f32::to_bits(pos.0), Ordering::Release);
+            b.pos_y.store(f32::to_bits(pos.1), Ordering::Release);
+        }
+        drop(state);
         b
     });
 
@@ -794,9 +897,12 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
         buf.frame_pool.push(old);
     }
 
-    // Get frame buffer from pool or allocate
-    let mut write_frame = buf.frame_pool.pop().unwrap_or_else(|| vec![0i16; FRAME]);
-    write_frame.copy_from_slice(&frame);
+    // Get frame buffer from pool or allocate. Pool vecs come in both mono
+    // (960) and stereo (1920) lengths — resize to this frame before storing
+    // (capacity is reused either way).
+    let mut write_frame = buf.frame_pool.pop().unwrap_or_else(|| frame.clone());
+    write_frame.clear();
+    write_frame.extend_from_slice(&frame);
     buf.slots[slot_idx].swap(Some(write_frame));
     buf.write_seq.store(global_seq, Ordering::Release);
     buf.last_packet.store(Some(Instant::now()));
@@ -858,14 +964,356 @@ struct SfxSlot {
     pos: usize,
 }
 
-/// Drop the current cpal output stream and rebuild it on the current default
-/// output device (same config and mixing callback as the initial build).
-/// Resets playback state exactly like `ts_stop_audio` — buffers are cleared
-/// and jitter/decoders are rebuilt on the next incoming audio.
+/// Per-client mixing gains from the client's 2D position relative to us
+/// (meters; +x = right, +y = forward), multiplied by the user-set linear
+/// volume. A NaN position (never set) plays centered at `vol` — identical to
+/// the pre-positional behavior. Distance attenuation 1/(1+(d/REF)²) is smooth
+/// with no hard cutoff; pan uses an equal-gain center law so the centered
+/// loudness matches the unpositioned one and neither side exceeds it (plain
+/// stereo cannot place front vs back — the distance carries that).
+const POS_ATTEN_REF: f32 = 3.0; // meters: atten is 0.5 at this distance
+const POS_PAN_RANGE: f32 = 2.0; // meters: x where the pan reaches fully left/right
+
+fn positional_gains(vol: f32, x: f32, y: f32) -> (f32, f32) {
+    if x.is_nan() || y.is_nan() {
+        return (vol, vol);
+    }
+    let d = (x * x + y * y).sqrt();
+    let atten = vol / (1.0 + (d / POS_ATTEN_REF).powi(2));
+    let pan = (x / POS_PAN_RANGE).clamp(-1.0, 1.0);
+    let l = atten * if pan <= 0.0 { 1.0 } else { 1.0 - pan };
+    let r = atten * if pan >= 0.0 { 1.0 + pan } else { 1.0 };
+    (l, r)
+}
+
+/// Fixed-capacity FIFO of generated 48 kHz mix positions, each holding an
+/// interleaved [left, right] pair. Decouples the frame-based mixing clock
+/// (PLAYED_SAMPLES) from the hardware callback's arbitrary buffer length /
+/// sample rate / channel count.
+struct OutRing {
+    buf: Vec<[f32; 2]>,
+    head: usize,
+    len: usize,
+}
+
+/// ~170ms at 48 kHz (positions) — far above any single callback request.
+const OUT_RING_CAP: usize = 8192;
+
+impl OutRing {
+    fn new() -> Self {
+        Self {
+            buf: vec![[0.0, 0.0]; OUT_RING_CAP],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, lr: [f32; 2]) {
+        if self.len == self.buf.len() {
+            // Defensive: drop the oldest position rather than clobber memory.
+            // Unreachable with on-demand generation (len peaks ~1 frame + slack).
+            self.head = (self.head + 1) % self.buf.len();
+            self.len -= 1;
+        }
+        if self.head + self.len == self.buf.len() {
+            self.buf.copy_within(self.head..self.head + self.len, 0);
+            self.head = 0;
+        }
+        self.buf[self.head + self.len] = lr;
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> [f32; 2] {
+        let lr = self.buf[self.head];
+        self.head += 1;
+        self.len -= 1;
+        if self.len == 0 {
+            self.head = 0;
+        }
+        lr
+    }
+}
+
+/// Generate one 48 kHz mix position (active clients with positional L/R
+/// gains + channel-event SFX) and append the [left, right] pair to the
+/// output ring. Runs inside the cpal output callback — no allocation
+/// (`mix_l`/`mix_r` are local arrays, the ring is pre-allocated).
 ///
-/// Called on connect and, from the maintenance task, when
-/// `OUTPUT_RESTART_REQUESTED` is set (device route change or stream error).
+/// This IS the mixing clock: PLAYED_SAMPLES advances by FRAME_SIZE (per-
+/// channel samples — the logical frame number PLAYED_SAMPLES / FRAME_SIZE
+/// advances at 50/s regardless of the output channel count) and the jitter
+/// buffers schedule packets against it (base_slot + TARGET_DELAY), so
+/// generation must be driven strictly on demand as the output pass drains
+/// the ring — never ahead of real time.
+fn gen_output_mix_frame(ring: &mut OutRing, sfx_slots: &mut [SfxSlot; 2]) {
+    let slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / FRAME_SIZE;
+    let mut mix_l = [0.0f32; FRAME_SIZE as usize];
+    let mut mix_r = [0.0f32; FRAME_SIZE as usize];
+    let mut active = 0u32;
+
+    // Phase A: collect one frame from each active client via snapshot
+    let client_ids = ACTIVE_CLIENT_IDS.load();
+    for &client_id in client_ids.iter() {
+        if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
+            // One atomic load: base_seq/base_slot are always a consistent pair.
+            let base_pair = buf.base_pair.load(Ordering::Acquire);
+            // `base_pair == 0` means "uninitialized". Do NOT test base_seq
+            // instead: a speaker's very first voice packet has seq 0, which
+            // would make their audio silently skipped forever (the rebase
+            // path can't fire while they keep talking).
+            if base_pair == 0 {
+                continue;
+            }
+            let base_seq = (base_pair >> 32) as u32;
+            let base_slot = base_pair & 0xFFFF_FFFF;
+            let expected_seq = slot
+                .wrapping_sub(base_slot)
+                .wrapping_add(base_seq as u64);
+            let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
+            if write_seq >= expected_seq {
+                let idx = (expected_seq.wrapping_sub(base_seq as u64)) as usize
+                    % crate::JITTER_SLOTS;
+                if let Some(frame) = buf.slots[idx].swap(None) {
+                    let vol = f32::from_bits(buf.volume.load(Ordering::Relaxed));
+                    // Positional L/R gains (NaN position = centered).
+                    let px = f32::from_bits(buf.pos_x.load(Ordering::Relaxed));
+                    let py = f32::from_bits(buf.pos_y.load(Ordering::Relaxed));
+                    let (l_gain, r_gain) = positional_gains(vol, px, py);
+                    // Frame length tells the channel count: 960 mono
+                    // (duplicated into both mix channels) or 1920 stereo
+                    // interleaved (L/R kept separate end-to-end).
+                    match frame.len() {
+                        1920 => {
+                            for i in 0..FRAME_SIZE as usize {
+                                mix_l[i] += frame[i * 2] as f32 * l_gain;
+                                mix_r[i] += frame[i * 2 + 1] as f32 * r_gain;
+                            }
+                        }
+                        _ => {
+                            for i in 0..FRAME_SIZE as usize {
+                                mix_l[i] += frame[i] as f32 * l_gain;
+                                mix_r[i] += frame[i] as f32 * r_gain;
+                            }
+                        }
+                    }
+                    active += 1;
+                    buf.frame_pool.push(frame);
+                }
+            }
+        }
+    }
+
+    // Phase B: attenuate
+    let atten = if active > 0 {
+        1.0 / (active as f32).sqrt()
+    } else {
+        1.0
+    };
+    for i in 0..FRAME_SIZE as usize {
+        mix_l[i] = (mix_l[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
+        mix_r[i] = (mix_r[i] * atten).clamp(-32768.0, 32767.0) / 32768.0;
+    }
+
+    // Phase C: channel-event SFX — start queued requests in the two parallel
+    // slots and mix them on top of the (already attenuated) voice at fixed
+    // 0.5 gain. Samples are mono and play centered on both channels.
+    {
+        loop {
+            match SFX_QUEUE.pop() {
+                None => break,
+                Some(kind) => {
+                    if let Some(sfx) = sfx_slots.iter_mut().find(|s| s.kind == 0) {
+                        sfx.kind = kind;
+                        sfx.pos = 0;
+                    } else {
+                        // Both slots busy — drop the request rather than let
+                        // the queue grow unbounded.
+                        eprintln!(
+                            "[sfx] dropped request kind={} (both slots busy)",
+                            kind
+                        );
+                    }
+                }
+            }
+        }
+        // Load the active sample table only when at least one slot is playing
+        // (ArcSwap::load is lock-free, but there is no reason to touch it
+        // while every slot is idle).
+        if sfx_slots.iter().any(|s| s.kind != 0) {
+            let samples = crate::SFX_SAMPLES.load();
+            for sfx in sfx_slots.iter_mut() {
+                if sfx.kind == 0 {
+                    continue;
+                }
+                let src: &[f32] = match &samples[(sfx.kind - 1) as usize] {
+                    Some(s) => s.as_slice(),
+                    None => &[],
+                };
+                if sfx.pos >= src.len() {
+                    // Empty/consumed sample: request done.
+                    sfx.kind = 0;
+                    continue;
+                }
+                let mut i = 0usize;
+                while i < FRAME_SIZE as usize && sfx.pos + i < src.len() {
+                    let s = src[sfx.pos + i] * 0.5;
+                    mix_l[i] += s;
+                    mix_r[i] += s;
+                    i += 1;
+                }
+                sfx.pos += i;
+                if sfx.pos >= src.len() {
+                    sfx.kind = 0;
+                }
+            }
+        }
+    }
+    // Final clamp after SFX mixing (voice was already clamped in Phase B).
+    for s in &mut mix_l {
+        *s = s.clamp(-1.0, 1.0);
+    }
+    for s in &mut mix_r {
+        *s = s.clamp(-1.0, 1.0);
+    }
+
+    for i in 0..FRAME_SIZE as usize {
+        ring.push([mix_l[i], mix_r[i]]);
+    }
+    let old = PLAYED_SAMPLES.fetch_add(FRAME_SIZE, Ordering::Relaxed);
+    // Clock-drift diagnostic: consecutive generations must observe perfectly
+    // sequential PLAYED_SAMPLES values (FRAME_SIZE apart).
+    let expected = CB_STATS.expected_next_played.load(Ordering::Relaxed);
+    if expected != 0 && old != expected {
+        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
+    }
+    CB_STATS.expected_next_played.store(old + FRAME_SIZE, Ordering::Relaxed);
+    CB_STATS.mix_frames.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Rebuilds the cpal output stream. The internal mixing clock stays 48 kHz
+/// mono at all times; the device-facing stream is negotiated through a
+/// fallback chain (48k/mono/Fixed(960) → 48k/mono/Default → device default
+/// channel count / sample rate with in-callback linear resampling and mono
+/// duplication), so desktop hosts that reject the fixed Android-style config
+/// still work.
+///
+// ─── Audio device selection ─────────────────────────────────────────
+
+/// User-selected audio devices, addressed by name ("" selection = None =
+/// system default). Set from Dart via ts_set_audio_*_device and persisted
+/// on the Dart side. cpal does not expose endpoint IDs, so names are the
+/// persistence keys — on Windows two endpoints sharing a FriendlyName
+/// resolve to the first match.
+static OUTPUT_DEVICE_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static INPUT_DEVICE_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Preferred device names when the user has not chosen one (Linux only):
+/// the desktop sound server registers these PCM names in /etc/alsa/conf.d.
+/// The ALSA "default" PCM does NOT necessarily route through the sound
+/// server — recent alsa-lib versions no longer load the directory where
+/// distros ship the `99-pipewire-default.conf` snippet, so "default"
+/// resolves to a raw dmix/dsnoop plug on the onboard card and bypasses the
+/// desktop's chosen sink/source entirely (apparently silent for users on
+/// USB/other default devices). WASAPI (Windows) and oboe (Android) don't
+/// have this layering problem: their default device IS the routed one.
+#[cfg(target_os = "linux")]
+const SOUND_SERVER_PCMS: [&str; 2] = ["pipewire", "pulse"];
+
+fn enumerate_devices(host: &cpal::Host, input: bool) -> Vec<cpal::Device> {
+    let res = if input {
+        host.input_devices()
+    } else {
+        host.output_devices()
+    };
+    match res {
+        Ok(iter) => iter.collect(),
+        Err(e) => {
+            eprintln!("audio: device enumeration failed: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// First device whose name matches one of [names] (in priority order).
+fn find_device_by_name(mut devs: Vec<cpal::Device>, names: &[&str]) -> Option<cpal::Device> {
+    for want in names {
+        if let Some(i) = devs
+            .iter()
+            .position(|d| d.name().ok().as_deref() == Some(*want))
+        {
+            return Some(devs.swap_remove(i));
+        }
+    }
+    None
+}
+
+/// Resolves the device to open, in priority order:
+/// 1. the user's explicit choice (exact name match),
+/// 2. Linux only, no explicit choice: the sound server's PCM
+///    ("pipewire"/"pulse") — see [SOUND_SERVER_PCMS],
+/// 3. the host's default device.
+fn pick_device(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
+    let kind = if input { "input" } else { "output" };
+
+    let selected = if input {
+        INPUT_DEVICE_NAME.lock().unwrap().clone()
+    } else {
+        OUTPUT_DEVICE_NAME.lock().unwrap().clone()
+    };
+    if let Some(want) = selected {
+        let devs = enumerate_devices(host, input);
+        if let Some(dev) = find_device_by_name(devs, &[want.as_str()]) {
+            return Some(dev);
+        }
+        eprintln!(
+            "audio: chosen {} device \"{}\" not available, falling back",
+            kind, want
+        );
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            let devs = enumerate_devices(host, input);
+            if let Some(dev) = find_device_by_name(devs, &SOUND_SERVER_PCMS) {
+                return Some(dev);
+            }
+        }
+    }
+    if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    }
+}
+
+/// Rebuilds the cpal output stream on the selected device (see pick_device).
+/// The internal mixing clock stays 48 kHz stereo at all times; the
+/// device-facing stream is negotiated through a fallback chain (48k stereo
+/// Fixed(960) → 48k stereo Default → 48k mono → device default sample rate
+/// with in-callback linear resampling), so desktop hosts that reject the
+/// fixed Android-style config still work. Stereo is preferred because
+/// panning/positional audio needs distinct L/R.
+///
+/// Resets playback state exactly like `ts_stop_audio` — buffers are cleared
+/// and jitter/decoders are rebuilt on the next incoming audio. Called on
+/// connect and, from the maintenance task, when `OUTPUT_RESTART_REQUESTED`
+/// is set (device route change or stream error).
+///
+/// The rebuild runs inside `catch_unwind`: cpal's Android backend touches
+/// JNI-dependent paths (device probing, buffer-size queries), and a panic
+/// here must degrade to "no audio" instead of killing the enclosing task —
+/// on the connect path that task also owns the event loop, so its death
+/// would leave the UI without the channel tree. The panic hook still records
+/// the message (flushed to Dart as a Diag event).
 fn restart_output_stream() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        restart_output_stream_inner();
+    }));
+    if result.is_err() {
+        eprintln!("cpal: output stream rebuild panicked; audio stays off until the next restart");
+    }
+}
+
+fn restart_output_stream_inner() {
     // Drop the old stream first so the new one is the only active consumer.
     AUDIO_STREAM.lock().unwrap().0 = None;
     crate::clear_sfx_queue();
@@ -874,193 +1322,118 @@ fn restart_output_stream() {
     AUDIO_DECODERS_STEREO.clear();
     PLAYED_SAMPLES.store(0, Ordering::Relaxed);
     ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
+    CB_STATS.expected_next_played.store(0, Ordering::Relaxed);
 
     let host = cpal::default_host();
-    if let Some(device) = host.default_output_device() {
-        let config = cpal::StreamConfig {
+    let Some(device) = pick_device(&host, false) else {
+        eprintln!("cpal: no output device");
+        return;
+    };
+    eprintln!(
+        "cpal: output device \"{}\"",
+        device.name().unwrap_or_default()
+    );
+
+    // Stereo is preferred — panning/positional audio needs distinct L/R;
+    // mono output plays the centered (L+R)/2 downmix. The fallback chain
+    // negotiates buffer size, channel count and finally the device's own
+    // sample rate (with in-callback linear resampling), so desktop hosts
+    // that reject the fixed Android-style config still work.
+    let mut candidates = vec![
+        cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Fixed(960),
+        },
+        cpal::StreamConfig {
+            channels: 2,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        },
+        cpal::StreamConfig {
             channels: 1,
             sample_rate: cpal::SampleRate(48000),
             buffer_size: cpal::BufferSize::Fixed(960),
-        };
-        match device.build_output_stream(
+        },
+        cpal::StreamConfig {
+            channels: 1,
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        },
+    ];
+    if let Ok(default) = device.default_output_config() {
+        if default.sample_rate().0 != 48000 {
+            candidates.push(cpal::StreamConfig {
+                channels: default.channels(),
+                sample_rate: default.sample_rate(),
+                buffer_size: cpal::BufferSize::Default,
+            });
+        }
+    }
+
+    for config in candidates {
+        let channels = config.channels as usize;
+        // 48k mix positions consumed per device output position (interpolation
+        // phase advance); 1.0 = passthrough.
+        let ratio = 48000.0 / config.sample_rate.0 as f64;
+        let stream = device.build_output_stream(
             &config,
             {
-                let current_mix_slot = std::cell::Cell::new(u64::MAX);
-                let current_mix_buf = std::cell::RefCell::new([0.0f32; FRAME_SIZE as usize]);
+                let ring = std::cell::RefCell::new(OutRing::new());
                 let sfx_slots = std::cell::RefCell::new([SfxSlot::default(); 2]);
-                let cb_seq = std::cell::Cell::new(0u64);
+                // Linear-resampler state carried across callbacks: frac is the
+                // position between s0 (last consumed 48k mix position) and s1
+                // (the next ring position). s1 = None until the first callback.
+                let rs_frac = std::cell::Cell::new(0.0f64);
+                let rs_s0 = std::cell::Cell::new([0.0f32, 0.0f32]);
+                let rs_s1: std::cell::Cell<Option<[f32; 2]>> = std::cell::Cell::new(None);
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // ── diagnostics: first 3 callbacks print liveness ──────────
-                    let seq = cb_seq.get();
-                    if seq < 3 {
-                        eprintln!("[cpal-stats] cb#{} data.len={} played_before={}",
-                            seq, data.len(), PLAYED_SAMPLES.load(Ordering::Relaxed));
-                        cb_seq.set(seq + 1);
-                    }
-                    // ── diagnostics: entry timing ────────────────────────────
-                    let cb_entry = std::time::Instant::now();
-                    let played = PLAYED_SAMPLES.load(Ordering::Relaxed);
-                    let played_before = played;
-                    // Consistency: next-callback expects this value
-                    let expected = CB_STATS.expected_next_played.load(Ordering::Relaxed);
-                    if expected != 0 && played_before != expected {
-                        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
-                    }
-                    let cb_elapsed_ns = cb_entry.elapsed().as_nanos() as u64;
-                    let last_ns = CB_STATS.last_cb_entry_ns.swap(cb_elapsed_ns, Ordering::Relaxed);
-                    if last_ns != 0 {
-                        CB_STATS.last_interval_us.store(
-                            cb_elapsed_ns.wrapping_sub(last_ns) / 1000, Ordering::Relaxed);
-                    }
-                    let mut slot = played / FRAME_SIZE;
-                    let mut offset = (played % FRAME_SIZE) as usize;
-                    let mut data_offset = 0usize;
-                    let mut mix_count = 0u64;
+                    let mut ring = ring.borrow_mut();
+                    let mut sfx = sfx_slots.borrow_mut();
 
-                    while data_offset < data.len() {
-                        // Generate new mix frame when entering a new logical frame
-                        if slot != current_mix_slot.get() {
-                            mix_count += 1;
-                            let mut mix_buf = [0.0f32; FRAME_SIZE as usize];
-                            let mut active = 0u32;
-
-                            // Phase A: collect one frame from each active client via snapshot
-                            let client_ids = ACTIVE_CLIENT_IDS.load();
-                            for &client_id in client_ids.iter() {
-                                if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
-                                    // One atomic load: base_seq/base_slot are
-                                    // always a consistent pair.
-                                    let base_pair = buf.base_pair.load(Ordering::Acquire);
-                                    let base_seq = (base_pair >> 32) as u32;
-                                    if base_seq == 0 { continue; }
-                                    let base_slot = base_pair & 0xFFFF_FFFF;
-                                    let expected_seq = slot.wrapping_sub(base_slot)
-                                        .wrapping_add(base_seq as u64);
-                                    let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
-                                    if write_seq >= expected_seq {
-                                        let idx = (expected_seq.wrapping_sub(base_seq as u64))
-                                            as usize % crate::JITTER_SLOTS;
-                                        if let Some(frame) = buf.slots[idx].swap(None) {
-                                            let vol = f32::from_bits(
-                                                buf.volume.load(Ordering::Relaxed));
-                                            for i in 0..FRAME_SIZE as usize {
-                                                mix_buf[i] += frame[i] as f32 * vol;
-                                            }
-                                            active += 1;
-                                            buf.frame_pool.push(frame);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Phase B: attenuate
-                            let atten = if active > 0 {
-                                1.0 / (active as f32).sqrt()
-                            } else {
-                                1.0
-                            };
-                            for s in &mut mix_buf {
-                                *s = (*s * atten).clamp(-32768.0, 32767.0) / 32768.0;
-                            }
-
-                            // Phase C: channel-event SFX — start queued requests
-                            // in the two parallel slots and mix them on top of
-                            // the (already attenuated) voice at fixed 0.5 gain.
-                            {
-                                let mut slots = sfx_slots.borrow_mut();
-                                loop {
-                                    match SFX_QUEUE.pop() {
-                                        None => break,
-                                        Some(kind) => {
-                                            if let Some(slot) =
-                                                slots.iter_mut().find(|s| s.kind == 0)
-                                            {
-                                                slot.kind = kind;
-                                                slot.pos = 0;
-                                            } else {
-                                                // Both slots busy — drop the
-                                                // request rather than let the
-                                                // queue grow unbounded.
-                                                eprintln!(
-                                                    "[sfx] dropped request kind={} (both slots busy)",
-                                                    kind
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                // Load the active sample table only when at
-                                // least one slot is playing (ArcSwap::load is
-                                // lock-free, but there is no reason to touch it
-                                // while every slot is idle).
-                                if slots.iter().any(|s| s.kind != 0) {
-                                    let samples = crate::SFX_SAMPLES.load();
-                                    for slot in slots.iter_mut() {
-                                        if slot.kind == 0 {
-                                            continue;
-                                        }
-                                        let src: &[f32] =
-                                            match &samples[(slot.kind - 1) as usize] {
-                                                Some(s) => s.as_slice(),
-                                                None => &[],
-                                            };
-                                        if slot.pos >= src.len() {
-                                            // Empty/consumed sample: request done.
-                                            slot.kind = 0;
-                                            continue;
-                                        }
-                                        let mut i = 0usize;
-                                        while i < FRAME_SIZE as usize
-                                            && slot.pos + i < src.len()
-                                        {
-                                            mix_buf[i] += src[slot.pos + i] * 0.5;
-                                            i += 1;
-                                        }
-                                        slot.pos += i;
-                                        if slot.pos >= src.len() {
-                                            slot.kind = 0;
-                                        }
-                                    }
-                                }
-                            }
-                            // Final clamp after SFX mixing (voice was already
-                            // clamped in Phase B).
-                            for s in &mut mix_buf {
-                                *s = s.clamp(-1.0, 1.0);
-                            }
-
-                            *current_mix_buf.borrow_mut() = mix_buf;
-                            current_mix_slot.set(slot);
+                    let n_out = data.len() / channels;
+                    let mut frac = rs_frac.get();
+                    let mut s0 = rs_s0.get();
+                    let mut s1 = rs_s1.take();
+                    if s1.is_none() {
+                        // First callback: seed the interpolation pair.
+                        while ring.len < 2 {
+                            gen_output_mix_frame(&mut ring, &mut sfx);
                         }
-
-                        // Copy from cached mix buffer to output
-                        let mix = current_mix_buf.borrow();
-                        let remaining_data = data.len() - data_offset;
-                        let remaining_frame = FRAME_SIZE as usize - offset;
-                        let copy = remaining_data.min(remaining_frame);
-
-                        data[data_offset..data_offset + copy]
-                            .copy_from_slice(&mix[offset..offset + copy]);
-
-                        data_offset += copy;
-                        offset += copy;
-                        if offset >= FRAME_SIZE as usize {
-                            offset = 0;
-                            slot += 1;
+                        s0 = ring.pop();
+                        s1 = Some(ring.pop());
+                    }
+                    for j in 0..n_out {
+                        let s1v = s1.unwrap_or([0.0, 0.0]);
+                        let l = s0[0] + (s1v[0] - s0[0]) * frac as f32;
+                        let r = s0[1] + (s1v[1] - s0[1]) * frac as f32;
+                        let base = j * channels;
+                        if channels == 2 {
+                            data[base] = l;
+                            data[base + 1] = r;
+                        } else {
+                            data[base] = (l + r) * 0.5;
+                        }
+                        frac += ratio;
+                        while frac >= 1.0 {
+                            frac -= 1.0;
+                            s0 = s1v;
+                            if ring.len == 0 {
+                                gen_output_mix_frame(&mut ring, &mut sfx);
+                            }
+                            s1 = Some(ring.pop());
                         }
                     }
+                    rs_frac.set(frac);
+                    rs_s0.set(s0);
+                    rs_s1.set(s1);
 
-                    // ── diagnostics: record stats ────────────────────────
                     CB_STATS.callbacks.fetch_add(1, Ordering::Relaxed);
-                    CB_STATS.samples_total.fetch_add(data.len() as u64, Ordering::Relaxed);
-                    CB_STATS.mix_frames.fetch_add(mix_count, Ordering::Relaxed);
-                    // PLAYED_SAMPLES consistency: old value must equal played_before
-                    let old = PLAYED_SAMPLES.fetch_add(data.len() as u64, Ordering::Relaxed);
-                    if old != played_before {
-                        CB_STATS.played_mismatches.fetch_add(1, Ordering::Relaxed);
-                    }
-                    // Store expected value for next callback's entry check
-                    CB_STATS.expected_next_played.store(old + data.len() as u64, Ordering::Relaxed);
+                    // PLAYED_SAMPLES counts PER-CHANNEL samples (see the
+                    // gen_output_mix_frame doc).
+                    CB_STATS
+                        .samples_total
+                        .fetch_add((data.len() / channels) as u64, Ordering::Relaxed);
                 }
             },
             |err| {
@@ -1071,20 +1444,26 @@ fn restart_output_stream() {
                 OUTPUT_RESTART_REQUESTED.store(true, Ordering::Relaxed);
             },
             None,
-        ) {
-            Ok(stream) => {
-                if stream.play().is_ok() {
+        );
+        match stream {
+            Ok(stream) => match stream.play() {
+                Ok(()) => {
                     crate::AUDIO_STREAM.lock().unwrap().0 = Some(stream);
-                    eprintln!("cpal: output stream started (Default buffer, sample-driven)");
-                } else {
-                    eprintln!("cpal: play() failed");
+                    eprintln!(
+                        "cpal: output stream started ({} Hz, {} ch, mix resample ratio {:.4})",
+                        config.sample_rate.0, config.channels, ratio
+                    );
+                    return;
                 }
-            }
-            Err(e) => eprintln!("cpal: build_output_stream failed: {}", e),
+                Err(e) => eprintln!("cpal: play() failed ({} Hz): {}", config.sample_rate.0, e),
+            },
+            Err(e) => eprintln!(
+                "cpal: build_output_stream failed ({} Hz, {} ch): {}",
+                config.sample_rate.0, config.channels, e
+            ),
         }
-    } else {
-        eprintln!("cpal: no output device");
     }
+    eprintln!("cpal: all output stream configurations failed");
 }
 
 /// Background task: periodically cleans up stale clients and refreshes the
@@ -1625,6 +2004,27 @@ fn encoded_cpw(password: &Option<String>) -> String {
         .unwrap_or_default()
 }
 
+/// Builds an ftdeletefile command — every entry is one part of the same
+/// packet, so multiple paths die with one server round-trip.
+fn ft_delete_cmd(cid: u64, names: &[String], password: &Option<String>) -> OutCommand {
+    let mut packet = OutCommand::new(
+        Direction::C2S,
+        Flags::empty(),
+        PacketType::Command,
+        "ftdeletefile",
+    );
+    let cpw = encoded_cpw(password);
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            packet.start_new_part();
+        }
+        packet.write_arg("cid", &cid);
+        packet.write_arg("cpw", &cpw);
+        packet.write_arg("name", name);
+    }
+    packet
+}
+
 /// Schedules the deferred finalize of a listing. The server streams the
 /// rows after the result frame, and our event pipeline may surface those
 /// rows one or two poll ticks late — so the finalize waits long enough for
@@ -1798,6 +2198,7 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
+                                        to_client_id: 0,
                                         target_mode: 3u8,
                                         message: message.clone(),
                                     });
@@ -1806,14 +2207,20 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
+                                        to_client_id: 0,
                                         target_mode: 2u8,
                                         message: message.clone(),
                                     });
                                 }
-                                tsclientlib::MessageTarget::Client(_) => {
+                                tsclientlib::MessageTarget::Client(target_id) => {
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
+                                        // The echo of our own sent PM carries the
+                                        // OTHER party here — that is what lets
+                                        // Dart file the message under the right
+                                        // conversation.
+                                        to_client_id: target_id.0 as u32,
                                         target_mode: 1u8,
                                         message: message.clone(),
                                     });
@@ -1903,6 +2310,7 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                         STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                             from_client: p.invoker_name.clone(),
                             from_client_id: p.invoker_id.0 as u32,
+                            to_client_id: p.target_client_id.map(|c| c.0 as u32).unwrap_or(0),
                             target_mode: p.target as u8,
                             message: p.message.clone(),
                         });
@@ -1985,6 +2393,21 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                         ok: res.is_ok(),
                         error: err_text.clone(),
                     });
+                }
+                // A text-message send that the server refused (missing send
+                // permission etc.) — tell Dart instead of dropping the
+                // message silently.
+                if TEXT_SENDS.lock().remove(&handle.0) {
+                    if let Some(e) = res.as_ref().err() {
+                        let reason = match e.missing_permission {
+                            Some(perm) => format!("missing permission {}", perm.0),
+                            None => format!("{:?}", e.error),
+                        };
+                        push_diag(&format!("text message rejected: {}", reason));
+                        STATE.lock().pending_events.push_back(TsEvent::SendFailed {
+                            error: reason,
+                        });
+                    }
                 }
                 if let Some(op) = FT_OPS.lock().remove(&handle.0) {
                     push_diag(&format!(
@@ -2074,6 +2497,14 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                     let kind = FT_TASKS.get(&task_id).map(|t| t.kind);
                     match kind {
                         Some(k) if k == FT_KIND_UPLOAD && ok_status => {
+                            // Avatar upload: the status confirmation is the
+                            // success signal — announce the hash so the server
+                            // broadcasts the new avatar.
+                            if let Some(md5) =
+                                FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone())
+                            {
+                                publish_avatar_hash(md5);
+                            }
                             crate::finish_ft_task(task_id, true, None);
                         }
                         _ => {
@@ -2178,6 +2609,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
             }
             return;
@@ -2187,18 +2619,34 @@ async fn event_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 Command::SendMessage {
-                    target_mode: _,
-                    target_cid: _,
+                    target_mode,
+                    target_cid,
                     message,
                 } => {
+                    // target_mode follows the wire encoding: 1=Client, 2=Channel
+                    // (default), 3=Server.
+                    let (target, target_client_id) = match target_mode {
+                        1 => (
+                            tsclientlib::TextMessageTargetMode::Client,
+                            Some(ClientId(target_cid as u16)),
+                        ),
+                        3 => (tsclientlib::TextMessageTargetMode::Server, None),
+                        _ => (tsclientlib::TextMessageTargetMode::Channel, None),
+                    };
                     let part = OutSendTextMessagePart {
-                        target: tsclientlib::TextMessageTargetMode::Channel,
-                        target_client_id: None,
+                        target,
+                        target_client_id,
                         message: Cow::Owned(message),
                     };
+                    // send_with_result attaches a return_code so the server's
+                    // answer (e.g. a permission rejection) resolves through
+                    // StreamItem::MessageResult instead of a bare CommandError;
+                    // TEXT_SENDS marks which return_codes are ours.
                     let result =
-                        OutSendTextMessageMessage::new(&mut std::iter::once(part)).send(&mut con);
-                    if result.is_ok() {
+                        OutSendTextMessageMessage::new(&mut std::iter::once(part))
+                            .send_with_result(&mut con);
+                    if let Ok(handle) = result {
+                        TEXT_SENDS.lock().insert(handle.0);
                         // Outbound chat sound (the server echoes the message
                         // back; the inbound sound skips our own echoes).
                         push_sfx(SFX_CHAT_OUTBOUND, "message sent");
@@ -2291,6 +2739,57 @@ async fn event_loop(
                         badges: None,
                     };
                     let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
+                }
+                Command::SetAvatarHash { hash } => {
+                    let part = OutClientUpdatePart {
+                        name: None,
+                        input_muted: None,
+                        output_muted: None,
+                        is_away: None,
+                        away_message: None,
+                        input_hardware_enabled: None,
+                        output_hardware_enabled: None,
+                        is_channel_commander: None,
+                        avatar_hash: Some(Cow::Owned(hash)),
+                        phonetic_name: None,
+                        talk_power_request: None,
+                        talk_power_request_message: None,
+                        is_recording: None,
+                        badges: None,
+                    };
+                    let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
+                }
+                Command::DeleteAvatar { path, token } => {
+                    push_diag(&format!("avatar delete {}: {}", token, path));
+                    // 1. Announce "no avatar": client_flag_avatar present but
+                    //    EMPTY, which write_arg serializes as the bare flag
+                    //    the server itself broadcasts for avatar-less clients.
+                    //    Tracked via perm_op_send so Dart gets the server's
+                    //    real answer for the token.
+                    let part = OutClientUpdatePart {
+                        name: None,
+                        input_muted: None,
+                        output_muted: None,
+                        is_away: None,
+                        away_message: None,
+                        input_hardware_enabled: None,
+                        output_hardware_enabled: None,
+                        is_channel_commander: None,
+                        avatar_hash: Some(Cow::Borrowed("")),
+                        phonetic_name: None,
+                        talk_power_request: None,
+                        talk_power_request_message: None,
+                        is_recording: None,
+                        badges: None,
+                    };
+                    let result = OutClientUpdateMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                    // 2. Best-effort removal of the stored file — not tracked:
+                    //    an orphan in channel-0 storage is harmless and gets
+                    //    overwritten by the next upload.
+                    let packet = ft_delete_cmd(0, std::slice::from_ref(&path), &None);
+                    let _ = RawCmd(packet).send(&mut con);
                 }
                 Command::SendPoke { client_id, message } => {
                     // Poke is a dedicated clientpoke request message.
@@ -2412,6 +2911,201 @@ async fn event_loop(
                         }
                     }
                 }
+                // ── Channel management ───────────────────────────────────
+                Command::ChannelCreate { args, token } => {
+                    // channelcreate takes the hashed cpw form (like the move
+                    // and ft commands), never the plaintext.
+                    let hashed_password = args
+                        .password
+                        .as_deref()
+                        .map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
+                        .map(Cow::Owned);
+                    let (family_value, family_unlimited, family_inherited) =
+                        family_limits(args.max_family_clients);
+                    let part = OutChannelCreatePart {
+                        parent_id: Some(ChannelId(args.parent_id.unwrap_or(0) as u64)),
+                        name: Cow::Owned(args.name.clone().unwrap_or_default()),
+                        topic: args.topic.filter(|t| !t.is_empty()).map(Cow::Owned),
+                        description: args
+                            .description
+                            .filter(|d| !d.is_empty())
+                            .map(Cow::Owned),
+                        password: hashed_password,
+                        codec: None,
+                        codec_quality: None,
+                        max_clients: match args.max_clients {
+                            Some(n) if n > 0 => Some(n),
+                            _ => None,
+                        },
+                        max_family_clients: family_value,
+                        order: None,
+                        has_password: Some(args.password.is_some()),
+                        is_unencrypted: None,
+                        delete_delay: args.delete_delay.map(time::Duration::seconds),
+                        is_max_clients_unlimited: Some(!matches!(
+                            args.max_clients,
+                            Some(n) if n > 0
+                        )),
+                        is_max_family_clients_unlimited: family_unlimited,
+                        inherits_max_family_clients: family_inherited,
+                        phonetic_name: None,
+                        is_permanent: Some(args.is_permanent.unwrap_or(false)),
+                        is_semi_permanent: Some(args.is_semi_permanent.unwrap_or(false)),
+                        is_default: Some(args.is_default.unwrap_or(false)),
+                    };
+                    push_diag(&format!(
+                        "channel create under {}: sent",
+                        args.parent_id.unwrap_or(0)
+                    ));
+                    let result = OutChannelCreateMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
+                Command::ChannelEdit { channel_id, args, token } => {
+                    // password: None = untouched, Some("") = clear,
+                    // Some(p) = set (hashed, see ChannelCreate).
+                    let (has_password, hashed_password) = match args.password {
+                        None => (None, None),
+                        Some(ref p) if p.is_empty() => (Some(false), None),
+                        Some(ref p) => (
+                            Some(true),
+                            Some(Cow::Owned(
+                                tsproto_types::crypto::encode_password(p.as_bytes()),
+                            )),
+                        ),
+                    };
+                    let (family_value, family_unlimited, family_inherited) =
+                        family_limits(args.max_family_clients);
+                    let part = OutChannelEditPart {
+                        channel_id: ChannelId(channel_id as u64),
+                        order: args.order.map(|id| ChannelId(id as u64)),
+                        name: args.name.map(Cow::Owned),
+                        topic: args.topic.map(Cow::Owned),
+                        is_default: args.is_default,
+                        has_password,
+                        password: hashed_password,
+                        is_permanent: args.is_permanent,
+                        is_semi_permanent: args.is_semi_permanent,
+                        codec: None,
+                        codec_quality: None,
+                        needed_talk_power: args.needed_talk_power,
+                        max_clients: match args.max_clients {
+                            Some(n) if n > 0 => Some(n),
+                            _ => None,
+                        },
+                        max_family_clients: family_value,
+                        codec_latency_factor: None,
+                        is_unencrypted: None,
+                        delete_delay: args.delete_delay.map(time::Duration::seconds),
+                        is_max_clients_unlimited: match args.max_clients {
+                            Some(0) => Some(true),
+                            Some(_) => Some(false),
+                            None => None,
+                        },
+                        is_max_family_clients_unlimited: family_unlimited,
+                        inherits_max_family_clients: family_inherited,
+                        phonetic_name: None,
+                        description: args.description.map(Cow::Owned),
+                    };
+                    push_diag(&format!("channel edit {}: sent", channel_id));
+                    let result = OutChannelEditMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
+                Command::ServerEdit { args, token } => {
+                    // password: None = untouched, Some("") = clear,
+                    // Some(p) = set (hashed, same encoding as the channel
+                    // password — see ChannelCreate/ChannelEdit).
+                    let password = match args.password {
+                        None => None,
+                        Some(ref p) if p.is_empty() => Some(Cow::Borrowed("")),
+                        Some(ref p) => Some(Cow::Owned(
+                            tsproto_types::crypto::encode_password(p.as_bytes()),
+                        )),
+                    };
+                    let part = OutServerEditPart {
+                        server_id: None,
+                        name: args.name.map(Cow::Owned),
+                        welcome_message: args.welcome_message.map(Cow::Owned),
+                        max_clients: args.max_clients,
+                        password,
+                        hostmessage: None,
+                        hostmessage_mode: None,
+                        hostbanner_url: None,
+                        hostbanner_gfx_url: None,
+                        hostbanner_gfx_interval: None,
+                        hostbutton_tooltip: None,
+                        hostbutton_url: None,
+                        hostbutton_gfx_url: None,
+                        icon: None,
+                        reserved_slots: None,
+                        hostbanner_mode: None,
+                        nickname: None,
+                        max_download_bandwidth_total: None,
+                        max_upload_bandwidth_total: None,
+                        download_quota: None,
+                        upload_quota: None,
+                        antiflood_points_tick_reduce: None,
+                        antiflood_points_to_command_block: None,
+                        antiflood_points_to_ip_block: None,
+                        codec_encryption_mode: None,
+                        needed_identity_security_level: None,
+                        default_server_group: None,
+                        default_channel_group: None,
+                        default_channel_admin_group: None,
+                        complain_autoban_count: None,
+                        complain_autoban_time: None,
+                        complain_remove_time: None,
+                        min_clients_in_channel_before_forced_silence: None,
+                        priority_speaker_dimm_modificator: None,
+                        phonetic_name: None,
+                        temp_channel_default_delete_delay: None,
+                        weblist_enabled: None,
+                        log_client: None,
+                        log_query: None,
+                        log_channel: None,
+                        log_permissions: None,
+                        log_server: None,
+                        log_filetransfer: None,
+                    };
+                    push_diag("server edit: sent");
+                    let result = OutServerEditMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
+                Command::ChannelDelete {
+                    channel_id,
+                    force,
+                    token,
+                } => {
+                    let part = OutChannelDeletePart {
+                        channel_id: ChannelId(channel_id as u64),
+                        force,
+                    };
+                    push_diag(&format!("channel delete {} (force={}): sent", channel_id, force));
+                    let result = OutChannelDeleteMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
+                Command::ChannelMove {
+                    channel_id,
+                    parent_id,
+                    order,
+                    token,
+                } => {
+                    let part = OutChannelMovePart {
+                        channel_id: ChannelId(channel_id as u64),
+                        parent_id: ChannelId(parent_id as u64),
+                        order: order.map(|id| ChannelId(id as u64)),
+                    };
+                    push_diag(&format!(
+                        "channel move {} -> {} (order {:?}): sent",
+                        channel_id, parent_id, order
+                    ));
+                    let result = OutChannelMoveMessage::new(&mut std::iter::once(part))
+                        .send_with_result(&mut con);
+                    perm_op_send(result, &token);
+                }
                 // ── Permission management ────────────────────────────────
                 Command::ServerGroupAddClient { sgid, dbid, token } => {
                     let part = OutServerGroupAddClientPart {
@@ -2520,6 +3214,18 @@ async fn event_loop(
                     let _ = OutServerGroupListRequestMessage::new().send(&mut con);
                     let _ = OutChannelGroupListRequestMessage::new().send(&mut con);
                     push_diag("perm: re-requested server/channel group lists");
+                }
+                Command::UsePrivilegeKey { token, op_token } => {
+                    // Redeem a privilege key after connecting (`privilegekeyuse`
+                    // — the same command the official client sends for
+                    // "Use Privilege Key"; on success the server answers with
+                    // `notifytokenused`).
+                    let part = OutPrivilegeKeyUsePart { token: token.into() };
+                    perm_op_send(
+                        OutPrivilegeKeyUseMessage::new(&mut std::iter::once(part))
+                            .send_with_result(&mut con),
+                        &op_token,
+                    );
                 }
                 Command::OwnPermList => {
                     // (Re-)request our own directly-assigned permissions.
@@ -2640,21 +3346,7 @@ async fn event_loop(
                 Command::FtDelete { cid, names, password, token } => {
                     push_diag(&format!("ft delete {}: {} path(s)", token, names.len()));
                     // Every deleted entry is one part of a single ftdeletefile.
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "ftdeletefile",
-                    );
-                    let cpw = encoded_cpw(&password);
-                    for (i, name) in names.iter().enumerate() {
-                        if i > 0 {
-                            packet.start_new_part();
-                        }
-                        packet.write_arg("cid", &cid);
-                        packet.write_arg("cpw", &cpw);
-                        packet.write_arg("name", name);
-                    }
+                    let packet = ft_delete_cmd(cid, &names, &password);
                     push_wire_diag(&format!("delete {}", token), &packet);
                     match RawCmd(packet).send_with_result(&mut con) {
                         Ok(handle) => {
@@ -2762,6 +3454,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                     }
                     return;
@@ -2882,6 +3575,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                 }
                 // The stream errored out (same termination as Ok(None)):
@@ -2916,6 +3610,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                 }
                 // The stream is truly over — do not fall through to the
@@ -2960,6 +3655,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                     }
                     // The stream errored out — return immediately instead of
@@ -3015,6 +3711,7 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
+            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
             }
             return;
@@ -3032,6 +3729,8 @@ async fn event_loop(
 /// loop is already dead.  This is needed because in release builds Android kills
 /// the process almost immediately after onTaskRemoved returns — the event loop
 /// may not get another iteration to check the flag.
+/// Android-only: other platforms disconnect through ts_disconnect.
+#[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect(
     _env: *mut std::ffi::c_void,
@@ -3105,12 +3804,56 @@ pub extern "C" fn ts_restart_audio_output() {
 
 /// JNI entry used by KeepAliveService's AudioDeviceCallback when the output
 /// route changes (Bluetooth/wired/USB device added or removed).
+/// Android-only: other platforms rely on the cpal stream-error rebuild path.
+#[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsRestartAudioOutput(
     _env: *mut std::ffi::c_void,
     _class: *mut std::ffi::c_void,
 ) {
     ts_restart_audio_output();
+}
+
+/// JNI entry called once from MainActivity.onCreate: hands the JVM and the
+/// application context to `ndk-context`, which cpal/oboe consult when they
+/// build audio streams on Android (the AudioTrack/AudioRecord buffer-size
+/// queries go through JNI). A plain Flutter FFI app has no ndk-glue, so
+/// nothing else initializes it — without this the first stream build panics
+/// with "android context was not initialized". Android-only.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_senlinjun_nek0_MainActivity_tsInitAndroid(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    context: jni::objects::JObject,
+) {
+    // initialize_android_context asserts when called twice; the guard also
+    // turns repeated MainActivity.onCreate calls (activity recreation) into
+    // no-ops.
+    static INITIALIZED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if INITIALIZED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let init = || -> Result<(), jni::errors::Error> {
+        let vm = env.get_java_vm()?;
+        // Leak the global reference on purpose: ndk-context stores the raw
+        // jobject for the process lifetime, so the ref must never be freed.
+        let gref = env.new_global_ref(&context)?;
+        let raw = gref.as_raw();
+        std::mem::forget(gref);
+        unsafe {
+            ndk_context::initialize_android_context(
+                vm.get_java_vm_pointer() as *mut std::ffi::c_void,
+                raw as *mut std::ffi::c_void,
+            );
+        }
+        Ok(())
+    };
+    match init() {
+        Ok(()) => eprintln!("tsInitAndroid: ndk-context initialized"),
+        Err(e) => eprintln!("tsInitAndroid failed: {}", e),
+    }
 }
 
 // ─── Poll / Getters ─────────────────────────────────────────────────
@@ -3182,6 +3925,60 @@ pub extern "C" fn ts_send_channel_message(_cid: u32, msg: *const c_char) -> u8 {
         if tx
             .send(Command::SendMessage {
                 target_mode: 2,
+                target_cid: 0,
+                message: msg,
+            })
+            .is_ok()
+        {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ts_send_private_message(client_id: u16, msg: *const c_char) -> u8 {
+    let msg = unsafe { std::ffi::CStr::from_ptr(msg) }
+        .to_string_lossy()
+        .into_owned();
+    if !STATE.lock().connected {
+        return 0;
+    }
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        if tx
+            .send(Command::SendMessage {
+                target_mode: 1,
+                target_cid: client_id as u64,
+                message: msg,
+            })
+            .is_ok()
+        {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn ts_send_server_message(msg: *const c_char) -> u8 {
+    let msg = unsafe { std::ffi::CStr::from_ptr(msg) }
+        .to_string_lossy()
+        .into_owned();
+    if !STATE.lock().connected {
+        return 0;
+    }
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        if tx
+            .send(Command::SendMessage {
+                target_mode: 3,
                 target_cid: 0,
                 message: msg,
             })
@@ -3337,6 +4134,45 @@ pub extern "C" fn ts_set_client_volume(client_id: u16, volume_db: f32) {
     }
 }
 
+/// Set (enabled != 0) or clear (enabled == 0) a remote client's 2D position
+/// relative to us, in meters on the horizontal plane (+x = right, +y =
+/// forward). The mixer pans and distance-attenuates that client's audio by it.
+/// Persisted under the client's user UID like ts_set_client_volume so it
+/// survives reconnects; when the UID is not known yet (e.g. brand-new client
+/// within the roster refresh window), only the live buffer is updated and not
+/// persisted.
+#[no_mangle]
+pub extern "C" fn ts_set_client_position(client_id: u16, x: f32, y: f32, enabled: u8) {
+    let mut state = STATE.lock();
+    let uid = state
+        .clients
+        .iter()
+        .find(|c| c.id as u16 == client_id)
+        .and_then(|c| c.uid.as_ref())
+        .cloned();
+    if enabled != 0 {
+        if let Some(uid) = uid {
+            state.client_positions.insert(uid, (x, y));
+        }
+    } else if let Some(uid) = uid {
+        state.client_positions.remove(&uid);
+    }
+    drop(state);
+
+    // Also update the live jitter buffer if it exists. NaN bits mean "no
+    // position" (centered playback) — the mixer's positional_gains checks for
+    // them, so clearing writes NaN rather than (0, 0).
+    if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
+        let (px, py) = if enabled != 0 {
+            (x, y)
+        } else {
+            (f32::NAN, f32::NAN)
+        };
+        buf.pos_x.store(f32::to_bits(px), Ordering::Release);
+        buf.pos_y.store(f32::to_bits(py), Ordering::Release);
+    }
+}
+
 // ─── Audio (mic send only, no receive) ──────────────────────────────
 
 #[no_mangle]
@@ -3374,27 +4210,304 @@ pub extern "C" fn ts_stop_audio() {
     teardown_output_state();
 }
 
+/// Routes raw mic samples into the encode/send pipeline — the shared path
+/// used by both ts_send_audio (Dart push, Android) and the cpal input
+/// callback (desktop capture). VAD, mic gain and Opus encoding happen
+/// downstream in the event loop's Command::SendAudio handler. No-op when not
+/// connected.
+fn queue_mic_samples(samples: Vec<f32>) -> bool {
+    if samples.is_empty() || !STATE.lock().connected {
+        return false;
+    }
+    let tx = COMMAND_TX.lock();
+    match tx.as_ref() {
+        Some(tx) => tx.send(Command::SendAudio { data: samples }).is_ok(),
+        None => false,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
-    let connected = STATE.lock().connected;
-    if !connected {
-        return 0;
-    }
-    if data_len == 0 {
+    if data.is_null() || data_len == 0 {
         return 0;
     }
     let raw = unsafe { std::slice::from_raw_parts(data, data_len as usize) };
-    let samples: Vec<f32> = raw.to_vec();  // raw samples — gain applied after VAD
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx.send(Command::SendAudio { data: samples }).is_ok() {
-            1
-        } else {
-            0
+    let samples: Vec<f32> = raw.to_vec(); // raw samples — gain applied after VAD
+    queue_mic_samples(samples) as u8
+}
+
+// ─── Mic capture (desktop; Android uses the Kotlin EventChannel path) ──
+
+/// Per-stream mic resampler: device input (interleaved f32) → 48 kHz mono.
+/// Streaming linear interpolation with state carried across callbacks.
+struct MicResampler {
+    /// Input samples per one 48 kHz output sample (device_rate / 48000).
+    ratio: f64,
+    channels: usize,
+    /// Interpolation phase between `prev` and the next input sample, [0,1).
+    phase: f64,
+    prev: f32,
+    started: bool,
+    /// Reused scratch buffers (no allocation in the audio callback).
+    mono: Vec<f32>,
+    out: Vec<f32>,
+}
+
+impl MicResampler {
+    fn new(channels: usize, rate: u32) -> Self {
+        Self {
+            ratio: rate as f64 / 48000.0,
+            channels,
+            phase: 0.0,
+            prev: 0.0,
+            started: false,
+            mono: Vec::with_capacity(4096),
+            out: Vec::with_capacity(4096),
         }
-    } else {
-        0
     }
+
+    /// Consumes one input callback chunk and appends 48 kHz mono samples to
+    /// `self.out`.
+    fn process(&mut self, data: &[f32]) {
+        let frames = data.len() / self.channels;
+        self.mono.clear();
+        if self.channels == 1 {
+            self.mono.extend_from_slice(data);
+        } else {
+            for f in 0..frames {
+                let base = f * self.channels;
+                let sum: f32 = data[base..base + self.channels].iter().sum();
+                self.mono.push(sum / self.channels as f32);
+            }
+        }
+        if self.ratio == 1.0 {
+            self.out.extend_from_slice(&self.mono);
+            return;
+        }
+        let n = self.mono.len();
+        let mut i = 0usize;
+        if !self.started {
+            if n == 0 {
+                return;
+            }
+            // Output sample 0 IS the first input sample; the next output
+            // lands at input position `ratio`.
+            self.prev = self.mono[0];
+            self.started = true;
+            i = 1;
+            self.phase = self.ratio;
+            self.out.push(self.prev);
+        }
+        while i < n {
+            let x = self.mono[i];
+            while self.phase < 1.0 {
+                let s = self.prev + (x - self.prev) * self.phase as f32;
+                self.out.push(s);
+                self.phase += self.ratio;
+            }
+            self.phase -= 1.0;
+            self.prev = x;
+            i += 1;
+        }
+    }
+}
+
+/// Starts the cpal microphone input stream (desktop capture). Requests
+/// 48 kHz mono first, falling back to the device's default input
+/// sample rate and channel count (downmixed + resampled to 48 kHz mono in
+/// the callback). Idempotent: true when a capture stream already runs.
+pub fn start_mic_capture() -> bool {
+    if crate::MIC_STREAM.lock().unwrap().0.is_some() {
+        return true;
+    }
+    let host = cpal::default_host();
+    let Some(device) = pick_device(&host, true) else {
+        eprintln!("cpal mic: no input device");
+        return false;
+    };
+    eprintln!(
+        "cpal mic: input device \"{}\"",
+        device.name().unwrap_or_default()
+    );
+    let mut candidates = vec![cpal::StreamConfig {
+        channels: 1,
+        sample_rate: cpal::SampleRate(48000),
+        buffer_size: cpal::BufferSize::Default,
+    }];
+    if let Ok(default) = device.default_input_config() {
+        if default.sample_rate().0 != 48000 {
+            candidates.push(cpal::StreamConfig {
+                channels: 1,
+                sample_rate: default.sample_rate(),
+                buffer_size: cpal::BufferSize::Default,
+            });
+        }
+        if default.channels() > 1 {
+            candidates.push(cpal::StreamConfig {
+                channels: default.channels(),
+                sample_rate: default.sample_rate(),
+                buffer_size: cpal::BufferSize::Default,
+            });
+        }
+    }
+
+    for config in candidates {
+        let mut resampler = MicResampler::new(config.channels as usize, config.sample_rate.0);
+        let stream = device.build_input_stream(
+            &config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                resampler.process(data);
+                if resampler.out.is_empty() {
+                    return;
+                }
+                // Publish the block RMS for the UI level meter.
+                let sum_sq: f64 = resampler.out.iter().map(|s| (*s * *s) as f64).sum();
+                let rms = (sum_sq / resampler.out.len() as f64).sqrt() as f32;
+                crate::MIC_RMS.store(f32::to_bits(rms), Ordering::Relaxed);
+                queue_mic_samples(std::mem::take(&mut resampler.out));
+            },
+            |err| eprintln!("cpal mic input error: {}", err),
+            None,
+        );
+        match stream {
+            Ok(stream) => {
+                crate::MIC_STREAM.lock().unwrap().0 = Some(stream);
+                eprintln!(
+                    "cpal mic: input stream started ({} Hz, {} ch)",
+                    config.sample_rate.0, config.channels
+                );
+                return true;
+            }
+            Err(e) => eprintln!(
+                "cpal mic: build_input_stream failed ({} Hz, {} ch): {}",
+                config.sample_rate.0, config.channels, e
+            ),
+        }
+    }
+    eprintln!("cpal mic: all input configurations failed");
+    false
+}
+
+/// Stops the microphone input stream (Dart-driven lifecycle).
+pub fn stop_mic_capture() {
+    let mut guard = crate::MIC_STREAM.lock().unwrap();
+    if guard.0.take().is_some() {
+        eprintln!("cpal mic: input stream stopped");
+    }
+    drop(guard);
+    crate::MIC_RMS.store(0, Ordering::Relaxed);
+}
+
+/// Desktop mic capture toggle. Returns 1 on success (or when already in the
+/// requested state), 0 when the input stream could not be built.
+#[no_mangle]
+pub extern "C" fn ts_set_mic_capture(enable: u8) -> u8 {
+    if enable != 0 {
+        start_mic_capture() as u8
+    } else {
+        stop_mic_capture();
+        1
+    }
+}
+
+/// RMS of the most recent native-capture mic block (0..1). Android reports
+/// levels from its own Dart-side EventChannel path instead.
+#[no_mangle]
+pub extern "C" fn ts_get_mic_rms() -> f32 {
+    f32::from_bits(crate::MIC_RMS.load(Ordering::Relaxed))
+}
+
+// ─── Audio device enumeration / selection (desktop picker UI) ───────
+
+#[derive(serde::Serialize)]
+struct AudioDeviceInfo {
+    name: String,
+    is_default: bool,
+}
+
+/// Lists host output/input devices for the picker UI as JSON:
+/// `{"outputs":[{"name","is_default"}],"inputs":[...]}`. The host default
+/// is marked; on Linux sound-server PCMs and hw devices sort first (alsa
+/// exposes many alias PCMs — de-duplicated here). Platforms without
+/// enumeration support (Android/oboe) return empty arrays.
+fn list_audio_devices(host: &cpal::Host, input: bool) -> Vec<AudioDeviceInfo> {
+    let default_name = if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    }
+    .and_then(|d| d.name().ok());
+    let mut seen = HashSet::new();
+    let mut out: Vec<AudioDeviceInfo> = Vec::new();
+    for d in enumerate_devices(host, input) {
+        if let Ok(name) = d.name() {
+            if seen.insert(name.clone()) {
+                out.push(AudioDeviceInfo {
+                    is_default: default_name.as_deref() == Some(name.as_str()),
+                    name,
+                });
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let rank = |n: &str| {
+            if SOUND_SERVER_PCMS.contains(&n) {
+                0
+            } else if n.starts_with("hw:") {
+                1
+            } else {
+                2
+            }
+        };
+        out.sort_by(|a, b| {
+            rank(&a.name)
+                .cmp(&rank(&b.name))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+    out
+}
+
+/// Desktop audio device list (see list_audio_devices for the JSON shape).
+#[no_mangle]
+pub extern "C" fn ts_get_audio_devices() -> *mut c_char {
+    let host = cpal::default_host();
+    let doc = serde_json::json!({
+        "outputs": list_audio_devices(&host, false),
+        "inputs": list_audio_devices(&host, true),
+    });
+    to_c_str(doc.to_string())
+}
+
+/// Selects the output device by name ("" = system default). While
+/// connected the output stream is rebuilt by the maintenance task within
+/// 500ms; when disconnected the choice applies at the next connect.
+#[no_mangle]
+pub extern "C" fn ts_set_audio_output_device(name: *const c_char) -> u8 {
+    let name = unsafe { cstr_to_string(name) };
+    *OUTPUT_DEVICE_NAME.lock().unwrap() = if name.is_empty() { None } else { Some(name) };
+    if STATE.lock().connected {
+        OUTPUT_RESTART_REQUESTED.store(true, Ordering::Relaxed);
+    }
+    1
+}
+
+/// Selects the input (mic) device by name ("" = system default). A running
+/// capture stream is restarted on the new device immediately; returns 0
+/// when that restart failed.
+#[no_mangle]
+pub extern "C" fn ts_set_audio_input_device(name: *const c_char) -> u8 {
+    let name = unsafe { cstr_to_string(name) };
+    let was_running = crate::MIC_STREAM.lock().unwrap().0.is_some();
+    *INPUT_DEVICE_NAME.lock().unwrap() = if name.is_empty() { None } else { Some(name) };
+    if was_running {
+        stop_mic_capture();
+        if !start_mic_capture() {
+            return 0;
+        }
+    }
+    1
 }
 
 // ─── SFX (custom samples / preview / local triggers) ─────────────────
@@ -3540,6 +4653,145 @@ pub extern "C" fn ts_ban_client(
     }
 }
 
+/// Creates a channel. `args_json` is a `ChannelArgs` object (see lib.rs):
+/// parent_id (0 = top level), name (required), topic, password, description,
+/// max_clients, max_family_clients (-1 inherited / 0 unlimited / >0 limit),
+/// is_permanent / is_semi_permanent / is_default, delete_delay (seconds).
+/// `token` is required — the server's answer resolves the caller's `PermOp`
+/// future. Returns 1 when the command was queued, 0 when invalid / not
+/// connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_create(args_json: *const c_char, token: *const c_char) -> u8 {
+    if args_json.is_null() || token.is_null() {
+        return 0;
+    }
+    unsafe {
+        let token = cstr_to_string(token);
+        if token.is_empty() {
+            return 0;
+        }
+        let args: crate::ChannelArgs = match serde_json::from_str(&cstr_to_string(args_json)) {
+            Ok(a) => a,
+            Err(_) => return 0,
+        };
+        if args.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            return 0;
+        }
+        try_send_cmd(Command::ChannelCreate { args, token }) as u8
+    }
+}
+
+/// Edits channel properties. `args_json` is a `ChannelArgs` object (see
+/// lib.rs); absent fields are left untouched, empty strings clear
+/// topic/description/password, `order` (sibling id, 0 = first) repositions
+/// the channel, and `needed_talk_power` >= 0 sets the talk-power gate.
+/// Returns 1 when queued, 0 when invalid / not connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_edit(
+    channel_id: u32,
+    args_json: *const c_char,
+    token: *const c_char,
+) -> u8 {
+    if args_json.is_null() || token.is_null() {
+        return 0;
+    }
+    unsafe {
+        let token = cstr_to_string(token);
+        if token.is_empty() {
+            return 0;
+        }
+        let args: crate::ChannelArgs = match serde_json::from_str(&cstr_to_string(args_json)) {
+            Ok(a) => a,
+            Err(_) => return 0,
+        };
+        try_send_cmd(Command::ChannelEdit {
+            channel_id,
+            args,
+            token,
+        }) as u8
+    }
+}
+
+/// Edits server properties (`serveredit`). `args_json` is a
+/// [crate::ServerEditArgs] (absent fields stay untouched, an empty password
+/// clears it). The outcome arrives as a `perm_op` event carrying `token`.
+/// Returns 1 when queued, 0 when not connected / bad arguments.
+#[no_mangle]
+pub extern "C" fn ts_server_edit(args_json: *const c_char, token: *const c_char) -> u8 {
+    if args_json.is_null() || token.is_null() {
+        return 0;
+    }
+    unsafe {
+        let token = cstr_to_string(token);
+        if token.is_empty() {
+            return 0;
+        }
+        let args: crate::ServerEditArgs = match serde_json::from_str(&cstr_to_string(args_json)) {
+            Ok(a) => a,
+            Err(_) => return 0,
+        };
+        try_send_cmd(Command::ServerEdit { args, token }) as u8
+    }
+}
+
+/// Deletes a channel. `force != 0` also removes a channel that still has
+/// clients in it (they are moved to the default channel; requires the
+/// force-delete permission). Returns 1 when queued, 0 when not connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_delete(
+    channel_id: u32,
+    force: u8,
+    token: *const c_char,
+) -> u8 {
+    if token.is_null() {
+        return 0;
+    }
+    unsafe {
+        if cstr_to_string(token).is_empty() {
+            return 0;
+        }
+        let deleted = try_send_cmd(Command::ChannelDelete {
+            channel_id,
+            force: force != 0,
+            token: cstr_to_string(token),
+        });
+        deleted as u8
+    }
+}
+
+/// Moves a channel to another parent (`channelmove`) — also re-orders within
+/// the same parent. `order` is the sibling id the channel comes after
+/// (0 = first, -1 = server default / append at the end). `token` is
+/// required — the server's answer resolves the caller's `PermOp` future.
+/// Returns 1 when the command was queued, 0 when not connected.
+#[no_mangle]
+pub extern "C" fn ts_channel_move(
+    channel_id: u32,
+    parent_id: u32,
+    order: i64,
+    token: *const c_char,
+) -> u8 {
+    if token.is_null() {
+        return 0;
+    }
+    unsafe {
+        if cstr_to_string(token).is_empty() {
+            return 0;
+        }
+        let moved = try_send_cmd(Command::ChannelMove {
+            channel_id,
+            parent_id,
+            order: if order < 0 {
+                None
+            } else {
+                Some(order as u32)
+            },
+            token: cstr_to_string(token),
+        });
+        moved as u8
+    }
+}
+
 /// Move a client (or ourselves) to another channel. `password` is the
 /// channel password when the target channel is locked. `token` is optional
 /// (see `ts_kick_client`); when non-empty the caller gets a `PermOp` answer.
@@ -3599,6 +4851,18 @@ unsafe fn read_cstr(p: *const c_char) -> String {
     }
 }
 
+/// Maps the Dart form's max-family-clients sentinel onto the wire's three
+/// fields: None = don't send (leave untouched), -1 = inherited, 0 = unlimited,
+/// >0 = limited to that many clients.
+fn family_limits(v: Option<i32>) -> (Option<i32>, Option<bool>, Option<bool>) {
+    match v {
+        None => (None, None, None),
+        Some(-1) => (None, Some(false), Some(true)),
+        Some(0) => (None, Some(true), Some(false)),
+        Some(n) => (Some(n), Some(false), Some(false)),
+    }
+}
+
 /// Returns true when a connected command queue exists (drains into `tx`).
 fn try_send_cmd(cmd: Command) -> bool {
     if !STATE.lock().connected {
@@ -3620,6 +4884,25 @@ pub extern "C" fn ts_get_server_groups() -> *mut c_char {
         return to_c_str("[]".to_string());
     }
     to_c_str(serde_json::to_string(&state.server_groups).unwrap_or_else(|_| "[]".into()))
+}
+
+/// Server property snapshot (from InitServer, refreshed on every book event
+/// batch — see `refresh_from_book`). JSON `TsServerInfo`; used to prefill
+/// the server-settings page. The password is never readable and has no
+/// entry — only `has_password` (null while unknown).
+#[no_mangle]
+pub extern "C" fn ts_get_server_info() -> *mut c_char {
+    let state = STATE.lock();
+    if !state.connected {
+        return to_c_str("{}".to_string());
+    }
+    let info = crate::TsServerInfo {
+        name: state.server_name.clone(),
+        welcome_message: state.server_welcome_message.clone(),
+        max_clients: state.server_max_clients,
+        has_password: state.server_has_password,
+    };
+    to_c_str(serde_json::to_string(&info).unwrap_or_else(|_| "{}".into()))
 }
 
 /// All channel groups known to the book (empty until `channelgrouplist` was
@@ -3667,6 +4950,20 @@ pub extern "C" fn ts_server_group_add_client(
 ) -> u8 {
     let token = unsafe { read_cstr(token) };
     if try_send_cmd(Command::ServerGroupAddClient { sgid, dbid, token }) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Redeem a privilege key (admin token) on the connected server via
+/// `clientupdate client_default_token`. The outcome arrives as a `perm_op`
+/// event carrying `op_token`. Returns 1 when queued, 0 when not connected.
+#[no_mangle]
+pub extern "C" fn ts_use_privilege_key(token: *const c_char, op_token: *const c_char) -> u8 {
+    let token = unsafe { read_cstr(token) };
+    let op_token = unsafe { read_cstr(op_token) };
+    if try_send_cmd(Command::UsePrivilegeKey { token, op_token }) {
         1
     } else {
         0
@@ -3832,6 +5129,7 @@ fn ft_new_task(kind: u8, name: String, local_path: String, total: u64) -> u32 {
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Placeholder until the event loop binds the protocol id.
             client_ft_id: std::sync::atomic::AtomicU16::new(u16::MAX),
+            avatar_md5: None,
             last_event: parking_lot::Mutex::new(None),
         }),
     );
@@ -4028,6 +5326,18 @@ pub extern "C" fn ts_ft_download(
     task_id
 }
 
+/// The `/avatar_<uid>` remote path for a wire-format uid (base64), or None
+/// when the uid is malformed. Shared by avatar download / upload / delete —
+/// avatars live in the channel-0 file storage without a password.
+fn avatar_remote_path(uid: &str) -> Option<String> {
+    let raw = BASE64_STANDARD.decode(uid.as_bytes()).ok()?;
+    let path = normalize_remote_path(&format!(
+        "/avatar_{}",
+        tsproto_types::Uid::from_bytes(&raw).as_avatar()
+    ));
+    valid_remote_path(&path).then_some(path)
+}
+
 /// Starts downloading a client's avatar into `dest` (local absolute path).
 /// The remote path follows the TS3 convention: `/avatar_<uid>` where the uid
 /// is base64-decoded and hex-encoded with the alphabet [a-p]
@@ -4040,17 +5350,9 @@ pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) ->
         return 0;
     }
     let uid = unsafe { cstr_to_string(uid) };
-    let raw = match BASE64_STANDARD.decode(uid.as_bytes()) {
-        Ok(raw) => raw,
-        Err(_) => return 0,
-    };
-    let path = normalize_remote_path(&format!(
-        "/avatar_{}",
-        tsproto_types::Uid::from_bytes(&raw).as_avatar()
-    ));
-    if !valid_remote_path(&path) {
+    let Some(path) = avatar_remote_path(&uid) else {
         return 0;
-    }
+    };
     let dest = unsafe { cstr_to_string(dest) };
     if dest.is_empty() {
         return 0;
@@ -4073,6 +5375,64 @@ pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) ->
         }
     }
     // Event loop unreachable — fail the task immediately so no job hangs.
+    crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
+    task_id
+}
+
+/// Starts uploading the local file `src` as our own avatar. The remote path
+/// follows the TS3 convention: `/avatar_<uid>` (uid base64-decoded, hex-
+/// encoded with the alphabet [a-p] via `Uid::as_avatar`), written into the
+/// channel-0 file storage without a password, overwriting the previous
+/// avatar. On success the transfer machinery additionally announces the
+/// file's MD5 via clientupdate (`client_flag_avatar`) — without that the
+/// new avatar never becomes visible. Returns the task id (>0) for
+/// progress/cancel tracking, 0 when not queued (not connected, malformed
+/// uid, missing source file).
+#[no_mangle]
+pub extern "C" fn ts_upload_avatar(uid: *const c_char, src: *const c_char) -> u32 {
+    if !ft_ready() || src.is_null() {
+        return 0;
+    }
+    let uid = unsafe { cstr_to_string(uid) };
+    let Some(path) = avatar_remote_path(&uid) else {
+        return 0;
+    };
+    let src = unsafe { cstr_to_string(src) };
+    let meta = std::fs::metadata(&src);
+    // Only existing local files are accepted.
+    if src.is_empty() || meta.as_ref().map(|m| !m.is_file()).unwrap_or(true) {
+        return 0;
+    }
+    // Hash BEFORE queueing: the announced hash must match the uploaded
+    // bytes, and Dart must not touch the file between the two.
+    let md5 = match md5_file_hex(&src) {
+        Ok(md5) => md5,
+        Err(_) => return 0,
+    };
+    let total = meta.map(|m| m.len()).unwrap_or(0);
+    let name = remote_basename(&path);
+    let task_id = ft_new_task(FT_KIND_UPLOAD, name.clone(), src.clone(), total);
+    if let Some(mut t) = FT_TASKS.get_mut(&task_id) {
+        // Still exclusively held in the map — no worker has touched it yet.
+        if let Some(task) = Arc::get_mut(&mut t) {
+            task.avatar_md5 = Some(md5);
+        }
+    }
+    ft_push_started(task_id);
+    let tx = COMMAND_TX.lock();
+    if let Some(tx) = tx.as_ref() {
+        if tx
+            .send(Command::FtUpload {
+                cid: 0,
+                path,
+                password: None,
+                task_id,
+            })
+            .is_ok()
+        {
+            return task_id;
+        }
+    }
     crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
     task_id
 }
@@ -4119,6 +5479,36 @@ pub extern "C" fn ts_ft_upload(
     }
     crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
     task_id
+}
+
+/// Clears our own avatar: announces an EMPTY `client_flag_avatar` (the
+/// server broadcasts "no avatar" and every client drops the image) and
+/// best-effort removes the stored `/avatar_<uid>` file from the channel-0
+/// storage. The Dart caller receives the server's real answer for the
+/// announce via the `perm_op` event for `token`; the file removal is not
+/// tracked (an orphan is harmless and overwritten by the next upload).
+/// Returns 1 when queued, 0 when not connected / malformed uid / token.
+#[no_mangle]
+pub extern "C" fn ts_delete_avatar(uid: *const c_char, token: *const c_char) -> u8 {
+    if !ft_ready() || token.is_null() {
+        return 0;
+    }
+    let uid = unsafe { cstr_to_string(uid) };
+    let Some(path) = avatar_remote_path(&uid) else {
+        return 0;
+    };
+    let token = unsafe { cstr_to_string(token) };
+    if token.is_empty() {
+        return 0;
+    }
+    let tx = COMMAND_TX.lock();
+    match tx
+        .as_ref()
+        .map(|tx| tx.send(Command::DeleteAvatar { path, token }))
+    {
+        Some(Ok(())) => 1,
+        _ => 0,
+    }
 }
 
 /// Requests cancellation of an active transfer (cooperative flag).

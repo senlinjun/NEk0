@@ -5,7 +5,7 @@ use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64};
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -52,6 +52,31 @@ pub enum Command {
         reason: String,
         token: Option<String>,
     },
+    /// Create a channel (`channelcreate`). See [ChannelArgs] for the field
+    /// semantics; `token` correlates the server's answer (see KickClient).
+    ChannelCreate { args: ChannelArgs, token: String },
+    /// Edit channel properties (`channeledit`). See [ChannelArgs].
+    ChannelEdit { channel_id: u32, args: ChannelArgs, token: String },
+    /// Edit server properties (`serveredit`). See [ServerEditArgs]; every
+    /// field is optional — absent = leave untouched. `token` correlates the
+    /// server's answer (see ChannelCreate).
+    ServerEdit { args: ServerEditArgs, token: String },
+    /// Delete a channel (`channeldelete`). `force` also removes a channel
+    /// that still has clients in it (needs the force-delete permission).
+    ChannelDelete {
+        channel_id: u32,
+        force: bool,
+        token: String,
+    },
+    /// Move a channel to another parent (`channelmove`) — also re-orders
+    /// within the same parent. `order` is the sibling id the channel comes
+    /// after (0 = first; None = server default, appended at the end).
+    ChannelMove {
+        channel_id: u32,
+        parent_id: u32,
+        order: Option<u32>,
+        token: String,
+    },
     /// Add a client to a server group. `dbid` is the client's database id.
     /// `token` correlates the server's answer with the Dart caller.
     ServerGroupAddClient { sgid: u64, dbid: u64, token: String },
@@ -78,6 +103,11 @@ pub enum Command {
     /// Request OUR OWN directly-assigned permission list (`clientpermlist`
     /// for our own database id). The answer fills `STATE.own_perms`.
     OwnPermList,
+    /// Redeem a privilege key after connecting (`privilegekeyuse token=...`
+    /// — the command behind the official client's "Use Privilege Key").
+    /// `token` is the privilege key itself; `op_token` correlates the
+    /// server's answer with the Dart caller (see KickClient).
+    UsePrivilegeKey { token: String, op_token: String },
     Disconnect,
     SendAudio { data: Vec<f32> },
     // File transfer commands (see FtTask / FT_TASKS below). `cid` is the
@@ -91,6 +121,15 @@ pub enum Command {
     /// protocol transfer id happens here once the request was sent out.
     FtDownload { cid: u64, path: String, password: Option<String>, task_id: u32 },
     FtUpload { cid: u64, path: String, password: Option<String>, task_id: u32 },
+    /// Announce our new avatar (clientupdate `client_flag_avatar` = MD5 of the
+    /// uploaded file). Queued by the transfer machinery after a successful
+    /// avatar upload — the server does not infer the hash from the upload.
+    SetAvatarHash { hash: String },
+    /// Clear our own avatar: announce an EMPTY `client_flag_avatar` (tracked
+    /// via `token` → PermOp so Dart gets the server's real answer) and
+    /// best-effort remove the stored `/avatar_<uid>` file from the channel-0
+    /// storage.
+    DeleteAvatar { path: String, token: String },
 }
 
 // ─── File transfers (channel file management) ────────────────────────
@@ -115,6 +154,10 @@ pub struct FtTask {
     /// The client-side transfer id used in ftinit* commands, so a
     /// StreamItem::FiletransferFailed can be attributed back to this task.
     pub client_ft_id: AtomicU16,
+    /// For avatar uploads: the MD5 of the file content. Once the transfer is
+    /// confirmed, it is announced via Command::SetAvatarHash so the server
+    /// broadcasts the new avatar to every client.
+    pub avatar_md5: Option<String>,
     /// Last progress event publish time — throttles events.
     pub last_event: Mutex<Option<Instant>>,
 }
@@ -214,11 +257,25 @@ pub static IDENTITY_STASH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new
 #[serde(tag = "type")]
 pub enum TsEvent {
     #[serde(rename = "connected")]
-    Connected { server_name: String, client_id: u32 },
+    Connected { server_name: String, client_id: u32, ask_for_privilegekey: bool },
     #[serde(rename = "disconnected")]
     Disconnected { reason: String },
+    /// `to_client_id` is the PM target (0 for channel/server messages): our
+    /// own id when someone private-messages us, the other party's id for the
+    /// server's echo of our own sent PMs — the piece that attributes an echo
+    /// to the right conversation on the Dart side.
     #[serde(rename = "text_message")]
-    TextMessage { from_client: String, from_client_id: u32, target_mode: u8, message: String },
+    TextMessage {
+        from_client: String,
+        from_client_id: u32,
+        to_client_id: u32,
+        target_mode: u8,
+        message: String,
+    },
+    /// The server rejected a text-message send (tracked via return_code,
+    /// see `TEXT_SENDS`) — e.g. missing `b_client_server_textmessage_send`.
+    #[serde(rename = "send_failed")]
+    SendFailed { error: String },
     #[serde(rename = "poke")]
     Poke { from_client: String, from_client_id: u32, message: String },
     #[serde(rename = "client_joined")]
@@ -271,6 +328,92 @@ pub struct TsChannel {
     pub permission_hints: u64,
     /// i_channel_needed_talk_power (0 when the channel does not restrict talk).
     pub needed_talk_power: i32,
+    /// channel_maxclients (-1 when the server reported unlimited/inherited).
+    pub max_clients: i32,
+    /// channel_flag_permanent / channel_flag_semi_permanent (a channel with
+    /// both false is temporary).
+    pub is_permanent: bool,
+    pub is_semi_permanent: bool,
+    /// channel_description ('' until the server tells us — channellist does
+    /// not carry descriptions; they arrive via channeledited broadcasts).
+    pub description: String,
+    /// channel_maxfamilyclients (-1 inherited/unknown, 0 unlimited, >0 limit).
+    pub max_family_clients: i32,
+    /// channel_delete_delay in whole seconds (0 = delete as soon as empty).
+    pub delete_delay: i64,
+}
+
+/// Body of the `args_json` parameter of `ts_channel_create` /
+/// `ts_channel_edit` (all fields optional except where noted). On edit, an
+/// absent field means "leave untouched"; on create it means "server default"
+/// (the Dart form always sends the full intended state for create).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ChannelArgs {
+    /// Create only: the parent channel (0 = top level).
+    #[serde(default)]
+    pub parent_id: Option<u32>,
+    /// Create: required. Edit: absent = unchanged.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// None = untouched (edit) / none (create); Some("") = clear.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// None = untouched (edit) / none (create); Some("") = clear.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Same tri-state as [ChannelArgs::topic].
+    #[serde(default)]
+    pub description: Option<String>,
+    /// -1 inherited, 0 unlimited, >0 limit; None = untouched (edit).
+    #[serde(default)]
+    pub max_family_clients: Option<i32>,
+    /// 0 unlimited, >0 limit; None = untouched (edit).
+    #[serde(default)]
+    pub max_clients: Option<i32>,
+    /// The form always sends these (unchanged values are server-side no-ops).
+    #[serde(default)]
+    pub is_permanent: Option<bool>,
+    #[serde(default)]
+    pub is_semi_permanent: Option<bool>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
+    /// Seconds an empty temporary channel lingers before deletion.
+    #[serde(default)]
+    pub delete_delay: Option<i64>,
+    /// Edit only — `channelcreate` rejects channel_needed_talk_power.
+    #[serde(default)]
+    pub needed_talk_power: Option<i32>,
+    /// Edit only: the sibling id this channel comes after (0 = first).
+    #[serde(default)]
+    pub order: Option<u32>,
+}
+
+/// Body of the `args_json` parameter of `ts_server_edit`. Every field is
+/// optional: an absent field leaves the server property untouched.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ServerEditArgs {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// None = untouched; Some("") = clear; Some(p) = set (hashed like the
+    /// channel password, see [ChannelArgs::password]).
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub max_clients: Option<u16>,
+    #[serde(default)]
+    pub welcome_message: Option<String>,
+}
+
+/// Server property snapshot served by `ts_get_server_info` for the
+/// server-settings page prefill (see [TsConnection] fields it is built
+/// from). The password itself is never readable — only whether one is set
+/// (null while the server has not sent the optional data block).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TsServerInfo {
+    pub name: String,
+    pub welcome_message: String,
+    pub max_clients: Option<u16>,
+    pub has_password: Option<bool>,
 }
 
 /// A server group (from the book's `server_groups` map, which is populated
@@ -317,6 +460,13 @@ pub struct TsPerm {
 pub static PERM_OPS: Lazy<Mutex<HashMap<u16, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Return_codes of in-flight text-message sends (`send_with_result`). A
+/// matching `MessageResult` with an error resolves into a `SendFailed` event
+/// so the UI can tell the user the message was rejected (e.g. missing
+/// `b_client_server_textmessage_send`) instead of it silently vanishing.
+pub static TEXT_SENDS: Lazy<Mutex<HashSet<u16>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TsClient {
     pub id: u32,
@@ -355,6 +505,10 @@ pub struct TsClient {
     /// tooltips; may be empty when the group data is unavailable).
     pub server_group_names: Vec<String>,
     pub channel_group: u32,
+    /// 2D position relative to us in meters (+x = right, +y = forward).
+    /// None = no position set → centered playback.
+    pub pos_x: Option<f32>,
+    pub pos_y: Option<f32>,
 }
 
 // ─── Per-client lock-free jitter buffer ──────────────────────────────
@@ -384,6 +538,12 @@ pub struct ClientJitterBuffer {
     pub frame_pool: SegQueue<Vec<i16>>,
     /// Linear gain as f32::to_bits, applied as mixing weight in the audio callback.
     pub volume: AtomicU32,
+    /// 2D position of this client relative to us (meters; +x = right,
+    /// +y = forward), stored as f32::to_bits. NaN bits = no position set →
+    /// centered playback. Written by ts_set_client_position, read by the
+    /// audio callback.
+    pub pos_x: AtomicU32,
+    pub pos_y: AtomicU32,
 }
 
 impl ClientJitterBuffer {
@@ -397,6 +557,8 @@ impl ClientJitterBuffer {
             last_packet: AtomicCell::new(None),
             frame_pool: SegQueue::new(),
             volume: AtomicU32::new(f32::to_bits(1.0)),
+            pos_x: AtomicU32::new(f32::to_bits(f32::NAN)),
+            pos_y: AtomicU32::new(f32::to_bits(f32::NAN)),
         }
     }
 }
@@ -407,6 +569,15 @@ pub struct TsConnection {
     pub connected: bool,
     pub connecting: bool,
     pub server_name: String,
+    /// Server property snapshot for the server-settings dialog prefill
+    /// (`ts_get_server_info`). Refreshed by `refresh_from_book`, so a
+    /// successful `serveredit` shows up on the next book event. The password
+    /// is never readable and has no snapshot.
+    pub server_max_clients: Option<u16>,
+    pub server_welcome_message: String,
+    /// From `optional_data` (sent by `notifyserverupdated` — we never request
+    /// server variables, so this usually stays null).
+    pub server_has_password: Option<bool>,
     pub nickname: String,
     pub own_client_id: u32,
     pub channels: Vec<TsChannel>,
@@ -443,6 +614,10 @@ pub struct TsConnection {
     /// only a session-scoped handle; the UID is what survives reconnects and
     /// identifies the same user across servers.
     pub client_volumes: HashMap<String, f32>,
+    /// Per-client 2D position (x, y) in meters relative to us (+x = right,
+    /// +y = forward), keyed by the client's user UID. Source of truth —
+    /// NOT cleared on disconnect. Same lifetime rules as client_volumes.
+    pub client_positions: HashMap<String, (f32, f32)>,
 }
 
 impl TsConnection {
@@ -451,6 +626,9 @@ impl TsConnection {
             connected: false,
             connecting: false,
             server_name: String::new(),
+            server_max_clients: None,
+            server_welcome_message: String::new(),
+            server_has_password: None,
             nickname: String::new(),
             own_client_id: 0,
             channels: Vec::new(),
@@ -471,6 +649,7 @@ impl TsConnection {
             talking_clients: HashMap::new(),
             pending_move: None,
             client_volumes: HashMap::new(),
+            client_positions: HashMap::new(),
         }
     }
 }
@@ -478,10 +657,14 @@ impl TsConnection {
 pub static STATE: Lazy<Mutex<TsConnection>> = Lazy::new(|| Mutex::new(TsConnection::new()));
 pub static PANIC_LOG: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
-/// cpal output stream (Send-safe wrapper). Drop to stop audio playback.
+/// cpal stream (Send-safe wrapper). Drop to stop audio playback.
 pub struct SendStream(pub Option<cpal::Stream>);
 unsafe impl Send for SendStream {}
 pub static AUDIO_STREAM: std::sync::Mutex<SendStream> = std::sync::Mutex::new(SendStream(None));
+/// cpal microphone input stream (desktop capture path). Android keeps its
+/// Kotlin AudioRecord → EventChannel pipeline instead — this stays None
+/// there. Dart drives the lifecycle via ts_set_mic_capture.
+pub static MIC_STREAM: std::sync::Mutex<SendStream> = std::sync::Mutex::new(SendStream(None));
 
 // ─── Lock-free audio globals ─────────────────────────────────────────
 
@@ -496,6 +679,10 @@ pub static PLAYED_SAMPLES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 /// Refreshed by the maintenance task every 500ms. Lock-free via ArcSwap.
 pub static ACTIVE_CLIENT_IDS: Lazy<arc_swap::ArcSwap<Vec<u16>>> =
     Lazy::new(|| arc_swap::ArcSwap::from(std::sync::Arc::new(Vec::new())));
+/// RMS of the most recent native-capture mic block (f32::to_bits, 0..1).
+/// Published by the cpal input callback (desktop / iOS), read by
+/// ts_get_mic_rms for the UI level meter. 0 = silence / capture inactive.
+pub static MIC_RMS: AtomicU32 = AtomicU32::new(0);
 
 // ─── Channel-event SFX (25 built-in sounds) ──────────────────────────
 

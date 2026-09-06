@@ -32,6 +32,16 @@ time = "0.3"
 # Decoding the wire-format uid into raw bytes so `Uid::as_avatar` can build
 # the avatar file path. Already in the lockfile via tsproto-types.
 base64 = "0.22"
+# MD5 of the uploaded avatar file — the value sent as client_flag_avatar in
+# the clientupdate that makes the new avatar visible to everyone.
+md-5 = "0.10"
+
+# Android-only: cpal/oboe resolve the JVM through ndk-context and query
+# AudioTrack buffer sizes via JNI when building streams. The context is
+# handed over by MainActivity via the tsInitAndroid JNI export (see api.rs).
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
 
 [patch."https://github.com/ReSpeak/tsclientlib.git"]
 tsclientlib = { path = "local_tsclientlib/tsclientlib" }

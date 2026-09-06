@@ -141,6 +141,18 @@ class AppLocalizationsZh extends AppLocalizations {
   String get micPermissionDenied => '麦克风权限被拒绝';
 
   @override
+  String get audioDevicesSection => '音频设备';
+
+  @override
+  String get audioOutputDevice => '输出设备';
+
+  @override
+  String get audioInputDevice => '输入设备';
+
+  @override
+  String get audioSystemDefault => '系统默认';
+
+  @override
   String get updateSection => '更新';
 
   @override
@@ -386,6 +398,20 @@ class AppLocalizationsZh extends AppLocalizations {
   String get sendMessageHint => '发送消息...';
 
   @override
+  String get chatChannel => '频道';
+
+  @override
+  String get chatServer => '服务器';
+
+  @override
+  String get sendMessageAction => '发送消息';
+
+  @override
+  String messageSendFailed(String error) {
+    return '消息发送失败：$error';
+  }
+
+  @override
   String get addServerTitle => '添加服务器';
 
   @override
@@ -405,6 +431,24 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get passwordOptional => '密码（可选）';
+
+  @override
+  String get tokenOptional => '管理员 Token（可选）';
+
+  @override
+  String get privilegeKeyTitle => '使用管理员 Token';
+
+  @override
+  String get privilegeKeyBody => '该服务器要求提供管理员 Token（权限密钥）。输入后你将被加入对应的服务器组。';
+
+  @override
+  String get privilegeKeyHint => 'Token';
+
+  @override
+  String get privilegeKeyGranted => 'Token 兑换成功，服务器组已更新。';
+
+  @override
+  String get privilegeKeyNoEffect => 'Token 已提交，但未检测到服务器组变化，可能无效或已被使用。';
 
   @override
   String get teamSpeakUserDefault => 'TeamSpeakUser';
@@ -489,16 +533,137 @@ class AppLocalizationsZh extends AppLocalizations {
   String get menuFileManager => '文件管理';
 
   @override
+  String get menuServerTitle => '服务器';
+
+  @override
+  String get menuEditServer => '编辑服务器';
+
+  @override
+  String get serverSettingsTitle => '服务器设置';
+
+  @override
+  String get serverMaxClientsLabel => '最大用户数';
+
+  @override
+  String get serverPasswordLabel => '服务器密码';
+
+  @override
+  String get serverPasswordHelper => '留空保持当前密码不变';
+
+  @override
+  String get serverPasswordRemove => '移除服务器密码';
+
+  @override
+  String get serverSaved => '服务器已更新';
+
+  @override
+  String get serverReadOnlyHint => '你没有修改服务器设置的权限';
+
+  @override
+  String get menuCreateChannel => '新建频道';
+
+  @override
+  String get menuEditChannel => '编辑频道';
+
+  @override
+  String get menuDeleteChannel => '删除频道';
+
+  @override
+  String get channelCreateTitle => '新建频道';
+
+  @override
+  String get channelEditTitle => '编辑频道';
+
+  @override
+  String get channelNameLabel => '频道名称';
+
+  @override
+  String get channelTopicLabel => '主题（可选）';
+
+  @override
+  String get channelPasswordHelper => '留空清除现有密码';
+
+  @override
+  String get channelMaxClientsLabel => '最大用户数';
+
+  @override
+  String get channelMaxClientsHelper => '留空为无限';
+
+  @override
+  String get channelTypeLabel => '类型';
+
+  @override
+  String get channelTypeTemporary => '临时';
+
+  @override
+  String get channelTypeSemiPermanent => '半永久';
+
+  @override
+  String get channelTypePermanent => '永久';
+
+  @override
+  String get deleteChannelTitle => '删除频道？';
+
+  @override
+  String deleteChannelBody(String name) {
+    return '删除“$name”？';
+  }
+
+  @override
+  String deleteChannelOccupied(int count) {
+    return '频道内有 $count 名用户，将被移至默认频道。';
+  }
+
+  @override
+  String get channelCreated => '频道已创建';
+
+  @override
+  String get channelSaved => '频道已更新';
+
+  @override
+  String get channelDeleted => '频道已删除';
+
+  @override
+  String get channelMoved => '频道已移动';
+
+  @override
+  String get menuMoveUp => '上移';
+
+  @override
+  String get menuMoveDown => '下移';
+
+  @override
+  String get channelDescriptionLabel => '频道描述';
+
+  @override
+  String get channelNeededTalkPowerLabel => '说话所需权限';
+
+  @override
+  String get channelTalkPowerHelper => '0 = 不限制说话';
+
+  @override
+  String get channelDeleteDelayLabel => '删除延迟（秒）';
+
+  @override
+  String get channelDeleteDelayHelper => '频道空置多少秒后删除';
+
+  @override
+  String get channelMaxFamilyLabel => '频道组人数上限';
+
+  @override
+  String get channelMaxFamilyInherit => '继承父频道';
+
+  @override
+  String get channelMaxFamilyUnlimited => '不限制';
+
+  @override
+  String get channelMaxFamilyLimited => '自定义限制';
+
+  @override
+  String get channelIsDefaultLabel => '设为默认频道';
+
+  @override
   String get audio => '音频';
-
-  @override
-  String get gestureSection => '频道手势';
-
-  @override
-  String get gestureDefault => '短按：切换频道 · 长按：菜单';
-
-  @override
-  String get gestureSwapped => '短按：菜单 · 长按：切换频道';
 
   @override
   String get fmUp => '上一级';
@@ -756,6 +921,61 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get permFailedUnknown => '服务器拒绝了该请求';
+
+  @override
+  String get positionTitle => '设置位置';
+
+  @override
+  String get positionSelf => '我';
+
+  @override
+  String get positionHint =>
+      '拖动圆点设置 TA 相对你的位置：上方是你的前方，距离越远音量越小。普通立体声无法区分前后，由距离体现。';
+
+  @override
+  String get positionUnset => '未设置位置——居中播放';
+
+  @override
+  String get positionReset => '重置位置';
+
+  @override
+  String get avatarUpload => '上传头像';
+
+  @override
+  String get avatarUploaded => '头像已更新';
+
+  @override
+  String avatarUploadFailed(String error) {
+    return '头像上传失败：$error';
+  }
+
+  @override
+  String get avatarInvalidImage => '不支持的图片文件';
+
+  @override
+  String get avatarDelete => '删除头像';
+
+  @override
+  String get avatarDeleted => '头像已删除';
+
+  @override
+  String avatarDeleteFailed(String error) {
+    return '头像删除失败：$error';
+  }
+
+  @override
+  String get about => '关于';
+
+  @override
+  String appVersion(String version) {
+    return '版本 $version';
+  }
+
+  @override
+  String get viewOnGitHub => '在 GitHub 上查看';
+
+  @override
+  String get openLinkFailed => '无法打开链接';
 
   @override
   String get backgroundSection => '背景';

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../l10n/generated/app_localizations.dart';
+
 import 'package:uuid/uuid.dart';
+
 import '../models/server.dart';
 
 class ServerFormDialog extends StatefulWidget {
@@ -19,6 +21,7 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
   late TextEditingController _nicknameCtrl;
   late TextEditingController _channelCtrl;
   late TextEditingController _passwordCtrl;
+  late TextEditingController _tokenCtrl;
 
   late TextEditingController _voicePortCtrl;
   late TextEditingController _serverQueryPortCtrl;
@@ -38,6 +41,7 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
     _nicknameCtrl = TextEditingController(text: s?.nickname ?? 'TeamSpeakUser');
     _channelCtrl = TextEditingController(text: s?.channel ?? '');
     _passwordCtrl = TextEditingController(text: s?.password ?? '');
+    _tokenCtrl = TextEditingController(text: s?.token ?? '');
     _voicePortCtrl = TextEditingController(
       text: s?.voicePort?.toString() ?? '',
     );
@@ -60,6 +64,7 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
     _nicknameCtrl.dispose();
     _channelCtrl.dispose();
     _passwordCtrl.dispose();
+    _tokenCtrl.dispose();
     _voicePortCtrl.dispose();
     _serverQueryPortCtrl.dispose();
     _fileTransferPortCtrl.dispose();
@@ -115,6 +120,9 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
       password: _passwordCtrl.text.trim().isEmpty
           ? null
           : _passwordCtrl.text.trim(),
+      // Privilege keys are one-time: submitted on the next connect, cleared
+      // from the saved server once the connection succeeds.
+      token: _tokenCtrl.text.trim().isEmpty ? null : _tokenCtrl.text.trim(),
       voicePort: voicePort,
       serverQueryPort: serverQueryPort,
       fileTransferPort: fileTransferPort,
@@ -153,6 +161,8 @@ class _ServerFormDialogState extends State<ServerFormDialog> {
               Icons.lock,
               obscure: true,
             ),
+            const SizedBox(height: 12),
+            _field(_tokenCtrl, al.tokenOptional, Icons.vpn_key),
           ],
         ),
       ),

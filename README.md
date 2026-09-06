@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">NEk0</h1>
-<p align="center">A TeamSpeak 3 client for Android built with Flutter &amp; Rust</p>
+<p align="center">A TeamSpeak 3 client for Android, Windows &amp; Linux built with Flutter &amp; Rust</p>
 
 <p align="center">
   <a href="README_ZH.md">中文</a> ·
@@ -27,7 +27,10 @@
 - **Voice settings** — VAD / PTT / mic gain / threshold tuning from the settings
   screen, by long-pressing the mic button, or by tapping your own name in the
   user list, with a live mic level + mic test
-- **OTA updates** — checks GitHub/Gitee releases (tag format `vx.y.z`) on launch,
+- **Desktop support** — the same Rust core runs on Windows and Linux; mic capture
+  uses a cpal input stream inside the native library, playback negotiates the
+  device format with an automatic fallback chain
+- **OTA updates (Android)** — checks GitHub/Gitee releases (tag format `vx.y.z`) on launch,
   downloads the ABI-matched APK and installs it; check can be disabled and the
   source chosen in settings
 
@@ -38,8 +41,8 @@
 | UI | Flutter (Dart) + Riverpod |
 | Protocol & codec | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib), `opus-rs`) |
 | Playback | Rust (`cpal` — continuous output stream, silence when idle) |
-| Mic capture | Kotlin (`AudioRecord`) → EventChannel → Dart → FFI → Rust |
-| Background persistence | `KeepAliveService` (foreground service + `MediaSession`) |
+| Mic capture | Android: Kotlin (`AudioRecord`) → EventChannel → Dart → FFI → Rust<br>Windows/Linux: Rust (`cpal` input stream) → encode/send pipeline |
+| Background persistence | `KeepAliveService` (foreground service + `MediaSession`, Android) |
 
 ```
 Flutter (Dart)                  Rust (Native .so)
@@ -48,11 +51,11 @@ lib/services/ts_ffi.dart  ←FFI→  native/src/api.rs
 lib/services/audio_service.dart  native/src/lib.rs
 lib/models/ts_state.dart         (tsclientlib + opus-rs + tokio)
 
-Kotlin (Android)
-────────────────
+Kotlin (Android only)
+─────────────────────
 MainActivity.kt         ←EventChannel→  audio_service.dart   (mic via AudioRecord)
-KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (foreground service
-                         + MediaSession + notification controls)
+KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (foreground service,
+                         MediaSession, notification controls, MediaStore saves)
 ```
 
 ## Prerequisites
@@ -63,8 +66,12 @@ KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (foreground 
 | Rust | 1.70+ |
 | Android SDK | Latest |
 | Android NDK | 26+ |
+| Linux: alsa-lib, gtk3, ninja, pkg-config | Latest (desktop build) |
+| Windows: Visual Studio (C++ desktop workload) | Latest (desktop build) |
 
 ## Build & Run
+
+### Android
 
 Quick way — builds both ABIs and copies the `.so` files in one step:
 
@@ -73,7 +80,7 @@ Quick way — builds both ABIs and copies the `.so` files in one step:
 rustup target add aarch64-linux-android x86_64-linux-android
 
 # 2. Build the native library (requires ANDROID_NDK_HOME pointing at an installed NDK)
-python3 pre_build.py
+python3 pre_build.py android
 
 # 3. Run
 flutter run
@@ -90,6 +97,29 @@ cp target/x86_64-linux-android/release/libtsclient.so ../android/app/src/main/jn
 ```
 
 `libtsclient.so` is gitignored — the app runs only after it has been built and copied.
+
+### Linux
+
+```bash
+sudo apt install libasound2-dev libgtk-3-dev ninja-build   # build deps
+python3 pre_build.py linux     # host-builds the Rust core into native/prebuilt/linux/
+flutter build linux --release  # bundle: build/linux/x64/release/bundle/
+./build/linux/x64/release/bundle/nek0
+```
+
+The bundle's CMake step picks up `native/prebuilt/linux/libtsclient.so` and installs it
+into `<bundle>/lib/`, where `ts_ffi.dart` loads it from at runtime.
+
+### Windows
+
+```powershell
+python3 pre_build.py windows   # builds tsclient.dll into native/prebuilt/windows/ (Windows host only)
+flutter build windows --release
+build\windows\x64\runner\Release\nek0.exe
+```
+
+The CMake build copies `tsclient.dll` next to `nek0.exe`, which is where `ts_ffi.dart`
+loads it from at runtime.
 
 ## Debug
 
@@ -129,9 +159,12 @@ Nek0/
 │   ├── screens/                    # Home / server / settings screens
 │   ├── services/                   # FFI bindings, audio, foreground service, OTA
 │   └── widgets/                    # UI components (spotlight tour, voice panel, ...)
+├── linux/                          # Flutter Linux runner (bundles native/prebuilt/linux/)
+├── windows/                        # Flutter Windows runner (bundles native/prebuilt/windows/)
 ├── native/                         # Rust
 │   ├── Cargo.toml                  # Patches tsclientlib/tsproto → local_tsclientlib/
 │   ├── local_tsclientlib/          # Vendored tsclientlib/tsproto sources
+│   ├── prebuilt/                   # Desktop artifacts (gitignored, built by pre_build.py)
 │   └── src/
 │       ├── lib.rs                  # State, types, command queue
 │       └── api.rs                  # FFI functions, event loop, audio codec

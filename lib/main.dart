@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'l10n/generated/app_localizations.dart';
 import 'models/app_locale.dart';
-import 'models/app_settings.dart';
+import 'models/background_settings.dart';
 import 'screens/home_screen.dart';
 import 'services/sfx_service.dart';
 
@@ -48,15 +48,15 @@ class TeamSpeakApp extends ConsumerWidget {
       builder: (context, child) {
         return Consumer(
           builder: (context, ref, _) {
-            final settings = ref.watch(appSettingsProvider);
-            final path = settings.backgroundPath;
+            final settings = ref.watch(backgroundSettingsProvider);
+            final path = settings.path;
             return Stack(
               fit: StackFit.expand,
               children: [
                 const ColoredBox(color: Color(0xFF0F0F23)),
                 if (path != null)
                   Opacity(
-                    opacity: settings.backgroundOpacity,
+                    opacity: settings.opacity,
                     child: Image.file(
                       File(path),
                       fit: BoxFit.cover,
@@ -65,9 +65,7 @@ class TeamSpeakApp extends ConsumerWidget {
                     ),
                   ),
                 if (path != null)
-                  ColoredBox(
-                    color: Color.fromRGBO(0, 0, 0, settings.backgroundDim),
-                  ),
+                  ColoredBox(color: Color.fromRGBO(0, 0, 0, settings.dim)),
                 if (child != null) child,
               ],
             );

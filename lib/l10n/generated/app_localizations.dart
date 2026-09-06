@@ -356,6 +356,30 @@ abstract class AppLocalizations {
   /// **'Microphone permission denied'**
   String get micPermissionDenied;
 
+  /// No description provided for @audioDevicesSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Audio devices'**
+  String get audioDevicesSection;
+
+  /// No description provided for @audioOutputDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Output device'**
+  String get audioOutputDevice;
+
+  /// No description provided for @audioInputDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Input device'**
+  String get audioInputDevice;
+
+  /// No description provided for @audioSystemDefault.
+  ///
+  /// In en, this message translates to:
+  /// **'System default'**
+  String get audioSystemDefault;
+
   /// No description provided for @updateSection.
   ///
   /// In en, this message translates to:
@@ -842,6 +866,30 @@ abstract class AppLocalizations {
   /// **'Send a message...'**
   String get sendMessageHint;
 
+  /// No description provided for @chatChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel'**
+  String get chatChannel;
+
+  /// No description provided for @chatServer.
+  ///
+  /// In en, this message translates to:
+  /// **'Server'**
+  String get chatServer;
+
+  /// No description provided for @sendMessageAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Send message'**
+  String get sendMessageAction;
+
+  /// No description provided for @messageSendFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Message not sent: {error}'**
+  String messageSendFailed(String error);
+
   /// No description provided for @addServerTitle.
   ///
   /// In en, this message translates to:
@@ -883,6 +931,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Password (optional)'**
   String get passwordOptional;
+
+  /// No description provided for @tokenOptional.
+  ///
+  /// In en, this message translates to:
+  /// **'Privilege key (optional)'**
+  String get tokenOptional;
+
+  /// No description provided for @privilegeKeyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Use privilege key'**
+  String get privilegeKeyTitle;
+
+  /// No description provided for @privilegeKeyBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This server is asking for a privilege key (admin token). Enter it to be added to the associated server groups.'**
+  String get privilegeKeyBody;
+
+  /// No description provided for @privilegeKeyHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Token'**
+  String get privilegeKeyHint;
+
+  /// No description provided for @privilegeKeyGranted.
+  ///
+  /// In en, this message translates to:
+  /// **'Privilege key redeemed — server groups updated.'**
+  String get privilegeKeyGranted;
+
+  /// No description provided for @privilegeKeyNoEffect.
+  ///
+  /// In en, this message translates to:
+  /// **'The token was accepted, but no group change was detected. It may be invalid or already used.'**
+  String get privilegeKeyNoEffect;
 
   /// No description provided for @teamSpeakUserDefault.
   ///
@@ -1034,29 +1118,263 @@ abstract class AppLocalizations {
   /// **'File management'**
   String get menuFileManager;
 
+  /// No description provided for @menuServerTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Server'**
+  String get menuServerTitle;
+
+  /// No description provided for @menuEditServer.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit server'**
+  String get menuEditServer;
+
+  /// No description provided for @serverSettingsTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Server Settings'**
+  String get serverSettingsTitle;
+
+  /// No description provided for @serverMaxClientsLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Max clients'**
+  String get serverMaxClientsLabel;
+
+  /// No description provided for @serverPasswordLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Server password'**
+  String get serverPasswordLabel;
+
+  /// No description provided for @serverPasswordHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Leave empty to keep the current one'**
+  String get serverPasswordHelper;
+
+  /// No description provided for @serverPasswordRemove.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove server password'**
+  String get serverPasswordRemove;
+
+  /// No description provided for @serverSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Server updated'**
+  String get serverSaved;
+
+  /// No description provided for @serverReadOnlyHint.
+  ///
+  /// In en, this message translates to:
+  /// **'You do not have permission to change server settings'**
+  String get serverReadOnlyHint;
+
+  /// No description provided for @menuCreateChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Create channel'**
+  String get menuCreateChannel;
+
+  /// No description provided for @menuEditChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit channel'**
+  String get menuEditChannel;
+
+  /// No description provided for @menuDeleteChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete channel'**
+  String get menuDeleteChannel;
+
+  /// No description provided for @channelCreateTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Create Channel'**
+  String get channelCreateTitle;
+
+  /// No description provided for @channelEditTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit Channel'**
+  String get channelEditTitle;
+
+  /// No description provided for @channelNameLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel name'**
+  String get channelNameLabel;
+
+  /// No description provided for @channelTopicLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Topic (optional)'**
+  String get channelTopicLabel;
+
+  /// No description provided for @channelPasswordHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Leave empty to clear'**
+  String get channelPasswordHelper;
+
+  /// No description provided for @channelMaxClientsLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Max clients'**
+  String get channelMaxClientsLabel;
+
+  /// No description provided for @channelMaxClientsHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Empty = unlimited'**
+  String get channelMaxClientsHelper;
+
+  /// No description provided for @channelTypeLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Type'**
+  String get channelTypeLabel;
+
+  /// No description provided for @channelTypeTemporary.
+  ///
+  /// In en, this message translates to:
+  /// **'Temporary'**
+  String get channelTypeTemporary;
+
+  /// No description provided for @channelTypeSemiPermanent.
+  ///
+  /// In en, this message translates to:
+  /// **'Semi-permanent'**
+  String get channelTypeSemiPermanent;
+
+  /// No description provided for @channelTypePermanent.
+  ///
+  /// In en, this message translates to:
+  /// **'Permanent'**
+  String get channelTypePermanent;
+
+  /// No description provided for @deleteChannelTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete channel?'**
+  String get deleteChannelTitle;
+
+  /// No description provided for @deleteChannelBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete \"{name}\"?'**
+  String deleteChannelBody(String name);
+
+  /// No description provided for @deleteChannelOccupied.
+  ///
+  /// In en, this message translates to:
+  /// **'This channel has {count} clients — they will be moved to the default channel.'**
+  String deleteChannelOccupied(int count);
+
+  /// No description provided for @channelCreated.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel created'**
+  String get channelCreated;
+
+  /// No description provided for @channelSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel updated'**
+  String get channelSaved;
+
+  /// No description provided for @channelDeleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel deleted'**
+  String get channelDeleted;
+
+  /// No description provided for @channelMoved.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel moved'**
+  String get channelMoved;
+
+  /// No description provided for @menuMoveUp.
+  ///
+  /// In en, this message translates to:
+  /// **'Move up'**
+  String get menuMoveUp;
+
+  /// No description provided for @menuMoveDown.
+  ///
+  /// In en, this message translates to:
+  /// **'Move down'**
+  String get menuMoveDown;
+
+  /// No description provided for @channelDescriptionLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Description'**
+  String get channelDescriptionLabel;
+
+  /// No description provided for @channelNeededTalkPowerLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Needed talk power'**
+  String get channelNeededTalkPowerLabel;
+
+  /// No description provided for @channelTalkPowerHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'0 = everyone may talk'**
+  String get channelTalkPowerHelper;
+
+  /// No description provided for @channelDeleteDelayLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete delay (seconds)'**
+  String get channelDeleteDelayLabel;
+
+  /// No description provided for @channelDeleteDelayHelper.
+  ///
+  /// In en, this message translates to:
+  /// **'Seconds before an empty channel is removed'**
+  String get channelDeleteDelayHelper;
+
+  /// No description provided for @channelMaxFamilyLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Group user limit'**
+  String get channelMaxFamilyLabel;
+
+  /// No description provided for @channelMaxFamilyInherit.
+  ///
+  /// In en, this message translates to:
+  /// **'Inherit from parent'**
+  String get channelMaxFamilyInherit;
+
+  /// No description provided for @channelMaxFamilyUnlimited.
+  ///
+  /// In en, this message translates to:
+  /// **'Unlimited'**
+  String get channelMaxFamilyUnlimited;
+
+  /// No description provided for @channelMaxFamilyLimited.
+  ///
+  /// In en, this message translates to:
+  /// **'Custom limit'**
+  String get channelMaxFamilyLimited;
+
+  /// No description provided for @channelIsDefaultLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Default channel'**
+  String get channelIsDefaultLabel;
+
   /// No description provided for @audio.
   ///
   /// In en, this message translates to:
   /// **'Audio'**
   String get audio;
-
-  /// No description provided for @gestureSection.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel gestures'**
-  String get gestureSection;
-
-  /// No description provided for @gestureDefault.
-  ///
-  /// In en, this message translates to:
-  /// **'Tap: switch channel · Long press: menu'**
-  String get gestureDefault;
-
-  /// No description provided for @gestureSwapped.
-  ///
-  /// In en, this message translates to:
-  /// **'Tap: menu · Long press: switch channel'**
-  String get gestureSwapped;
 
   /// No description provided for @fmUp.
   ///
@@ -1543,6 +1861,102 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'The server rejected the request'**
   String get permFailedUnknown;
+
+  /// No description provided for @positionTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Set position'**
+  String get positionTitle;
+
+  /// No description provided for @positionSelf.
+  ///
+  /// In en, this message translates to:
+  /// **'Me'**
+  String get positionSelf;
+
+  /// No description provided for @positionHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Drag to place them around you: up is in front of you, farther away is quieter. Plain stereo cannot tell front from back — distance carries that.'**
+  String get positionHint;
+
+  /// No description provided for @positionUnset.
+  ///
+  /// In en, this message translates to:
+  /// **'No position set — plays centered'**
+  String get positionUnset;
+
+  /// No description provided for @positionReset.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset position'**
+  String get positionReset;
+
+  /// No description provided for @avatarUpload.
+  ///
+  /// In en, this message translates to:
+  /// **'Upload avatar'**
+  String get avatarUpload;
+
+  /// No description provided for @avatarUploaded.
+  ///
+  /// In en, this message translates to:
+  /// **'Avatar updated'**
+  String get avatarUploaded;
+
+  /// No description provided for @avatarUploadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Avatar upload failed: {error}'**
+  String avatarUploadFailed(String error);
+
+  /// No description provided for @avatarInvalidImage.
+  ///
+  /// In en, this message translates to:
+  /// **'Unsupported image file'**
+  String get avatarInvalidImage;
+
+  /// No description provided for @avatarDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete avatar'**
+  String get avatarDelete;
+
+  /// No description provided for @avatarDeleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Avatar removed'**
+  String get avatarDeleted;
+
+  /// No description provided for @avatarDeleteFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed to delete avatar: {error}'**
+  String avatarDeleteFailed(String error);
+
+  /// No description provided for @about.
+  ///
+  /// In en, this message translates to:
+  /// **'About'**
+  String get about;
+
+  /// No description provided for @appVersion.
+  ///
+  /// In en, this message translates to:
+  /// **'Version {version}'**
+  String appVersion(String version);
+
+  /// No description provided for @viewOnGitHub.
+  ///
+  /// In en, this message translates to:
+  /// **'View on GitHub'**
+  String get viewOnGitHub;
+
+  /// No description provided for @openLinkFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not open the link'**
+  String get openLinkFailed;
 
   /// No description provided for @backgroundSection.
   ///

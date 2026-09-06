@@ -43,6 +43,11 @@ class TsClient {
   final bool outputMuted;
   final bool isTalking;
   final double volume;
+
+  /// 2D position relative to us in meters (+x = right, +y = forward).
+  /// Null = no position set (centered playback).
+  final double? positionX;
+  final double? positionY;
   final String? uid;
 
   /// MD5 hash of the client's avatar (server-pushed `client_flag_avatar`).
@@ -81,6 +86,8 @@ class TsClient {
     this.outputMuted = false,
     this.isTalking = false,
     this.volume = 0.0,
+    this.positionX,
+    this.positionY,
     this.uid,
     this.avatarHash,
     this.databaseId = 0,
@@ -105,6 +112,8 @@ class TsClient {
     outputMuted: json['output_muted'] as bool? ?? false,
     isTalking: json['is_talking'] as bool? ?? false,
     volume: (json['volume'] as num?)?.toDouble() ?? 0.0,
+    positionX: (json['pos_x'] as num?)?.toDouble(),
+    positionY: (json['pos_y'] as num?)?.toDouble(),
     uid: json['uid'] as String?,
     avatarHash: json['avatar_hash'] as String?,
     databaseId: (json['database_id'] as num?)?.toInt() ?? 0,
@@ -121,7 +130,14 @@ class TsClient {
     channelGroupId: json['channel_group'] as int? ?? 0,
   );
 
-  TsClient copyWith({bool? isTalking, double? volume}) => TsClient(
+  /// [position] is a record so that "not mentioned" (null record = keep the
+  /// current values) stays distinguishable from "cleared" (`(x: null, y: null)`
+  /// = centered playback again).
+  TsClient copyWith({
+    bool? isTalking,
+    double? volume,
+    ({double? x, double? y})? position,
+  }) => TsClient(
     id: id,
     nickname: nickname,
     channelId: channelId,
@@ -130,6 +146,8 @@ class TsClient {
     outputMuted: outputMuted,
     isTalking: isTalking ?? this.isTalking,
     volume: volume ?? this.volume,
+    positionX: position != null ? position.x : this.positionX,
+    positionY: position != null ? position.y : this.positionY,
     uid: uid,
     avatarHash: avatarHash,
     databaseId: databaseId,

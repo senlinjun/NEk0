@@ -1,5 +1,5 @@
 name: NEk0
-description: "A teamspeak client for Android"
+description: "A teamspeak client for Android, Windows and Linux"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -44,6 +44,10 @@ dependencies:
   package_info_plus: ^10.2.1
   file_picker: ^12.0.0
   path_provider: ^2.1.6
+  url_launcher: ^6.3.0
+  # Decoding/resizing/re-encoding picked images so an avatar fits under the
+  # server's avatar size cap (pure Dart, no platform plugin).
+  image: ^4.3.0
 
 dev_dependencies:
   flutter_test:
@@ -64,10 +68,8 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  assets:
+    - assets/logo.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

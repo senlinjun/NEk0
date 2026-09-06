@@ -383,6 +383,7 @@ impl Connection {
 			channel: None,
 			channel_password: None,
 			password: None,
+			token: None,
 			input_muted: false,
 			output_muted: false,
 			input_hardware_enabled: true,
@@ -547,7 +548,7 @@ impl Connection {
 			version_sign: Cow::Borrowed(client_version_sign.as_ref()),
 			client_key_offset: counter,
 			phonetic_name: "".into(),
-			default_token: "".into(),
+			default_token: Cow::Borrowed(options.token.as_deref().unwrap_or_default()),
 			hardware_id: Cow::Borrowed(options.hardware_id.as_ref()),
 			badges: None,
 			signed_badges: None,
@@ -1712,6 +1713,7 @@ pub struct ConnectOptions {
 	channel: Option<Cow<'static, str>>,
 	channel_password: Option<Cow<'static, str>>,
 	password: Option<Cow<'static, str>>,
+	token: Option<Cow<'static, str>>,
 	input_muted: bool,
 	output_muted: bool,
 	input_hardware_enabled: bool,
@@ -1916,6 +1918,23 @@ impl ConnectOptions {
 	#[inline]
 	pub fn password<S: Into<Cow<'static, str>>>(mut self, pwd: S) -> Self {
 		self.password = Some(pwd.into());
+		self
+	}
+
+	/// Use a privilege key (token) when connecting.
+	///
+	/// The server redeems the key during the handshake and adds our client to
+	/// the server groups associated with it. Keys are single-use; an invalid
+	/// or already used key is ignored by the server.
+	///
+	/// # Example
+	/// ```
+	/// # use tsclientlib::Connection;
+	/// let opts = Connection::build("localhost").token("MySecretToken");
+	/// ```
+	#[inline]
+	pub fn token<S: Into<Cow<'static, str>>>(mut self, token: S) -> Self {
+		self.token = Some(token.into());
 		self
 	}
 

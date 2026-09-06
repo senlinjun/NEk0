@@ -31,4 +31,7 @@ class PermNames {
   static const clientPermissionModify = 'i_client_permission_modify_power';
   static const groupMemberAdd = 'i_group_member_add_power';
   static const channelPermissionModify = 'i_channel_permission_modify_power';
+
+  /// Sending server-wide chat messages (`targetmode=3`).
+  static const serverTextMessageSend = 'b_client_server_textmessage_send';
 }

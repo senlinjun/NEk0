@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -30,9 +32,35 @@ class TsConnectionState {
   final List<ChatMessage> messages;
   final int? selectedChannelId;
 
+  /// Chat conversations that exist this session (`channel`, `server`,
+  /// `pm:<clid>`), in tab order. `channel` is always open; `server` opens
+  /// when permitted; PM conversations open on demand / on first message.
+  final List<String> openConversations;
+
+  /// The conversation the chat panel currently displays.
+  final String selectedConversation;
+
+  /// Display names for conversations (`pm:<clid>` -> peer nickname), so a
+  /// tab label survives the peer leaving the server.
+  final Map<String, String> conversationTitles;
+
+  /// Unread messages per conversation, keyed by message id. Only messages
+  /// from OTHER people ever enter the set — the echo of our own sends is
+  /// seen by definition and never counts as new.
+  final Map<String, Set<int>> unreadIds;
+
+  /// The last text-message send the server rejected (raw reason). Transient
+  /// marker consumed by the chat panel to show a snackbar.
+  final String? sendFailedError;
+
   /// Channel id whose join was just rejected because of a wrong password.
   /// Transient marker consumed by the server screen to re-open the prompt.
   final int? failedPasswordChannelId;
+
+  /// The server announced `ask_for_privilegekey` and no token was submitted
+  /// with clientinit — the server screen should offer the privilege-key
+  /// dialog. Reset once handled or on disconnect.
+  final bool askForPrivilegeKey;
   final String? error;
   final List<String> diagMessages;
   final bool voiceActive;
@@ -56,7 +84,13 @@ class TsConnectionState {
     this.clients = const [],
     this.messages = const [],
     this.selectedChannelId,
+    this.openConversations = const ['channel'],
+    this.selectedConversation = 'channel',
+    this.conversationTitles = const {},
+    this.unreadIds = const {},
+    this.sendFailedError,
     this.failedPasswordChannelId,
+    this.askForPrivilegeKey = false,
     this.error,
     this.diagMessages = const [],
     this.voiceActive = false,
@@ -80,8 +114,14 @@ class TsConnectionState {
     List<TsChannel>? channels,
     List<TsClient>? clients,
     List<ChatMessage>? messages,
+    List<String>? openConversations,
+    String? selectedConversation,
+    Map<String, String>? conversationTitles,
+    Map<String, Set<int>>? unreadIds,
+    Object? sendFailedError = _sentinel,
     Object? selectedChannelId = _sentinel,
     Object? failedPasswordChannelId = _sentinel,
+    bool? askForPrivilegeKey,
     String? error,
     List<String>? diagMessages,
     bool? voiceActive,
@@ -103,12 +143,20 @@ class TsConnectionState {
     channels: channels ?? this.channels,
     clients: clients ?? this.clients,
     messages: messages ?? this.messages,
+    openConversations: openConversations ?? this.openConversations,
+    selectedConversation: selectedConversation ?? this.selectedConversation,
+    conversationTitles: conversationTitles ?? this.conversationTitles,
+    unreadIds: unreadIds ?? this.unreadIds,
+    sendFailedError: sendFailedError == _sentinel
+        ? this.sendFailedError
+        : sendFailedError as String?,
     selectedChannelId: selectedChannelId == _sentinel
         ? this.selectedChannelId
         : selectedChannelId as int?,
     failedPasswordChannelId: failedPasswordChannelId == _sentinel
         ? this.failedPasswordChannelId
         : failedPasswordChannelId as int?,
+    askForPrivilegeKey: askForPrivilegeKey ?? this.askForPrivilegeKey,
     error: error,
     diagMessages: diagMessages ?? this.diagMessages,
     voiceActive: voiceActive ?? this.voiceActive,
@@ -151,9 +199,20 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       false; // true only after enableMic() successfully completes
   bool _inputMutedBeforeAway = false; // input mute to restore when leaving away
   SharedPreferences? _prefs; // cached for synchronous saves
+  // UIDs whose saved 2D position has been applied this session (see
+  // _applySavedClientPositions). Afterwards live Rust state is authoritative.
+  final Set<String> _positionedUids = {};
   // Session-only cache of channel passwords entered by the user, keyed by
   // channel id. Cleared on disconnect; deliberately never persisted to disk.
   final Map<int, String> _channelPasswords = {};
+  // Id of the server whose one-time privilege key (token) was submitted with
+  // the current connect attempt; cleared from the server entry once the
+  // connection succeeds.
+  String? _pendingTokenServerId;
+  // True when the current connect attempt carried a pre-filled token in
+  // clientinit — suppresses the post-connect privilege-key prompt for that
+  // connection (the server already got a key).
+  bool _clientinitTokenSubmitted = false;
 
   /// Pending permission-management operations: token → completer. Resolved by
   /// the `perm_op` event handler; timed out after 8s by the caller.
@@ -177,6 +236,19 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         p.name == PermNames.groupMemberAdd ||
         p.name == PermNames.channelPermissionModify;
   });
+
+  /// Whether the server-chat tab is offered. `clientpermlist` only lists
+  /// DIRECTLY-assigned perms, so an empty list means "unknown" — same
+  /// low-threshold policy as [canManagePermissions] (show the tab; if the
+  /// server disagrees the send fails with an explicit `send_failed`
+  /// snackbar). A listed-but-negative permission hides it.
+  bool get canServerChat {
+    final entry = _ownPerms
+        .where((p) => p.name == PermNames.serverTextMessageSend)
+        .firstOrNull;
+    if (entry == null) return true;
+    return entry.effectivePositive;
+  }
 
   /// Localized strings without a BuildContext (same pattern as the
   /// notification labels).
@@ -219,9 +291,15 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     required String nickname,
     String? channel,
     String? password,
+    String? token,
+    String? serverId,
   }) async {
-    debugPrint('TS: connect($address, $nickname, ch=$channel)');
+    debugPrint(
+      'TS: connect($address, $nickname, ch=$channel, token=${token != null})',
+    );
     state = state.copyWith(connecting: true, error: null);
+    _pendingTokenServerId = token != null ? serverId : null;
+    _clientinitTokenSubmitted = token != null;
 
     // Push persisted identity to Rust before connecting
     final prefs = await SharedPreferences.getInstance();
@@ -237,6 +315,14 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       TsNative.setMicGain(savedMicGain);
       state = state.copyWith(micGain: savedMicGain);
     }
+    // Apply persisted audio device choices before any stream is built
+    // (desktop only — Android routes through the system automatically).
+    if (!Platform.isAndroid) {
+      TsNative.setAudioOutputDevice(
+        prefs.getString('audio_output_device') ?? '',
+      );
+      TsNative.setAudioInputDevice(prefs.getString('audio_input_device') ?? '');
+    }
 
     // Call Rust FFI - starts async connection in background
     final resultJson = TsNative.connect(
@@ -244,6 +330,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       nickname,
       channel: channel,
       password: password,
+      token: token,
     );
     debugPrint('TS: connect result = $resultJson');
     final result = jsonDecode(resultJson) as Map<String, dynamic>;
@@ -308,6 +395,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       // differs from the saved value. Runs on every refresh, so it also covers
       // late joiners and the brief window where a UID is not yet known.
       _applySavedClientVolumes();
+      _applySavedClientPositions();
     } catch (e) {
       debugPrint('FFI poll error: $e');
     }
@@ -342,7 +430,27 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           channels: channels,
           clients: clients,
           selectedChannelId: joinedChannelId,
+          // Offer the privilege-key dialog only when the server asks AND we
+          // did not already hand it a key in clientinit.
+          askForPrivilegeKey:
+              (event['ask_for_privilegekey'] as bool? ?? false) &&
+              !_clientinitTokenSubmitted,
         );
+
+        // The privilege key was redeemed by the server during the handshake —
+        // privilege keys are one-time, so drop it from the saved server.
+        final tokenServerId = _pendingTokenServerId;
+        _pendingTokenServerId = null;
+        _clientinitTokenSubmitted = false;
+        if (tokenServerId != null) {
+          final servers = ref.read(serverListProvider).servers;
+          final idx = servers.indexWhere((s) => s.id == tokenServerId);
+          if (idx >= 0) {
+            ref
+                .read(serverListProvider.notifier)
+                .updateServer(servers[idx].copyWith(clearToken: true));
+          }
+        }
 
         // Kick off avatar downloads right away (the poll loop would catch
         // them on its next tick anyway).
@@ -404,15 +512,59 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         break;
 
       case 'text_message':
+        final fromClientId = event['from_client_id'] as int;
+        final targetMode = event['target_mode'] as int;
+        final toClientId = (event['to_client_id'] as int?) ?? 0;
+        final conversation = _conversationId(
+          targetMode,
+          fromClientId,
+          toClientId,
+        );
+        // A conversation that first appears through an incoming message
+        // (someone PMs us, a server-chat bot) opens itself so its tab shows
+        // up; the sender's nickname labels the tab.
+        var open = state.openConversations;
+        var titles = state.conversationTitles;
+        if (!open.contains(conversation)) {
+          open = [...open, conversation];
+        }
+        if (targetMode == 1 &&
+            fromClientId != state.ownClientId &&
+            titles[conversation] != event['from_client']) {
+          titles = {...titles, conversation: event['from_client'] as String};
+        }
         final msg = ChatMessage(
           id: state.messages.length,
           fromClient: event['from_client'] as String,
-          fromClientId: event['from_client_id'] as int,
-          targetMode: event['target_mode'] as int,
+          fromClientId: fromClientId,
+          targetMode: targetMode,
+          conversationId: conversation,
           message: event['message'] as String,
           timestamp: DateTime.now(),
         );
-        state = state.copyWith(messages: [...state.messages, msg]);
+        // Only messages from OTHER people ever become unread — the echo of
+        // our own send is seen by definition, even when the chat panel is
+        // closed and the echo lands after it.
+        Map<String, Set<int>>? unread = state.unreadIds;
+        if (fromClientId != state.ownClientId) {
+          unread = {
+            ...unread,
+            conversation: {...(unread[conversation] ?? const <int>{}), msg.id},
+          };
+        }
+        state = state.copyWith(
+          messages: [...state.messages, msg],
+          openConversations: open,
+          conversationTitles: titles,
+          unreadIds: unread,
+        );
+        break;
+
+      case 'send_failed':
+        // The server refused a text message (e.g. missing server-chat
+        // permission) — surface it in the chat panel instead of letting the
+        // message vanish.
+        state = state.copyWith(sendFailedError: event['error'] as String?);
         break;
 
       case 'poke':
@@ -540,15 +692,142 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
 
   Future<void> sendPrivateMessage(int clientId, String text) async {
     if (!state.connected || text.isEmpty) return;
-    final msg = ChatMessage(
-      id: state.messages.length,
-      fromClient: state.nickname,
-      fromClientId: state.ownClientId,
-      targetMode: 1,
-      message: text,
-      timestamp: DateTime.now(),
+    TsNative.sendPrivateMessage(clientId, text);
+    // Don't add optimistically — the server echoes our own PM back as a
+    // text_message event (invoker = us, target = the peer)
+  }
+
+  Future<void> sendServerMessage(String text) async {
+    if (!state.connected || text.isEmpty) return;
+    TsNative.sendServerMessage(text);
+    // Same echo behavior as channel/private messages
+  }
+
+  // ─── Chat conversations ─────────────────────────────────────────────
+
+  /// Conversation key a text message belongs to: channel and server chat are
+  /// single rooms; a PM belongs to the OTHER party — the sender for incoming
+  /// messages, the `target` client for the server's echo of our own sends.
+  String _conversationId(int targetMode, int fromClientId, int toClientId) {
+    switch (targetMode) {
+      case 1:
+        return 'pm:${fromClientId == state.ownClientId ? toClientId : fromClientId}';
+      case 3:
+        return 'server';
+      default:
+        return 'channel';
+    }
+  }
+
+  /// Opens (or focuses) the private conversation with [clientId], titled
+  /// with their current nickname. Called when starting a PM from the client
+  /// sheet — switches the chat panel to it.
+  void openPrivateChat(int clientId) {
+    final client = state.clients.where((c) => c.id == clientId).firstOrNull;
+    openConversation(
+      'pm:$clientId',
+      title: client?.nickname ?? '',
+      select: true,
     );
-    state = state.copyWith(messages: [...state.messages, msg]);
+  }
+
+  /// Ensures the server conversation tab exists (called when the chat panel
+  /// opens and we are allowed to participate in server chat). Does not
+  /// switch to it.
+  void openServerChat() => openConversation('server');
+
+  /// Adds [conversation] to the open tabs. [select] additionally focuses it
+  /// and marks it read; without it (incoming PM / server tab at panel open)
+  /// the current selection stays untouched and the tab just shows up with an
+  /// unread badge if applicable.
+  void openConversation(
+    String conversation, {
+    String? title,
+    bool select = false,
+  }) {
+    var open = state.openConversations;
+    var titles = state.conversationTitles;
+    if (!open.contains(conversation)) open = [...open, conversation];
+    if (title != null &&
+        title.isNotEmpty &&
+        conversation != 'channel' &&
+        conversation != 'server' &&
+        titles[conversation] != title) {
+      titles = {...titles, conversation: title};
+    }
+    if (select) {
+      state = state.copyWith(
+        openConversations: open,
+        conversationTitles: titles,
+        selectedConversation: conversation,
+        unreadIds: _markSeen(conversation),
+      );
+    } else {
+      state = state.copyWith(
+        openConversations: open,
+        conversationTitles: titles,
+      );
+    }
+  }
+
+  void selectConversation(String conversation) {
+    if (!state.openConversations.contains(conversation)) return;
+    state = state.copyWith(
+      selectedConversation: conversation,
+      unreadIds: _markSeen(conversation),
+    );
+  }
+
+  void closeConversation(String conversation) {
+    if (conversation == 'channel') return; // always present
+    final open = state.openConversations
+        .where((c) => c != conversation)
+        .toList();
+    state = state.copyWith(
+      openConversations: open,
+      selectedConversation: state.selectedConversation == conversation
+          ? 'channel'
+          : state.selectedConversation,
+      unreadIds: {...state.unreadIds}..remove(conversation),
+    );
+  }
+
+  /// Marks [conversation] as read — used by the chat panel for the
+  /// conversation currently on screen.
+  void markConversationSeen(String conversation) {
+    if (state.unreadIds[conversation]?.isEmpty ?? true) return;
+    state = state.copyWith(unreadIds: _markSeen(conversation));
+  }
+
+  /// Marks [conversation] as read (clears its unread set). Returns the new
+  /// unread map, or the existing one when there is nothing to clear — either
+  /// way it is safe to hand to copyWith.
+  Map<String, Set<int>> _markSeen(String conversation) {
+    if (state.unreadIds[conversation]?.isEmpty ?? true) {
+      return state.unreadIds;
+    }
+    return {...state.unreadIds, conversation: const <int>{}};
+  }
+
+  /// Marks every conversation as read (used when the chat panel closes).
+  void markAllConversationsSeen() {
+    if (!state.unreadIds.values.any((ids) => ids.isNotEmpty)) return;
+    state = state.copyWith(unreadIds: const {});
+  }
+
+  void clearSendFailure() {
+    if (state.sendFailedError != null) {
+      state = state.copyWith(sendFailedError: null);
+    }
+  }
+
+  /// Unread messages across all open conversations — the chat bar badge.
+  int unreadCount() {
+    var total = 0;
+    for (final conversation in state.openConversations) {
+      total += state.unreadIds[conversation]?.length ?? 0;
+    }
+    return total;
   }
 
   /// The password entered for a locked channel during this session
@@ -776,6 +1055,129 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         ),
       );
 
+  // ─── Channel management ────────────────────────────────────────────
+
+  /// Creates a channel under [parentId] (0 = top level). [maxFamilyClients]:
+  /// -1 inherited, 0 unlimited, >0 limit. [deleteDelay] in seconds applies to
+  /// temporary channels. Returns null on success or an error description.
+  Future<String?> createChannel(
+    int parentId,
+    String name, {
+    String? topic,
+    String? password,
+    String? description,
+    int? maxClients,
+    int? maxFamilyClients,
+    required bool isPermanent,
+    required bool isSemiPermanent,
+    bool isDefault = false,
+    int? deleteDelay,
+  }) {
+    return _permOp(
+      (t) => TsNative.createChannel({
+        'parent_id': parentId,
+        'name': name,
+        if (topic != null) 'topic': topic,
+        if (password != null) 'password': password,
+        if (description != null) 'description': description,
+        if (maxClients != null) 'max_clients': maxClients,
+        if (maxFamilyClients != null) 'max_family_clients': maxFamilyClients,
+        'is_permanent': isPermanent,
+        'is_semi_permanent': isSemiPermanent,
+        'is_default': isDefault,
+        if (deleteDelay != null) 'delete_delay': deleteDelay,
+      }, token: t),
+    );
+  }
+
+  /// Edits channel properties. Null fields are left untouched; an empty
+  /// [password] clears it (null keeps it); [maxFamilyClients]: -1 inherited,
+  /// 0 unlimited, >0 limit; [order] = the sibling id this channel comes
+  /// after (0 = first); [neededTalkPower] >= 0 sets the talk gate. Returns
+  /// null on success or an error description.
+  Future<String?> editChannel(
+    int channelId, {
+    String? name,
+    String? topic,
+    String? password,
+    String? description,
+    int? maxClients,
+    int? maxFamilyClients,
+    bool? isPermanent,
+    bool? isSemiPermanent,
+    bool? isDefault,
+    int? deleteDelay,
+    int? neededTalkPower,
+    int? order,
+  }) {
+    return _permOp(
+      (t) => TsNative.editChannel(channelId, {
+        if (name != null) 'name': name,
+        if (topic != null) 'topic': topic,
+        if (password != null) 'password': password,
+        if (description != null) 'description': description,
+        if (maxClients != null) 'max_clients': maxClients,
+        if (maxFamilyClients != null) 'max_family_clients': maxFamilyClients,
+        if (isPermanent != null) 'is_permanent': isPermanent,
+        if (isSemiPermanent != null) 'is_semi_permanent': isSemiPermanent,
+        if (isDefault != null) 'is_default': isDefault,
+        if (deleteDelay != null) 'delete_delay': deleteDelay,
+        if (neededTalkPower != null) 'needed_talk_power': neededTalkPower,
+        if (order != null) 'order': order,
+      }, token: t),
+    );
+  }
+
+  /// Edits server properties (`serveredit`). Null fields are left untouched;
+  /// an empty [password] clears it (null keeps it). Returns null on success
+  /// or an error description. On success with a [name], the local server
+  /// name is updated optimistically so tree and app bar refresh at once —
+  /// the authoritative value arrives via the book either way.
+  Future<String?> editServer({
+    String? name,
+    String? password,
+    int? maxClients,
+    String? welcomeMessage,
+  }) async {
+    final error = await _permOp(
+      (t) => TsNative.serverEdit({
+        if (name != null) 'name': name,
+        if (password != null) 'password': password,
+        if (maxClients != null) 'max_clients': maxClients,
+        if (welcomeMessage != null) 'welcome_message': welcomeMessage,
+      }, token: t),
+    );
+    if (error == null && name != null) {
+      state = state.copyWith(serverName: name);
+    }
+    return error;
+  }
+
+  /// Deletes a channel ([force] also removes one that still has clients —
+  /// its occupants are moved to the default channel). Returns null on
+  /// success or an error description.
+  Future<String?> deleteChannel(int channelId, {required bool force}) =>
+      _permOp((t) => TsNative.deleteChannel(channelId, force: force, token: t));
+
+  /// Moves a channel to another parent (0 = server root) and optionally
+  /// positions it after [afterId] within the new parent (0 = first; null =
+  /// appended at the end). Also re-orders within the same parent. Returns
+  /// null on success or an error description.
+  Future<String?> moveChannel(
+    int channelId, {
+    required int parentId,
+    int? afterId,
+  }) {
+    return _permOp(
+      (t) => TsNative.moveChannelTo(
+        channelId,
+        parentId: parentId,
+        order: afterId,
+        token: t,
+      ),
+    );
+  }
+
   // ─── Permission management ─────────────────────────────────────────
 
   /// Re-reads our own directly-assigned permissions from the Rust cache
@@ -785,6 +1187,22 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       _ownPerms = TsNative.getOwnPerms().map(TsPerm.fromJson).toList();
     } catch (_) {
       _ownPerms = const [];
+    }
+  }
+
+  /// Redeems a privilege key (admin token) on the connected server via
+  /// `clientupdate client_default_token`. Returns null when the server
+  /// accepted the command, or an error description. Note: a server may
+  /// accept the command yet silently ignore an invalid/used key — the
+  /// caller should confirm the effect via the client's server groups.
+  Future<String?> usePrivilegeKey(String token) =>
+      _permOp((t) => TsNative.usePrivilegeKey(token, t));
+
+  /// Marks the connection's privilege-key prompt as handled (dismissed or
+  /// submitted) so it is not offered again until the next connect.
+  void clearAskForPrivilegeKey() {
+    if (state.askForPrivilegeKey) {
+      state = state.copyWith(askForPrivilegeKey: false);
     }
   }
 
@@ -829,6 +1247,13 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   /// Remove a client from a server group. null = success.
   Future<String?> removeFromServerGroup(int dbid, int sgid) =>
       _permOp((t) => TsNative.serverGroupDelClient(dbid, sgid, t));
+
+  /// Clears our own avatar: announces an empty `client_flag_avatar` (the
+  /// server broadcasts "no avatar", so every client — us included, via the
+  /// regular poll — drops the image) and removes the stored avatar file
+  /// server-side. null = success, else the error text.
+  Future<String?> deleteAvatar(String uid) =>
+      _permOp((t) => TsNative.deleteAvatar(uid, t));
 
   /// Set a client's channel group in a channel. null = success.
   Future<String?> setChannelGroup(int dbid, int cgid, int channelId) =>
@@ -893,6 +1318,31 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     }
   }
 
+  /// Sets ([x]/[y] both non-null) or clears (either null) a client's 2D
+  /// position relative to us, in meters (+x = right, +y = forward). The Rust
+  /// mixer pans and distance-attenuates that client's audio accordingly.
+  void setClientPosition(int clientId, double? x, double? y) {
+    TsNative.setClientPosition(clientId, x, y);
+    final newClients = state.clients.map((c) {
+      if (c.id == clientId) return c.copyWith(position: (x: x, y: y));
+      return c;
+    }).toList();
+    state = state.copyWith(clients: newClients);
+    // Persist per-client position to SharedPreferences keyed by the user UID,
+    // mirroring setClientVolume: without a UID yet (client just joined and the
+    // roster hasn't refreshed) the change only applies for this session;
+    // _applySavedClientPositions restores it once the UID shows up.
+    final client = newClients.where((c) => c.id == clientId).firstOrNull;
+    final uid = client?.uid;
+    if (uid != null && uid.isNotEmpty) {
+      if (x == null || y == null) {
+        _prefs?.remove('client_pos_uid_$uid');
+      } else {
+        _prefs?.setString('client_pos_uid_$uid', '{"x":$x,"y":$y}');
+      }
+    }
+  }
+
   /// Removes legacy `client_volume_<clid>` keys persisted by older builds.
   /// Volume persistence now uses `client_volume_uid_<uid>`.
   void _migrateLegacyVolumeKeys() {
@@ -921,6 +1371,34 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       final saved = prefs.getDouble('client_volume_uid_$uid');
       if (saved != null && (saved - client.volume).abs() > 0.001) {
         setClientVolume(client.id, saved);
+      }
+    }
+  }
+
+  /// Restores saved per-client positions (keyed by user UID) for roster
+  /// clients not yet seen this session. Runs on every poll cycle: it covers
+  /// the app-restart case (Rust state starts empty) and clients whose UID
+  /// appears late. Each UID is applied at most once — afterwards live Rust
+  /// state is authoritative, so the user's in-session edits always win.
+  void _applySavedClientPositions() {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    for (final client in state.clients) {
+      final uid = client.uid;
+      if (uid == null || uid.isEmpty || _positionedUids.contains(uid)) continue;
+      _positionedUids.add(uid);
+      final raw = prefs.getString('client_pos_uid_$uid');
+      if (raw == null) continue;
+      try {
+        final saved = jsonDecode(raw) as Map<String, dynamic>;
+        final x = (saved['x'] as num?)?.toDouble();
+        final y = (saved['y'] as num?)?.toDouble();
+        if (x != null && y != null) {
+          TsNative.setClientPosition(client.id, x, y);
+        }
+      } catch (_) {
+        // Corrupt entry — drop it so it cannot break later polls either.
+        prefs.remove('client_pos_uid_$uid');
       }
     }
   }

@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">NEk0</h1>
-<p align="center">基于 Flutter &amp; Rust 构建的 TeamSpeak 3 Android 客户端</p>
+<p align="center">基于 Flutter &amp; Rust 构建的 TeamSpeak 3 客户端（Android / Windows / Linux）</p>
 
 <p align="center">
   <a href="README.md">English</a> ·
@@ -24,7 +24,9 @@
 - **初次使用引导** — 在真实界面上聚光高亮讲解主要功能（可通过帮助图标随时重看）
 - **语音设置** — 设置页、长按麦克风按钮或点击用户列表中自己的名字可调
   VAD / PTT / 麦克风增益 / 阈值，带实时麦克风电平与麦克风测试
-- **OTA 更新** — 启动时自动检查 GitHub/Gitee 的 release（版本号格式 `vx.y.z`），
+- **桌面端支持** — 同一套 Rust 核心可跑在 Windows 与 Linux 上；麦克风在原生库内用
+  cpal 输入流采集，播放端自动协商设备格式并按回退链兜底
+- **OTA 更新（Android）** — 启动时自动检查 GitHub/Gitee 的 release（版本号格式 `vx.y.z`），
   按设备 ABI 下载对应 APK 并安装；可在设置中关闭检查或切换更新源
 
 ## 架构
@@ -34,8 +36,8 @@
 | UI | Flutter (Dart) + Riverpod |
 | 协议与编解码 | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib), `opus-rs`) |
 | 播放 | Rust（`cpal` — 持续输出流，空闲时输出静音） |
-| 麦克风采集 | Kotlin（`AudioRecord`）→ EventChannel → Dart → FFI → Rust |
-| 后台保活 | `KeepAliveService`（前台服务 + `MediaSession`） |
+| 麦克风采集 | Android：Kotlin（`AudioRecord`）→ EventChannel → Dart → FFI → Rust<br>Windows/Linux：Rust（`cpal` 输入流）→ 编码发送管线 |
+| 后台保活 | `KeepAliveService`（前台服务 + `MediaSession`，仅 Android） |
 
 ```
 Flutter (Dart)                  Rust (Native .so)
@@ -44,11 +46,11 @@ lib/services/ts_ffi.dart  ←FFI→  native/src/api.rs
 lib/services/audio_service.dart  native/src/lib.rs
 lib/models/ts_state.dart         (tsclientlib + opus-rs + tokio)
 
-Kotlin (Android)
-────────────────
+Kotlin（仅 Android）
+───────────────────
 MainActivity.kt         ←EventChannel→  audio_service.dart   (AudioRecord 采集麦克风)
-KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (前台服务
-                         + MediaSession + 通知栏按钮)
+KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (前台服务、
+                         MediaSession、通知栏按钮、MediaStore 保存)
 ```
 
 ## 环境要求
@@ -59,8 +61,12 @@ KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (前台服�
 | Rust | 1.70+ |
 | Android SDK | 最新版 |
 | Android NDK | 26+ |
+| Linux: alsa-lib / gtk3 / ninja / pkg-config | 最新版（桌面构建） |
+| Windows: Visual Studio（C++ 桌面开发负载） | 最新版（桌面构建） |
 
 ## 构建与运行
+
+### Android
 
 一键方式 — 同时构建两种 ABI 并复制 `.so` 文件：
 
@@ -69,7 +75,7 @@ KeepAliveService.kt     ←MethodChannel→ foreground_service.dart (前台服�
 rustup target add aarch64-linux-android x86_64-linux-android
 
 # 2. 构建原生库（需将 ANDROID_NDK_HOME 指向已安装的 NDK）
-python3 pre_build.py
+python3 pre_build.py android
 
 # 3. 运行
 flutter run
@@ -86,6 +92,28 @@ cp target/x86_64-linux-android/release/libtsclient.so ../android/app/src/main/jn
 ```
 
 `libtsclient.so` 已被 gitignore —— 必须先构建并复制后应用才能运行。
+
+### Linux
+
+```bash
+sudo apt install libasound2-dev libgtk-3-dev ninja-build   # 构建依赖
+python3 pre_build.py linux     # 在宿主机构建 Rust 核心，产物进 native/prebuilt/linux/
+flutter build linux --release  # 产物：build/linux/x64/release/bundle/
+./build/linux/x64/release/bundle/nek0
+```
+
+Linux 的 CMake 打包步骤会把 `native/prebuilt/linux/libtsclient.so` 安装到
+`<bundle>/lib/`，运行时 `ts_ffi.dart` 从该路径加载。
+
+### Windows
+
+```powershell
+python3 pre_build.py windows   # 构建 tsclient.dll 到 native/prebuilt/windows/（仅 Windows 宿主机）
+flutter build windows --release
+build\windows\x64\runner\Release\nek0.exe
+```
+
+CMake 构建会把 `tsclient.dll` 拷到 `nek0.exe` 旁，运行时 `ts_ffi.dart` 从该路径加载。
 
 ## 调试
 
@@ -125,9 +153,12 @@ Nek0/
 │   ├── screens/                    # 首页 / 服务器 / 设置页
 │   ├── services/                   # FFI 绑定、音频、前台服务、OTA
 │   └── widgets/                    # UI 组件（聚光引导、语音面板等）
+├── linux/                          # Flutter Linux runner（打包 native/prebuilt/linux/）
+├── windows/                        # Flutter Windows runner（打包 native/prebuilt/windows/）
 ├── native/                         # Rust
 │   ├── Cargo.toml                  # 将 tsclientlib/tsproto patch 到 local_tsclientlib/
 │   ├── local_tsclientlib/          # 内置的 tsclientlib/tsproto 源码
+│   ├── prebuilt/                   # 桌面端产物（gitignore，由 pre_build.py 构建）
 │   └── src/
 │       ├── lib.rs                  # 状态、类型、命令队列
 │       └── api.rs                  # FFI 函数、事件循环、音频编解码

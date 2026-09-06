@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:ffi';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
+
 import 'package:ffi/ffi.dart';
 
 // Load the native Rust library
@@ -10,18 +11,29 @@ DynamicLibrary _loadLib() {
   if (Platform.isAndroid) {
     return DynamicLibrary.open('libtsclient.so');
   }
+  if (Platform.isWindows) {
+    // Bundled next to the exe (standard DLL search order finds it there).
+    return DynamicLibrary.open('tsclient.dll');
+  }
+  if (Platform.isLinux) {
+    // The Flutter Linux bundle lays out: <bundle>/nek0 + <bundle>/lib/.
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    return DynamicLibrary.open('$exeDir/lib/libtsclient.so');
+  }
   throw UnsupportedError('Platform not supported');
 }
 
 // ─── C function typedefs ────────────────────────────────────────────
 
-// ts_connect(address, nickname, channel, password) -> *char (JSON)
+// ts_connect(address, nickname, channel, password, token) -> *char (JSON)
+// token: privilege key for the first login, null/empty for none.
 typedef _ConnectNative =
     Pointer<Utf8> Function(
       Pointer<Utf8> address,
       Pointer<Utf8> nickname,
       Pointer<Utf8> channel,
       Pointer<Utf8> password,
+      Pointer<Utf8> token,
     );
 typedef _ConnectDart =
     Pointer<Utf8> Function(
@@ -29,6 +41,7 @@ typedef _ConnectDart =
       Pointer<Utf8> nickname,
       Pointer<Utf8> channel,
       Pointer<Utf8> password,
+      Pointer<Utf8> token,
     );
 
 // ts_disconnect() -> *char (JSON)
@@ -50,6 +63,14 @@ typedef _GetClientsDart = Pointer<Utf8> Function();
 // ts_send_channel_message(channel_id, message) -> bool
 typedef _SendChannelMsgNative = Uint8 Function(Uint32, Pointer<Utf8>);
 typedef _SendChannelMsgDart = int Function(int, Pointer<Utf8>);
+
+// ts_send_private_message(client_id, message) -> bool
+typedef _SendPrivateMsgNative = Uint8 Function(Uint16, Pointer<Utf8>);
+typedef _SendPrivateMsgDart = int Function(int, Pointer<Utf8>);
+
+// ts_send_server_message(message) -> bool
+typedef _SendServerMsgNative = Uint8 Function(Pointer<Utf8>);
+typedef _SendServerMsgDart = int Function(Pointer<Utf8>);
 
 // ts_move_to_channel(channel_id, password) -> bool
 // password: null/empty for unlocked channels; plaintext, hashed in Rust.
@@ -84,6 +105,22 @@ typedef _StopAudioDart = void Function();
 typedef _SendAudioNative = Uint8 Function(Pointer<Float>, Uint32);
 typedef _SendAudioDart = int Function(Pointer<Float>, int);
 
+// ts_set_mic_capture(enable: u8) -> u8 (desktop/iOS cpal capture toggle)
+typedef _SetMicCaptureNative = Uint8 Function(Uint8);
+typedef _SetMicCaptureDart = int Function(int);
+
+// ts_get_mic_rms() -> f32 (RMS of the last native-capture mic block)
+typedef _GetMicRmsNative = Float Function();
+typedef _GetMicRmsDart = double Function();
+
+// ts_get_audio_devices() -> *char (JSON {outputs:[{name,is_default}], inputs:[...]})
+typedef _GetAudioDevicesNative = Pointer<Utf8> Function();
+typedef _GetAudioDevicesDart = Pointer<Utf8> Function();
+
+// ts_set_audio_output_device(name) / ts_set_audio_input_device(name) -> bool
+typedef _SetAudioDeviceNative = Uint8 Function(Pointer<Utf8>);
+typedef _SetAudioDeviceDart = int Function(Pointer<Utf8>);
+
 // ts_set_identity(json: *const c_char)
 typedef _SetIdentityNative = Void Function(Pointer<Utf8>);
 typedef _SetIdentityDart = void Function(Pointer<Utf8>);
@@ -99,6 +136,11 @@ typedef _SetMicGainDart = void Function(double);
 // ts_set_client_volume(client_id: u16, volume_db: f32)
 typedef _SetClientVolumeNative = Void Function(Uint16, Float);
 typedef _SetClientVolumeDart = void Function(int, double);
+
+// ts_set_client_position(client_id: u16, x: f32, y: f32, enabled: u8)
+// enabled == 0 clears the position (back to centered playback).
+typedef _SetClientPositionNative = Void Function(Uint16, Float, Float, Uint8);
+typedef _SetClientPositionDart = void Function(int, double, double, int);
 
 // ts_set_sfx_sample(kind: u8, data: *const u8, len: usize) -> i32
 // Returns: 0 ok, 1 invalid kind, 2 unsupported format, 3 empty/too long.
@@ -135,6 +177,30 @@ typedef _BanClientDart = int Function(int, int, Pointer<Utf8>, Pointer<Utf8>);
 typedef _MoveClientNative =
     Uint8 Function(Uint16, Uint32, Pointer<Utf8>, Pointer<Utf8>);
 typedef _MoveClientDart = int Function(int, int, Pointer<Utf8>, Pointer<Utf8>);
+
+// ─── Channel management ─────────────────────────────────────────────
+
+// ts_channel_create(args_json, token) -> bool
+typedef _ChannelCreateNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _ChannelCreateDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
+// ts_channel_edit(channel_id: u32, args_json, token) -> bool
+typedef _ChannelEditNative =
+    Uint8 Function(Uint32, Pointer<Utf8>, Pointer<Utf8>);
+typedef _ChannelEditDart = int Function(int, Pointer<Utf8>, Pointer<Utf8>);
+
+// ts_server_edit(args_json, token) -> bool
+typedef _ServerEditNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _ServerEditDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
+// ts_channel_delete(channel_id: u32, force: u8, token) -> bool
+typedef _ChannelDeleteNative = Uint8 Function(Uint32, Uint8, Pointer<Utf8>);
+typedef _ChannelDeleteDart = int Function(int, int, Pointer<Utf8>);
+
+// ts_channel_move(channel_id: u32, parent_id: u32, order: i64, token) -> bool
+typedef _ChannelMoveNative =
+    Uint8 Function(Uint32, Uint32, Int64, Pointer<Utf8>);
+typedef _ChannelMoveDart = int Function(int, int, int, Pointer<Utf8>);
 
 // ─── File transfer (channel file management) ────────────────────────
 
@@ -176,9 +242,18 @@ typedef _FtCancelDart = int Function(int);
 typedef _DownloadAvatarNative = Uint32 Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _DownloadAvatarDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
 
+// ts_upload_avatar(uid, src_local_path) -> task_id
+typedef _UploadAvatarNative = Uint32 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _UploadAvatarDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
+// ts_delete_avatar(uid, token) -> bool
+typedef _DeleteAvatarNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _DeleteAvatarDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+
 // ─── Permission management ──────────────────────────────────────────
 
-// ts_get_server_groups() / ts_get_channel_groups() -> *char (JSON array)
+// ts_get_server_groups() / ts_get_channel_groups() / ts_get_server_info()
+// -> *char (JSON)
 typedef _GetGroupsNative = Pointer<Utf8> Function();
 typedef _GetGroupsDart = Pointer<Utf8> Function();
 
@@ -189,6 +264,10 @@ typedef _RefreshGroupsDart = int Function();
 // ts_server_group_add_client(dbid: u64, sgid: u64, token) -> bool
 typedef _SgAddClientNative = Uint8 Function(Uint64, Uint64, Pointer<Utf8>);
 typedef _SgAddClientDart = int Function(int, int, Pointer<Utf8>);
+
+// ts_use_privilege_key(token, op_token) -> bool
+typedef _UsePrivKeyNative = Uint8 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _UsePrivKeyDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
 
 // ts_server_group_del_client(dbid: u64, sgid: u64, token) -> bool
 typedef _SgDelClientNative = Uint8 Function(Uint64, Uint64, Pointer<Utf8>);
@@ -249,6 +328,14 @@ final _sendChannelMsg = _lib
     .lookupFunction<_SendChannelMsgNative, _SendChannelMsgDart>(
       'ts_send_channel_message',
     );
+final _sendPrivateMsg = _lib
+    .lookupFunction<_SendPrivateMsgNative, _SendPrivateMsgDart>(
+      'ts_send_private_message',
+    );
+final _sendServerMsg = _lib
+    .lookupFunction<_SendServerMsgNative, _SendServerMsgDart>(
+      'ts_send_server_message',
+    );
 final _moveToChannel = _lib
     .lookupFunction<_MoveToChannelNative, _MoveToChannelDart>(
       'ts_move_to_channel',
@@ -278,6 +365,25 @@ final _stopAudio = _lib.lookupFunction<_StopAudioNative, _StopAudioDart>(
 final _sendAudio = _lib.lookupFunction<_SendAudioNative, _SendAudioDart>(
   'ts_send_audio',
 );
+final _setMicCapture = _lib
+    .lookupFunction<_SetMicCaptureNative, _SetMicCaptureDart>(
+      'ts_set_mic_capture',
+    );
+final _getMicRms = _lib.lookupFunction<_GetMicRmsNative, _GetMicRmsDart>(
+  'ts_get_mic_rms',
+);
+final _getAudioDevices = _lib
+    .lookupFunction<_GetAudioDevicesNative, _GetAudioDevicesDart>(
+      'ts_get_audio_devices',
+    );
+final _setAudioOutputDevice = _lib
+    .lookupFunction<_SetAudioDeviceNative, _SetAudioDeviceDart>(
+      'ts_set_audio_output_device',
+    );
+final _setAudioInputDevice = _lib
+    .lookupFunction<_SetAudioDeviceNative, _SetAudioDeviceDart>(
+      'ts_set_audio_input_device',
+    );
 final _setIdentity = _lib.lookupFunction<_SetIdentityNative, _SetIdentityDart>(
   'ts_set_identity',
 );
@@ -290,6 +396,10 @@ final _setMicGain = _lib.lookupFunction<_SetMicGainNative, _SetMicGainDart>(
 final _setClientVolume = _lib
     .lookupFunction<_SetClientVolumeNative, _SetClientVolumeDart>(
       'ts_set_client_volume',
+    );
+final _setClientPosition = _lib
+    .lookupFunction<_SetClientPositionNative, _SetClientPositionDart>(
+      'ts_set_client_position',
     );
 final _setSfxSample = _lib
     .lookupFunction<_SetSfxSampleNative, _SetSfxSampleDart>(
@@ -317,6 +427,23 @@ final _banClient = _lib.lookupFunction<_BanClientNative, _BanClientDart>(
 final _moveClient = _lib.lookupFunction<_MoveClientNative, _MoveClientDart>(
   'ts_move_client',
 );
+final _channelCreate = _lib
+    .lookupFunction<_ChannelCreateNative, _ChannelCreateDart>(
+      'ts_channel_create',
+    );
+final _channelEdit = _lib.lookupFunction<_ChannelEditNative, _ChannelEditDart>(
+  'ts_channel_edit',
+);
+final _serverEdit = _lib.lookupFunction<_ServerEditNative, _ServerEditDart>(
+  'ts_server_edit',
+);
+final _channelDelete = _lib
+    .lookupFunction<_ChannelDeleteNative, _ChannelDeleteDart>(
+      'ts_channel_delete',
+    );
+final _channelMove = _lib.lookupFunction<_ChannelMoveNative, _ChannelMoveDart>(
+  'ts_channel_move',
+);
 final _ftList = _lib.lookupFunction<_FtListNative, _FtListDart>('ts_ft_list');
 final _ftMkDir = _lib.lookupFunction<_FtMkDirNative, _FtMkDirDart>(
   'ts_ft_mkdir',
@@ -337,8 +464,15 @@ final _downloadAvatar = _lib
     .lookupFunction<_DownloadAvatarNative, _DownloadAvatarDart>(
       'ts_download_avatar',
     );
+final _uploadAvatar = _lib
+    .lookupFunction<_UploadAvatarNative, _UploadAvatarDart>('ts_upload_avatar');
+final _deleteAvatar = _lib
+    .lookupFunction<_DeleteAvatarNative, _DeleteAvatarDart>('ts_delete_avatar');
 final _getServerGroups = _lib.lookupFunction<_GetGroupsNative, _GetGroupsDart>(
   'ts_get_server_groups',
+);
+final _getServerInfo = _lib.lookupFunction<_GetGroupsNative, _GetGroupsDart>(
+  'ts_get_server_info',
 );
 final _getChannelGroups = _lib.lookupFunction<_GetGroupsNative, _GetGroupsDart>(
   'ts_get_channel_groups',
@@ -352,6 +486,9 @@ final _getOwnPerms = _lib.lookupFunction<_GetOwnPermsNative, _GetOwnPermsDart>(
 );
 final _sgAddClient = _lib.lookupFunction<_SgAddClientNative, _SgAddClientDart>(
   'ts_server_group_add_client',
+);
+final _usePrivKey = _lib.lookupFunction<_UsePrivKeyNative, _UsePrivKeyDart>(
+  'ts_use_privilege_key',
 );
 final _sgDelClient = _lib.lookupFunction<_SgDelClientNative, _SgDelClientDart>(
   'ts_server_group_del_client',
@@ -408,13 +545,17 @@ class TsNative {
     String nickname, {
     String? channel,
     String? password,
+    String? token,
   }) {
-    debugLog('connect($address, $nickname, ch=$channel)');
+    debugLog(
+      'connect($address, $nickname, ch=$channel, token=${token != null})',
+    );
     final result = _connect(
       _strToPtr(address),
       _strToPtr(nickname),
       _strToPtr(channel),
       _strToPtr(password),
+      _strToPtr(token),
     );
     final str = _ptrToString(result);
     debugLog('connect -> $str');
@@ -446,6 +587,20 @@ class TsNative {
     debugLog('sendChannelMessage(cid=$channelId, len=${message.length})');
     final result = _sendChannelMsg(channelId, _strToPtr(message));
     debugLog('sendChannelMessage -> $result');
+    return result != 0;
+  }
+
+  static bool sendPrivateMessage(int clientId, String message) {
+    debugLog('sendPrivateMessage(clid=$clientId, len=${message.length})');
+    final result = _sendPrivateMsg(clientId, _strToPtr(message));
+    debugLog('sendPrivateMessage -> $result');
+    return result != 0;
+  }
+
+  static bool sendServerMessage(String message) {
+    debugLog('sendServerMessage(len=${message.length})');
+    final result = _sendServerMsg(_strToPtr(message));
+    debugLog('sendServerMessage -> $result');
     return result != 0;
   }
 
@@ -514,6 +669,49 @@ class TsNative {
     return _sendAudio(data, dataLen) != 0;
   }
 
+  /// Toggles the native (cpal) microphone capture stream — desktop / iOS
+  /// only; Android captures through its Kotlin EventChannel instead.
+  /// Returns true when the stream is in the requested state.
+  static bool setMicCapture(bool enable) {
+    return _setMicCapture(enable ? 1 : 0) != 0;
+  }
+
+  /// RMS (0..1) of the most recent native-capture mic block. Android
+  /// reports levels from its own EventChannel data instead.
+  static double getMicRms() {
+    return _getMicRms();
+  }
+
+  /// Host audio devices for the picker UI (desktop). Shape:
+  /// `{"outputs":[{"name","is_default"}],"inputs":[...]}` — empty arrays
+  /// where enumeration is unsupported (Android).
+  static Map<String, dynamic> getAudioDevices() {
+    final str = _ptrToString(_getAudioDevices());
+    return jsonDecode(str) as Map<String, dynamic>;
+  }
+
+  /// Selects the output device by name ('' = system default). Applied to
+  /// the running stream within 500ms while connected.
+  static bool setAudioOutputDevice(String name) {
+    final ptr = _strToPtr(name);
+    try {
+      return _setAudioOutputDevice(ptr) != 0;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Selects the input (mic) device by name ('' = system default). A
+  /// running capture stream restarts immediately.
+  static bool setAudioInputDevice(String name) {
+    final ptr = _strToPtr(name);
+    try {
+      return _setAudioInputDevice(ptr) != 0;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
   static void setMicGain(double gain) {
     debugLog('setMicGain($gain)');
     _setMicGain(gain);
@@ -521,6 +719,14 @@ class TsNative {
 
   static void setClientVolume(int clientId, double volumeDb) {
     _setClientVolume(clientId, volumeDb);
+  }
+
+  /// Sets the client's 2D position relative to us in meters (+x = right,
+  /// +y = forward), or clears it when either coordinate is null (back to
+  /// centered playback).
+  static void setClientPosition(int clientId, double? x, double? y) {
+    final enabled = (x != null && y != null) ? 1 : 0;
+    _setClientPosition(clientId, x ?? 0.0, y ?? 0.0, enabled);
   }
 
   /// Install a custom WAV sample for an SFX kind (1..=25, see SfxKind).
@@ -614,6 +820,102 @@ class TsNative {
     } finally {
       malloc.free(ptr);
       malloc.free(t);
+    }
+  }
+
+  /// Creates a channel. [args] is a `ChannelArgs` map (see native/src/lib.rs):
+  /// parent_id, name (required), topic, password, description, max_clients,
+  /// max_family_clients (-1 inherited / 0 unlimited / >0 limit), is_permanent,
+  /// is_semi_permanent, is_default, delete_delay (seconds). [token] is
+  /// required: the server's answer resolves as a `perm_op` event carrying it.
+  /// Returns true when the request was queued.
+  static bool createChannel(
+    Map<String, Object?> args, {
+    required String token,
+  }) {
+    debugLog('createChannel(${args['name']})');
+    final ptr = _strToPtr(jsonEncode(args));
+    final tok = _strToPtr(token);
+    try {
+      return _channelCreate(ptr, tok) != 0;
+    } finally {
+      malloc.free(ptr);
+      malloc.free(tok);
+    }
+  }
+
+  /// Edits channel properties. [args] is a `ChannelArgs` map (see
+  /// native/src/lib.rs); absent keys are left untouched, empty strings clear
+  /// topic/description/password, 'order' (sibling id, 0 = first) repositions
+  /// the channel. [token] is required (see [createChannel]). Returns true
+  /// when the request was queued.
+  static bool editChannel(
+    int channelId,
+    Map<String, Object?> args, {
+    required String token,
+  }) {
+    debugLog('editChannel(channel=$channelId, keys=${args.keys.toList()})');
+    final ptr = _strToPtr(jsonEncode(args));
+    final tok = _strToPtr(token);
+    try {
+      return _channelEdit(channelId, ptr, tok) != 0;
+    } finally {
+      malloc.free(ptr);
+      malloc.free(tok);
+    }
+  }
+
+  /// Edits server properties. [args] is a `ServerEditArgs` map (see
+  /// native/src/lib.rs); absent keys are left untouched, an empty password
+  /// clears the server password. [token] is required (see [createChannel]).
+  /// Returns true when the request was queued.
+  static bool serverEdit(Map<String, Object?> args, {required String token}) {
+    debugLog('serverEdit(keys=${args.keys.toList()})');
+    final ptr = _strToPtr(jsonEncode(args));
+    final tok = _strToPtr(token);
+    try {
+      return _serverEdit(ptr, tok) != 0;
+    } finally {
+      malloc.free(ptr);
+      malloc.free(tok);
+    }
+  }
+
+  /// Deletes a channel. [force] also removes a channel that still has
+  /// clients in it (requires the force-delete permission). [token] is
+  /// required (see [createChannel]). Returns true when the request was queued.
+  static bool deleteChannel(
+    int channelId, {
+    required bool force,
+    required String token,
+  }) {
+    debugLog('deleteChannel(channel=$channelId, force=$force)');
+    final tok = _strToPtr(token);
+    try {
+      return _channelDelete(channelId, force ? 1 : 0, tok) != 0;
+    } finally {
+      malloc.free(tok);
+    }
+  }
+
+  /// Moves a channel to another parent (also re-orders within the same
+  /// parent). [order] is the sibling id the channel comes after (0 = first,
+  /// null = server default / append at the end). [token] is required
+  /// (see [createChannel]). Returns true when the request was queued.
+  static bool moveChannelTo(
+    int channelId, {
+    required int parentId,
+    int? order,
+    required String token,
+  }) {
+    debugLog(
+      'moveChannelTo(channel=$channelId, parent=$parentId, order=$order)',
+    );
+    final tok = _strToPtr(token);
+    try {
+      return _channelMove(channelId, parentId, order ?? -1, tok) != 0;
+    } finally {
+      malloc.free(tok);
     }
   }
 
@@ -745,6 +1047,40 @@ class TsNative {
     }
   }
 
+  /// Starts uploading `srcLocalPath` as our own avatar (the Rust side builds
+  /// the `/avatar_<uid>` remote path, streams the file and announces the MD5
+  /// via clientupdate once the transfer is confirmed). Returns a task id for
+  /// completion tracking, or 0 when the request could not start (not
+  /// connected / malformed uid / unreadable source file).
+  static int uploadAvatar(String uid, String srcLocalPath) {
+    debugLog('uploadAvatar($uid)');
+    final u = _strToPtr(uid);
+    final s = _strToPtr(srcLocalPath);
+    try {
+      return _uploadAvatar(u, s);
+    } finally {
+      malloc.free(u);
+      malloc.free(s);
+    }
+  }
+
+  /// Clears our own avatar: announces an empty `client_flag_avatar` (the
+  /// server broadcasts "no avatar" to everyone) and asks the server to
+  /// remove the stored avatar file. The server's answer for the announce
+  /// arrives as a `perm_op` event carrying [token]. Returns false when the
+  /// request could not be queued (not connected / malformed uid).
+  static bool deleteAvatar(String uid, String token) {
+    debugLog('deleteAvatar($uid)');
+    final u = _strToPtr(uid);
+    final t = _strToPtr(token);
+    try {
+      return _deleteAvatar(u, t) != 0;
+    } finally {
+      malloc.free(u);
+      malloc.free(t);
+    }
+  }
+
   // ─── Permission management ────────────────────────────────────────
 
   /// All server groups known locally (JSON array; empty until the group
@@ -752,6 +1088,16 @@ class TsNative {
   static List<Map<String, dynamic>> getServerGroups() {
     final str = _ptrToString(_getServerGroups());
     return (jsonDecode(str) as List).cast<Map<String, dynamic>>();
+  }
+
+  /// Server property snapshot (`name` / `max_clients` (null when unknown) /
+  /// `welcome_message`) for the server-settings dialog prefill. Refreshed by
+  /// the book, so a successful [serverEdit] shows up on the next event. The
+  /// password is never readable. Empty map when not connected.
+  static Map<String, dynamic> getServerInfo() {
+    final str = _ptrToString(_getServerInfo());
+    if (str.isEmpty) return {};
+    return (jsonDecode(str) as Map).cast<String, dynamic>();
   }
 
   /// All channel groups known locally (JSON array).
@@ -778,6 +1124,19 @@ class TsNative {
       return _sgAddClient(dbid, sgid, t) != 0;
     } finally {
       malloc.free(t);
+    }
+  }
+
+  /// Redeem a privilege key (admin token) on the connected server. The
+  /// outcome arrives as a `perm_op` event carrying [opToken].
+  static bool usePrivilegeKey(String token, String opToken) {
+    final t = _strToPtr(token);
+    final ot = _strToPtr(opToken);
+    try {
+      return _usePrivKey(t, ot) != 0;
+    } finally {
+      malloc.free(t);
+      malloc.free(ot);
     }
   }
 

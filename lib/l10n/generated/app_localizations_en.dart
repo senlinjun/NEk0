@@ -148,6 +148,18 @@ class AppLocalizationsEn extends AppLocalizations {
   String get micPermissionDenied => 'Microphone permission denied';
 
   @override
+  String get audioDevicesSection => 'Audio devices';
+
+  @override
+  String get audioOutputDevice => 'Output device';
+
+  @override
+  String get audioInputDevice => 'Input device';
+
+  @override
+  String get audioSystemDefault => 'System default';
+
+  @override
   String get updateSection => 'Update';
 
   @override
@@ -397,6 +409,20 @@ class AppLocalizationsEn extends AppLocalizations {
   String get sendMessageHint => 'Send a message...';
 
   @override
+  String get chatChannel => 'Channel';
+
+  @override
+  String get chatServer => 'Server';
+
+  @override
+  String get sendMessageAction => 'Send message';
+
+  @override
+  String messageSendFailed(String error) {
+    return 'Message not sent: $error';
+  }
+
+  @override
   String get addServerTitle => 'Add Server';
 
   @override
@@ -416,6 +442,27 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get passwordOptional => 'Password (optional)';
+
+  @override
+  String get tokenOptional => 'Privilege key (optional)';
+
+  @override
+  String get privilegeKeyTitle => 'Use privilege key';
+
+  @override
+  String get privilegeKeyBody =>
+      'This server is asking for a privilege key (admin token). Enter it to be added to the associated server groups.';
+
+  @override
+  String get privilegeKeyHint => 'Token';
+
+  @override
+  String get privilegeKeyGranted =>
+      'Privilege key redeemed — server groups updated.';
+
+  @override
+  String get privilegeKeyNoEffect =>
+      'The token was accepted, but no group change was detected. It may be invalid or already used.';
 
   @override
   String get teamSpeakUserDefault => 'TeamSpeakUser';
@@ -500,16 +547,139 @@ class AppLocalizationsEn extends AppLocalizations {
   String get menuFileManager => 'File management';
 
   @override
+  String get menuServerTitle => 'Server';
+
+  @override
+  String get menuEditServer => 'Edit server';
+
+  @override
+  String get serverSettingsTitle => 'Server Settings';
+
+  @override
+  String get serverMaxClientsLabel => 'Max clients';
+
+  @override
+  String get serverPasswordLabel => 'Server password';
+
+  @override
+  String get serverPasswordHelper => 'Leave empty to keep the current one';
+
+  @override
+  String get serverPasswordRemove => 'Remove server password';
+
+  @override
+  String get serverSaved => 'Server updated';
+
+  @override
+  String get serverReadOnlyHint =>
+      'You do not have permission to change server settings';
+
+  @override
+  String get menuCreateChannel => 'Create channel';
+
+  @override
+  String get menuEditChannel => 'Edit channel';
+
+  @override
+  String get menuDeleteChannel => 'Delete channel';
+
+  @override
+  String get channelCreateTitle => 'Create Channel';
+
+  @override
+  String get channelEditTitle => 'Edit Channel';
+
+  @override
+  String get channelNameLabel => 'Channel name';
+
+  @override
+  String get channelTopicLabel => 'Topic (optional)';
+
+  @override
+  String get channelPasswordHelper => 'Leave empty to clear';
+
+  @override
+  String get channelMaxClientsLabel => 'Max clients';
+
+  @override
+  String get channelMaxClientsHelper => 'Empty = unlimited';
+
+  @override
+  String get channelTypeLabel => 'Type';
+
+  @override
+  String get channelTypeTemporary => 'Temporary';
+
+  @override
+  String get channelTypeSemiPermanent => 'Semi-permanent';
+
+  @override
+  String get channelTypePermanent => 'Permanent';
+
+  @override
+  String get deleteChannelTitle => 'Delete channel?';
+
+  @override
+  String deleteChannelBody(String name) {
+    return 'Delete \"$name\"?';
+  }
+
+  @override
+  String deleteChannelOccupied(int count) {
+    return 'This channel has $count clients — they will be moved to the default channel.';
+  }
+
+  @override
+  String get channelCreated => 'Channel created';
+
+  @override
+  String get channelSaved => 'Channel updated';
+
+  @override
+  String get channelDeleted => 'Channel deleted';
+
+  @override
+  String get channelMoved => 'Channel moved';
+
+  @override
+  String get menuMoveUp => 'Move up';
+
+  @override
+  String get menuMoveDown => 'Move down';
+
+  @override
+  String get channelDescriptionLabel => 'Description';
+
+  @override
+  String get channelNeededTalkPowerLabel => 'Needed talk power';
+
+  @override
+  String get channelTalkPowerHelper => '0 = everyone may talk';
+
+  @override
+  String get channelDeleteDelayLabel => 'Delete delay (seconds)';
+
+  @override
+  String get channelDeleteDelayHelper =>
+      'Seconds before an empty channel is removed';
+
+  @override
+  String get channelMaxFamilyLabel => 'Group user limit';
+
+  @override
+  String get channelMaxFamilyInherit => 'Inherit from parent';
+
+  @override
+  String get channelMaxFamilyUnlimited => 'Unlimited';
+
+  @override
+  String get channelMaxFamilyLimited => 'Custom limit';
+
+  @override
+  String get channelIsDefaultLabel => 'Default channel';
+
+  @override
   String get audio => 'Audio';
-
-  @override
-  String get gestureSection => 'Channel gestures';
-
-  @override
-  String get gestureDefault => 'Tap: switch channel · Long press: menu';
-
-  @override
-  String get gestureSwapped => 'Tap: menu · Long press: switch channel';
 
   @override
   String get fmUp => 'Up';
@@ -769,6 +939,61 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get permFailedUnknown => 'The server rejected the request';
+
+  @override
+  String get positionTitle => 'Set position';
+
+  @override
+  String get positionSelf => 'Me';
+
+  @override
+  String get positionHint =>
+      'Drag to place them around you: up is in front of you, farther away is quieter. Plain stereo cannot tell front from back — distance carries that.';
+
+  @override
+  String get positionUnset => 'No position set — plays centered';
+
+  @override
+  String get positionReset => 'Reset position';
+
+  @override
+  String get avatarUpload => 'Upload avatar';
+
+  @override
+  String get avatarUploaded => 'Avatar updated';
+
+  @override
+  String avatarUploadFailed(String error) {
+    return 'Avatar upload failed: $error';
+  }
+
+  @override
+  String get avatarInvalidImage => 'Unsupported image file';
+
+  @override
+  String get avatarDelete => 'Delete avatar';
+
+  @override
+  String get avatarDeleted => 'Avatar removed';
+
+  @override
+  String avatarDeleteFailed(String error) {
+    return 'Failed to delete avatar: $error';
+  }
+
+  @override
+  String get about => 'About';
+
+  @override
+  String appVersion(String version) {
+    return 'Version $version';
+  }
+
+  @override
+  String get viewOnGitHub => 'View on GitHub';
+
+  @override
+  String get openLinkFailed => 'Could not open the link';
 
   @override
   String get backgroundSection => 'Background';

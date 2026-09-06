@@ -51,6 +51,10 @@
   "stopMicTest": "Stop test",
   "micInUseWhileConnected": "Mic is in use while connected \u2014 test is disabled.",
   "micPermissionDenied": "Microphone permission denied",
+  "audioDevicesSection": "Audio devices",
+  "audioOutputDevice": "Output device",
+  "audioInputDevice": "Input device",
+  "audioSystemDefault": "System default",
   "updateSection": "Update",
   "checkForUpdates": "Check for updates",
   "updateSource": "Update source",
@@ -143,6 +147,17 @@
 
   "noMessagesYet": "No messages yet",
   "sendMessageHint": "Send a message...",
+  "chatChannel": "Channel",
+  "chatServer": "Server",
+  "sendMessageAction": "Send message",
+  "messageSendFailed": "Message not sent: {error}",
+  "@messageSendFailed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
 
   "addServerTitle": "Add Server",
   "editServerTitle": "Edit Server",
@@ -151,6 +166,12 @@
   "nickname": "Nickname",
   "channelOptional": "Channel (optional)",
   "passwordOptional": "Password (optional)",
+  "tokenOptional": "Privilege key (optional)",
+  "privilegeKeyTitle": "Use privilege key",
+  "privilegeKeyBody": "This server is asking for a privilege key (admin token). Enter it to be added to the associated server groups.",
+  "privilegeKeyHint": "Token",
+  "privilegeKeyGranted": "Privilege key redeemed — server groups updated.",
+  "privilegeKeyNoEffect": "The token was accepted, but no group change was detected. It may be invalid or already used.",
   "teamSpeakUserDefault": "TeamSpeakUser",
   "ports": "Ports",
   "portsHint": "Leave empty to use the defaults (voice 9987, ServerQuery 10011, file transfer 30033, SSH 10022).",
@@ -192,14 +213,63 @@
   "channelPasswordTitle": "Enter channel password",
   "channelPasswordHint": "Password",
   "channelPasswordWrong": "Wrong channel password",
-"menuEnterChannel": "Join channel",
+  "menuEnterChannel": "Join channel",
   "menuFileManager": "File management",
+  "menuServerTitle": "Server",
+  "menuEditServer": "Edit server",
+  "serverSettingsTitle": "Server Settings",
+  "serverMaxClientsLabel": "Max clients",
+  "serverPasswordLabel": "Server password",
+  "serverPasswordHelper": "Leave empty to keep the current one",
+  "serverPasswordRemove": "Remove server password",
+  "serverSaved": "Server updated",
+  "serverReadOnlyHint": "You do not have permission to change server settings",
+  "menuCreateChannel": "Create channel",
+  "menuEditChannel": "Edit channel",
+  "menuDeleteChannel": "Delete channel",
+  "channelCreateTitle": "Create Channel",
+  "channelEditTitle": "Edit Channel",
+  "channelNameLabel": "Channel name",
+  "channelTopicLabel": "Topic (optional)",
+  "channelPasswordHelper": "Leave empty to clear",
+  "channelMaxClientsLabel": "Max clients",
+  "channelMaxClientsHelper": "Empty = unlimited",
+  "channelTypeLabel": "Type",
+  "channelTypeTemporary": "Temporary",
+  "channelTypeSemiPermanent": "Semi-permanent",
+  "channelTypePermanent": "Permanent",
+  "deleteChannelTitle": "Delete channel?",
+  "deleteChannelBody": "Delete \"{name}\"?",
+  "@deleteChannelBody": {
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "deleteChannelOccupied": "This channel has {count} clients — they will be moved to the default channel.",
+  "@deleteChannelOccupied": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "channelCreated": "Channel created",
+  "channelSaved": "Channel updated",
+  "channelDeleted": "Channel deleted",
+  "channelMoved": "Channel moved",
+  "menuMoveUp": "Move up",
+  "menuMoveDown": "Move down",
+  "channelDescriptionLabel": "Description",
+  "channelNeededTalkPowerLabel": "Needed talk power",
+  "channelTalkPowerHelper": "0 = everyone may talk",
+  "channelDeleteDelayLabel": "Delete delay (seconds)",
+  "channelDeleteDelayHelper": "Seconds before an empty channel is removed",
+  "channelMaxFamilyLabel": "Group user limit",
+  "channelMaxFamilyInherit": "Inherit from parent",
+  "channelMaxFamilyUnlimited": "Unlimited",
+  "channelMaxFamilyLimited": "Custom limit",
+  "channelIsDefaultLabel": "Default channel",
 
   "audio": "Audio",
 
-  "gestureSection": "Channel gestures",
-  "gestureDefault": "Tap: switch channel · Long press: menu",
-  "gestureSwapped": "Tap: menu · Long press: switch channel",
 
   "fmUp": "Up",
   "fmRootShort": "/",
@@ -320,6 +390,37 @@
   "permQueueFailed": "Failed to queue the request",
   "permTimeout": "The server did not answer in time",
   "permFailedUnknown": "The server rejected the request",
+  "positionTitle": "Set position",
+  "positionSelf": "Me",
+  "positionHint": "Drag to place them around you: up is in front of you, farther away is quieter. Plain stereo cannot tell front from back — distance carries that.",
+  "positionUnset": "No position set — plays centered",
+  "positionReset": "Reset position",
+  "avatarUpload": "Upload avatar",
+  "avatarUploaded": "Avatar updated",
+  "avatarUploadFailed": "Avatar upload failed: {error}",
+  "@avatarUploadFailed": {
+    "placeholders": {
+      "error": { "type": "String" }
+    }
+  },
+  "avatarInvalidImage": "Unsupported image file",
+  "avatarDelete": "Delete avatar",
+  "avatarDeleted": "Avatar removed",
+  "avatarDeleteFailed": "Failed to delete avatar: {error}",
+  "@avatarDeleteFailed": {
+    "placeholders": {
+      "error": { "type": "String" }
+    }
+  },
+  "about": "About",
+  "appVersion": "Version {version}",
+  "@appVersion": {
+    "placeholders": {
+      "version": { "type": "String" }
+    }
+  },
+  "viewOnGitHub": "View on GitHub",
+  "openLinkFailed": "Could not open the link",
   "backgroundSection": "Background",
   "bgPickImage": "Pick Image",
   "bgDim": "Dim",
