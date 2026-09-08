@@ -1,9 +1,7 @@
 import 'dart:io' show Platform;
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -15,7 +13,7 @@ import '../models/ts_state.dart';
 import '../services/audio_service.dart';
 import '../services/background_service.dart';
 import '../services/ota_service.dart';
-import '../services/sfx_service.dart';
+import '../services/sfx_pack_service.dart';
 import '../services/ts_ffi.dart';
 import '../widgets/voice_settings_panel.dart';
 
@@ -38,7 +36,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   AudioService? _testAudio;
   bool _micTest = false;
   double _testRms = 0.0;
-  final Map<int, String?> _sfxNames = {};
+  List<SfxPack> _sfxPacks = [];
+  String? _activeSfxPack;
   String? _bgName;
 
   // Audio device picker (desktop only; '' = system default).
@@ -57,7 +56,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       if (mounted) setState(() => _version = info.version);
     });
     _loadLanguage();
-    _loadSfxNames();
+    _loadSfxPacks();
     _loadBgName();
     if (!Platform.isAndroid) _loadAudioDevices();
   }
@@ -236,262 +235,85 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  Future<void> _loadSfxNames() async {
-    final names = <int, String?>{};
-    for (final kind in SfxKind.all) {
-      names[kind] = await SfxService.customName(kind);
-    }
+  Future<void> _loadSfxPacks() async {
+    final packs = await SfxPackService.loadPacks();
+    final active = await SfxPackService.activePackId();
     if (mounted) {
       setState(() {
-        _sfxNames
-          ..clear()
-          ..addAll(names);
+        _sfxPacks = packs;
+        _activeSfxPack = active;
       });
     }
   }
 
-  Future<void> _pickSfx(int kind) async {
-    PlatformFile? file;
-    try {
-      file = await FilePicker.pickFile(
-        type: FileType.custom,
-        allowedExtensions: ['wav'],
-      );
-    } catch (_) {
-      file = null;
-    }
-    if (!mounted || file == null) return;
-    Uint8List? bytes;
-    try {
-      bytes = await file.readAsBytes();
-    } catch (_) {
-      bytes = null;
-    }
+  Future<void> _importSfxPack() async {
     final al = AppLocalizations.of(context);
-    if (bytes == null || bytes.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(al.sfxFormatError)));
+    final messenger = ScaffoldMessenger.of(context);
+    SfxPack? pack;
+    try {
+      pack = await SfxPackService.importZip();
+    } on SfxPackImportException catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            e.error == SfxPackImportError.invalidZip
+                ? al.sfxPackInvalidZip
+                : al.sfxPackInvalidManifest,
+          ),
+        ),
+      );
       return;
     }
-    var code = SfxError.invalidKind;
-    try {
-      code = await SfxService.setCustom(kind, bytes, fileName: file.name);
-    } catch (_) {
-      code = SfxError.invalidKind;
-    }
-    if (!mounted) return;
-    switch (code) {
-      case SfxError.emptyOrTooLong:
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(al.sfxTooLong)));
-        break;
-      case 0:
-        await _loadSfxNames();
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(al.sfxImported)));
-        break;
-      default:
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              code == SfxError.unsupportedFormat
-                  ? al.sfxFormatError
-                  : al.sfxImportFailed,
-            ),
-          ),
-        );
-    }
-  }
-
-  Future<void> _resetSfx(int kind) async {
-    try {
-      await SfxService.resetToDefault(kind);
-    } catch (_) {
-      // Ignore file/prefs errors — the built-in sample is still restored
-      // next time the app starts if the file could not be deleted.
-    }
-    if (mounted) await _loadSfxNames();
-  }
-
-  void _previewSfx(int kind) {
-    SfxService.preview(kind);
-  }
-
-  String _sfxLabel(AppLocalizations al, int kind) {
-    return switch (kind) {
-      SfxKind.channelSwitched => al.sfxChannelSwitched,
-      SfxKind.neutralToCurrent => al.sfxNeutralToCurrent,
-      SfxKind.neutralAwayFromCurrent => al.sfxNeutralAwayFromCurrent,
-      SfxKind.youWereMoved => al.sfxYouWereMoved,
-      SfxKind.youKickedChannel => al.sfxYouKickedChannel,
-      SfxKind.youKickedServer => al.sfxYouKickedServer,
-      SfxKind.youWereBanned => al.sfxYouWereBanned,
-      SfxKind.youWerePoked => al.sfxYouWerePoked,
-      SfxKind.chatInbound => al.sfxChatInbound,
-      SfxKind.chatOutbound => al.sfxChatOutbound,
-      SfxKind.connected => al.sfxConnected,
-      SfxKind.disconnected => al.sfxDisconnected,
-      SfxKind.connectionLost => al.sfxConnectionLost,
-      SfxKind.error => al.sfxError,
-      SfxKind.micActivated => al.sfxMicActivated,
-      SfxKind.micMuted => al.sfxMicMuted,
-      SfxKind.soundMuted => al.sfxSoundMuted,
-      SfxKind.soundResumed => al.sfxSoundResumed,
-      SfxKind.awayActivated => al.sfxAwayActivated,
-      SfxKind.awayDeactivated => al.sfxAwayDeactivated,
-      SfxKind.channelCreated => al.sfxChannelCreated,
-      SfxKind.channelDeleted => al.sfxChannelDeleted,
-      SfxKind.channelEdited => al.sfxChannelEdited,
-      SfxKind.channelMoved => al.sfxChannelMoved,
-      SfxKind.channelgroupChanged => al.sfxChannelgroupChanged,
-      SfxKind.neutralConnConnected => al.sfxNeutralConnConnected,
-      SfxKind.neutralConnDisconnected => al.sfxNeutralConnDisconnected,
-      SfxKind.neutralConnConnectionLost => al.sfxNeutralConnConnectionLost,
-      SfxKind.neutralMovedToCurrent => al.sfxNeutralMovedToCurrent,
-      SfxKind.neutralMovedAwayFromCurrent => al.sfxNeutralMovedAwayFromCurrent,
-      SfxKind.neutralKickedChannelToCurrent =>
-        al.sfxNeutralKickedChannelToCurrent,
-      SfxKind.neutralKickedChannelAwayFromCurrent =>
-        al.sfxNeutralKickedChannelAwayFromCurrent,
-      SfxKind.neutralKickedServer => al.sfxNeutralKickedServer,
-      SfxKind.neutralBannedServer => al.sfxNeutralBannedServer,
-      SfxKind.neutralRecordingStarted => al.sfxNeutralRecordingStarted,
-      SfxKind.neutralRecordingStopped => al.sfxNeutralRecordingStopped,
-      _ => al.sfxNeutralRecordingActive,
-    };
-  }
-
-  Widget _buildSfxRow(BuildContext context, int kind) {
-    final al = AppLocalizations.of(context);
-    final label = _sfxLabel(al, kind);
-    final name = _sfxNames[kind];
-    final isCustom = name != null && name.isNotEmpty;
-    return Row(
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: const TextStyle(color: Colors.white, fontSize: 14),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                isCustom ? name : al.sfxDefault,
-                style: TextStyle(
-                  color: isCustom ? Colors.blueAccent : Colors.grey,
-                  fontSize: 12,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-          ),
+    if (pack == null) return;
+    final failed = await SfxPackService.activate(pack.id);
+    await _loadSfxPacks();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          failed > 0 ? al.sfxPackPartialLoad : al.sfxPackImported(pack.name),
         ),
-        IconButton(
-          onPressed: () => _previewSfx(kind),
-          tooltip: al.sfxPreview,
-          visualDensity: VisualDensity.compact,
-          padding: const EdgeInsets.all(6),
-          icon: const Icon(Icons.play_circle_outline, size: 20),
-          color: Colors.blueAccent,
-        ),
-        IconButton(
-          onPressed: isCustom ? () => _resetSfx(kind) : null,
-          tooltip: al.sfxReset,
-          visualDensity: VisualDensity.compact,
-          padding: const EdgeInsets.all(6),
-          icon: const Icon(Icons.restore, size: 20),
-          color: Colors.blueAccent,
-        ),
-        const SizedBox(width: 4),
-        OutlinedButton(
-          onPressed: () => _pickSfx(kind),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: Colors.blueAccent,
-            side: const BorderSide(color: Color(0xFF2A2A4A)),
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            visualDensity: VisualDensity.compact,
-          ),
-          child: Text(al.sfxSelectWav, style: const TextStyle(fontSize: 12)),
-        ),
-      ],
+      ),
     );
   }
 
-  /// SFX rows grouped by category: (group header, kinds in display order).
-  static final List<(String Function(AppLocalizations), List<int>)> _sfxGroups =
-      [
-        (
-          (al) => al.sfxGroupConnection,
-          const [
-            SfxKind.connected,
-            SfxKind.disconnected,
-            SfxKind.connectionLost,
-            SfxKind.error,
-          ],
-        ),
-        (
-          (al) => al.sfxGroupChannel,
-          const [
-            SfxKind.channelSwitched,
-            SfxKind.channelCreated,
-            SfxKind.channelDeleted,
-            SfxKind.channelEdited,
-            SfxKind.channelMoved,
-            SfxKind.channelgroupChanged,
-          ],
-        ),
-        (
-          (al) => al.sfxGroupUsers,
-          const [
-            SfxKind.neutralToCurrent,
-            SfxKind.neutralAwayFromCurrent,
-            SfxKind.neutralMovedToCurrent,
-            SfxKind.neutralMovedAwayFromCurrent,
-            SfxKind.neutralKickedChannelToCurrent,
-            SfxKind.neutralKickedChannelAwayFromCurrent,
-            SfxKind.neutralKickedServer,
-            SfxKind.neutralBannedServer,
-            SfxKind.neutralConnConnected,
-            SfxKind.neutralConnDisconnected,
-            SfxKind.neutralConnConnectionLost,
-            SfxKind.neutralRecordingStarted,
-            SfxKind.neutralRecordingStopped,
-            SfxKind.neutralRecordingActive,
-          ],
-        ),
-        (
-          (al) => al.sfxGroupAboutYou,
-          const [
-            SfxKind.youWereMoved,
-            SfxKind.youKickedChannel,
-            SfxKind.youKickedServer,
-            SfxKind.youWereBanned,
-            SfxKind.youWerePoked,
-          ],
-        ),
-        (
-          (al) => al.sfxGroupChat,
-          const [SfxKind.chatInbound, SfxKind.chatOutbound],
-        ),
-        (
-          (al) => al.sfxGroupVoice,
-          const [
-            SfxKind.micActivated,
-            SfxKind.micMuted,
-            SfxKind.soundMuted,
-            SfxKind.soundResumed,
-          ],
-        ),
-        (
-          (al) => al.sfxGroupOther,
-          const [SfxKind.awayActivated, SfxKind.awayDeactivated],
-        ),
-      ];
+  Future<void> _activateSfxPack(SfxPack pack) async {
+    final al = AppLocalizations.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final failed = await SfxPackService.activate(pack.id);
+    await _loadSfxPacks();
+    if (failed > 0) {
+      messenger.showSnackBar(SnackBar(content: Text(al.sfxPackPartialLoad)));
+    }
+  }
+
+  Future<void> _deactivateSfxPack() async {
+    await SfxPackService.deactivate();
+    await _loadSfxPacks();
+  }
+
+  Future<void> _deleteSfxPack(SfxPack pack) async {
+    final al = AppLocalizations.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(al.delete),
+        content: Text(al.sfxPackDeleteBody(pack.name)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(al.cancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(al.delete),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await SfxPackService.delete(pack.id);
+    if (mounted) await _loadSfxPacks();
+  }
 
   Future<void> _loadBgName() async {
     final name = await BackgroundService.customName();
@@ -511,38 +333,143 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (mounted) setState(() => _bgName = null);
   }
 
+  /// Channel sounds as voice packs: the active pack (or the built-in set),
+  /// one row per imported pack, and the zip import button.
   Widget _buildSfxSection(BuildContext context) {
     final al = AppLocalizations.of(context);
+    final activeIndex = _sfxPacks.indexWhere((p) => p.id == _activeSfxPack);
+    final active = activeIndex >= 0 ? _sfxPacks[activeIndex] : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _SectionHeader(al.channelSounds),
         const SizedBox(height: 8),
-        for (final (header, kinds) in _sfxGroups) ...[
-          Padding(
-            padding: const EdgeInsets.only(top: 14, bottom: 6),
-            child: Text(
-              header(al),
-              style: const TextStyle(color: Color(0xFF8888AA), fontSize: 12),
-            ),
-          ),
-          Card(
-            color: const Color(0xFF1A1A2E),
-            margin: EdgeInsets.zero,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
-              child: Column(
-                children: [
-                  for (final kind in kinds) ...[
-                    if (kind != kinds.first)
-                      const Divider(height: 1, color: Color(0xFF2A2A4A)),
-                    _buildSfxRow(context, kind),
+        Card(
+          color: const Color(0xFF1A1A2E),
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      active == null ? Icons.graphic_eq : Icons.music_note,
+                      color: active == null ? Colors.grey : Colors.blueAccent,
+                      size: 22,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            active?.name ?? al.sfxPackNone,
+                            style: TextStyle(
+                              color: active == null
+                                  ? Colors.grey
+                                  : Colors.white,
+                              fontSize: 14,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            active == null
+                                ? al.sfxPackNoneDesc
+                                : (active.description.isNotEmpty
+                                      ? active.description
+                                      : al.sfxPackActive),
+                            style: const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 12,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (active != null)
+                      IconButton(
+                        onPressed: _deactivateSfxPack,
+                        tooltip: al.sfxPackDeactivate,
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.all(6),
+                        icon: const Icon(Icons.restore, size: 20),
+                        color: Colors.blueAccent,
+                      ),
                   ],
+                ),
+                for (final pack in _sfxPacks) ...[
+                  const Divider(height: 16, color: Color(0xFF2A2A4A)),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              pack.name,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if (pack.description.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                pack.description,
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 12,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      if (pack.id != _activeSfxPack)
+                        IconButton(
+                          onPressed: () => _activateSfxPack(pack),
+                          tooltip: al.sfxPackActivate,
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.all(6),
+                          icon: const Icon(Icons.play_circle_outline, size: 20),
+                          color: Colors.blueAccent,
+                        )
+                      else
+                        const Icon(Icons.check, color: Colors.blue, size: 20),
+                      IconButton(
+                        onPressed: () => _deleteSfxPack(pack),
+                        tooltip: al.sfxPackDelete,
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.all(6),
+                        icon: const Icon(Icons.delete_outline, size: 20),
+                        color: Colors.blueAccent,
+                      ),
+                    ],
+                  ),
                 ],
-              ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _importSfxPack,
+                    icon: const Icon(Icons.upload_file, size: 18),
+                    label: Text(al.sfxPackImport),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blueAccent,
+                      side: const BorderSide(color: Color(0xFF2A2A4A)),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ],
     );
   }

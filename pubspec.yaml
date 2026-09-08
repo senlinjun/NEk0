@@ -48,6 +48,8 @@ dependencies:
   # Decoding/resizing/re-encoding picked images so an avatar fits under the
   # server's avatar size cap (pure Dart, no platform plugin).
   image: ^4.3.0
+  # Unzipping user-imported SFX voice packs (pure Dart, no platform plugin).
+  archive: ^3.6.1
 
 dev_dependencies:
   flutter_test:

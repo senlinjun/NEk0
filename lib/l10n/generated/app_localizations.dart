@@ -482,317 +482,83 @@ abstract class AppLocalizations {
   /// **'Channel sounds'**
   String get channelSounds;
 
-  /// No description provided for @sfxGroupConnection.
-  ///
-  /// In en, this message translates to:
-  /// **'Connection'**
-  String get sfxGroupConnection;
-
-  /// No description provided for @sfxGroupChannel.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel'**
-  String get sfxGroupChannel;
-
-  /// No description provided for @sfxGroupUsers.
-  ///
-  /// In en, this message translates to:
-  /// **'Other users'**
-  String get sfxGroupUsers;
-
-  /// No description provided for @sfxGroupAboutYou.
-  ///
-  /// In en, this message translates to:
-  /// **'About you'**
-  String get sfxGroupAboutYou;
-
-  /// No description provided for @sfxGroupChat.
-  ///
-  /// In en, this message translates to:
-  /// **'Chat'**
-  String get sfxGroupChat;
-
-  /// No description provided for @sfxGroupVoice.
-  ///
-  /// In en, this message translates to:
-  /// **'Voice'**
-  String get sfxGroupVoice;
-
-  /// No description provided for @sfxGroupOther.
-  ///
-  /// In en, this message translates to:
-  /// **'Other'**
-  String get sfxGroupOther;
-
-  /// No description provided for @sfxChannelSwitched.
-  ///
-  /// In en, this message translates to:
-  /// **'You switched channels'**
-  String get sfxChannelSwitched;
-
-  /// No description provided for @sfxNeutralToCurrent.
-  ///
-  /// In en, this message translates to:
-  /// **'Someone switched into your channel'**
-  String get sfxNeutralToCurrent;
-
-  /// No description provided for @sfxNeutralAwayFromCurrent.
-  ///
-  /// In en, this message translates to:
-  /// **'Someone switched away from your channel'**
-  String get sfxNeutralAwayFromCurrent;
-
-  /// No description provided for @sfxNeutralConnConnected.
-  ///
-  /// In en, this message translates to:
-  /// **'User connected to your channel'**
-  String get sfxNeutralConnConnected;
-
-  /// No description provided for @sfxNeutralConnDisconnected.
-  ///
-  /// In en, this message translates to:
-  /// **'User disconnected from the server'**
-  String get sfxNeutralConnDisconnected;
-
-  /// No description provided for @sfxNeutralConnConnectionLost.
-  ///
-  /// In en, this message translates to:
-  /// **'User connection lost (timeout)'**
-  String get sfxNeutralConnConnectionLost;
-
-  /// No description provided for @sfxNeutralMovedToCurrent.
-  ///
-  /// In en, this message translates to:
-  /// **'User moved into your channel'**
-  String get sfxNeutralMovedToCurrent;
-
-  /// No description provided for @sfxNeutralMovedAwayFromCurrent.
-  ///
-  /// In en, this message translates to:
-  /// **'User moved out of your channel'**
-  String get sfxNeutralMovedAwayFromCurrent;
-
-  /// No description provided for @sfxNeutralKickedChannelToCurrent.
-  ///
-  /// In en, this message translates to:
-  /// **'User kicked into your channel'**
-  String get sfxNeutralKickedChannelToCurrent;
-
-  /// No description provided for @sfxNeutralKickedChannelAwayFromCurrent.
-  ///
-  /// In en, this message translates to:
-  /// **'User kicked out of your channel'**
-  String get sfxNeutralKickedChannelAwayFromCurrent;
-
-  /// No description provided for @sfxNeutralKickedServer.
-  ///
-  /// In en, this message translates to:
-  /// **'User kicked from the server'**
-  String get sfxNeutralKickedServer;
-
-  /// No description provided for @sfxNeutralBannedServer.
-  ///
-  /// In en, this message translates to:
-  /// **'User banned from the server'**
-  String get sfxNeutralBannedServer;
-
-  /// No description provided for @sfxNeutralRecordingStarted.
-  ///
-  /// In en, this message translates to:
-  /// **'User started recording'**
-  String get sfxNeutralRecordingStarted;
-
-  /// No description provided for @sfxNeutralRecordingStopped.
-  ///
-  /// In en, this message translates to:
-  /// **'User stopped recording'**
-  String get sfxNeutralRecordingStopped;
-
-  /// No description provided for @sfxNeutralRecordingActive.
-  ///
-  /// In en, this message translates to:
-  /// **'Recording active in channel'**
-  String get sfxNeutralRecordingActive;
-
-  /// No description provided for @sfxYouWereMoved.
-  ///
-  /// In en, this message translates to:
-  /// **'You were moved'**
-  String get sfxYouWereMoved;
-
-  /// No description provided for @sfxYouKickedChannel.
-  ///
-  /// In en, this message translates to:
-  /// **'You were kicked from a channel'**
-  String get sfxYouKickedChannel;
-
-  /// No description provided for @sfxYouKickedServer.
-  ///
-  /// In en, this message translates to:
-  /// **'You were kicked from the server'**
-  String get sfxYouKickedServer;
-
-  /// No description provided for @sfxYouWereBanned.
-  ///
-  /// In en, this message translates to:
-  /// **'You were banned'**
-  String get sfxYouWereBanned;
-
-  /// No description provided for @sfxYouWerePoked.
-  ///
-  /// In en, this message translates to:
-  /// **'You were poked'**
-  String get sfxYouWerePoked;
-
-  /// No description provided for @sfxChatInbound.
-  ///
-  /// In en, this message translates to:
-  /// **'Incoming message'**
-  String get sfxChatInbound;
-
-  /// No description provided for @sfxChatOutbound.
-  ///
-  /// In en, this message translates to:
-  /// **'Message sent'**
-  String get sfxChatOutbound;
-
-  /// No description provided for @sfxConnected.
-  ///
-  /// In en, this message translates to:
-  /// **'Connected'**
-  String get sfxConnected;
-
-  /// No description provided for @sfxDisconnected.
-  ///
-  /// In en, this message translates to:
-  /// **'Disconnected'**
-  String get sfxDisconnected;
-
-  /// No description provided for @sfxConnectionLost.
-  ///
-  /// In en, this message translates to:
-  /// **'Connection lost'**
-  String get sfxConnectionLost;
-
-  /// No description provided for @sfxError.
-  ///
-  /// In en, this message translates to:
-  /// **'Error'**
-  String get sfxError;
-
-  /// No description provided for @sfxMicActivated.
-  ///
-  /// In en, this message translates to:
-  /// **'Mic activated'**
-  String get sfxMicActivated;
-
-  /// No description provided for @sfxMicMuted.
-  ///
-  /// In en, this message translates to:
-  /// **'Mic muted'**
-  String get sfxMicMuted;
-
-  /// No description provided for @sfxSoundMuted.
-  ///
-  /// In en, this message translates to:
-  /// **'Sound muted'**
-  String get sfxSoundMuted;
-
-  /// No description provided for @sfxSoundResumed.
-  ///
-  /// In en, this message translates to:
-  /// **'Sound resumed'**
-  String get sfxSoundResumed;
-
-  /// No description provided for @sfxAwayActivated.
-  ///
-  /// In en, this message translates to:
-  /// **'Away activated'**
-  String get sfxAwayActivated;
-
-  /// No description provided for @sfxAwayDeactivated.
-  ///
-  /// In en, this message translates to:
-  /// **'Away deactivated'**
-  String get sfxAwayDeactivated;
-
-  /// No description provided for @sfxChannelCreated.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel created'**
-  String get sfxChannelCreated;
-
-  /// No description provided for @sfxChannelDeleted.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel deleted'**
-  String get sfxChannelDeleted;
-
-  /// No description provided for @sfxChannelEdited.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel edited'**
-  String get sfxChannelEdited;
-
-  /// No description provided for @sfxChannelMoved.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel moved'**
-  String get sfxChannelMoved;
-
-  /// No description provided for @sfxChannelgroupChanged.
-  ///
-  /// In en, this message translates to:
-  /// **'Channel group changed'**
-  String get sfxChannelgroupChanged;
-
   /// No description provided for @sfxDefault.
   ///
   /// In en, this message translates to:
   /// **'Default'**
   String get sfxDefault;
 
-  /// No description provided for @sfxPreview.
+  /// No description provided for @sfxPackNone.
   ///
   /// In en, this message translates to:
-  /// **'Preview'**
-  String get sfxPreview;
+  /// **'Built-in sounds'**
+  String get sfxPackNone;
 
-  /// No description provided for @sfxSelectWav.
+  /// No description provided for @sfxPackNoneDesc.
   ///
   /// In en, this message translates to:
-  /// **'Select WAV'**
-  String get sfxSelectWav;
+  /// **'No voice pack in use'**
+  String get sfxPackNoneDesc;
 
-  /// No description provided for @sfxReset.
+  /// No description provided for @sfxPackActive.
   ///
   /// In en, this message translates to:
-  /// **'Restore default'**
-  String get sfxReset;
+  /// **'In use'**
+  String get sfxPackActive;
 
-  /// No description provided for @sfxImported.
+  /// No description provided for @sfxPackImport.
   ///
   /// In en, this message translates to:
-  /// **'Custom sound saved.'**
-  String get sfxImported;
+  /// **'Import voice pack (.zip)'**
+  String get sfxPackImport;
 
-  /// No description provided for @sfxTooLong.
+  /// No description provided for @sfxPackImported.
   ///
   /// In en, this message translates to:
-  /// **'Audio is too long (maximum 2 seconds).'**
-  String get sfxTooLong;
+  /// **'Voice pack \"{name}\" enabled.'**
+  String sfxPackImported(String name);
 
-  /// No description provided for @sfxFormatError.
+  /// No description provided for @sfxPackActivate.
   ///
   /// In en, this message translates to:
-  /// **'Unsupported audio format. Use a PCM 16-bit or float32 WAV up to 2 seconds.'**
-  String get sfxFormatError;
+  /// **'Enable this pack'**
+  String get sfxPackActivate;
 
-  /// No description provided for @sfxImportFailed.
+  /// No description provided for @sfxPackDeactivate.
   ///
   /// In en, this message translates to:
-  /// **'Failed to save the custom sound.'**
-  String get sfxImportFailed;
+  /// **'Stop using this pack'**
+  String get sfxPackDeactivate;
+
+  /// No description provided for @sfxPackDelete.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete pack'**
+  String get sfxPackDelete;
+
+  /// No description provided for @sfxPackDeleteBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete voice pack \"{name}\"?'**
+  String sfxPackDeleteBody(String name);
+
+  /// No description provided for @sfxPackInvalidZip.
+  ///
+  /// In en, this message translates to:
+  /// **'Not a voice pack: pack.json is missing or the file is not a zip archive.'**
+  String get sfxPackInvalidZip;
+
+  /// No description provided for @sfxPackInvalidManifest.
+  ///
+  /// In en, this message translates to:
+  /// **'pack.json is invalid: it needs a name and a sounds table mapping event IDs (1–37) to WAV files from the archive.'**
+  String get sfxPackInvalidManifest;
+
+  /// No description provided for @sfxPackPartialLoad.
+  ///
+  /// In en, this message translates to:
+  /// **'Some sounds in this pack were skipped (unsupported format or longer than 2 seconds).'**
+  String get sfxPackPartialLoad;
 
   /// No description provided for @poke.
   ///

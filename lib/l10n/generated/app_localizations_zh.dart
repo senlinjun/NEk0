@@ -204,160 +204,48 @@ class AppLocalizationsZh extends AppLocalizations {
   String get channelSounds => '频道提示音';
 
   @override
-  String get sfxGroupConnection => '连接';
-
-  @override
-  String get sfxGroupChannel => '频道';
-
-  @override
-  String get sfxGroupUsers => '其他用户';
-
-  @override
-  String get sfxGroupAboutYou => '关于你';
-
-  @override
-  String get sfxGroupChat => '聊天';
-
-  @override
-  String get sfxGroupVoice => '语音';
-
-  @override
-  String get sfxGroupOther => '其他';
-
-  @override
-  String get sfxChannelSwitched => '自己切换频道';
-
-  @override
-  String get sfxNeutralToCurrent => '有人切换进入你的频道';
-
-  @override
-  String get sfxNeutralAwayFromCurrent => '有人切换离开你的频道';
-
-  @override
-  String get sfxNeutralConnConnected => '有人连接到你的频道';
-
-  @override
-  String get sfxNeutralConnDisconnected => '有人断开连接';
-
-  @override
-  String get sfxNeutralConnConnectionLost => '有人连接超时';
-
-  @override
-  String get sfxNeutralMovedToCurrent => '有人被移入你的频道';
-
-  @override
-  String get sfxNeutralMovedAwayFromCurrent => '有人被移出你的频道';
-
-  @override
-  String get sfxNeutralKickedChannelToCurrent => '有人被踢入你的频道';
-
-  @override
-  String get sfxNeutralKickedChannelAwayFromCurrent => '有人被踢出你的频道';
-
-  @override
-  String get sfxNeutralKickedServer => '有人被踢出服务器';
-
-  @override
-  String get sfxNeutralBannedServer => '有人被封禁';
-
-  @override
-  String get sfxNeutralRecordingStarted => '有人开始录音';
-
-  @override
-  String get sfxNeutralRecordingStopped => '有人停止录音';
-
-  @override
-  String get sfxNeutralRecordingActive => '频道内有人正在录音';
-
-  @override
-  String get sfxYouWereMoved => '你被移动';
-
-  @override
-  String get sfxYouKickedChannel => '你被踢出频道';
-
-  @override
-  String get sfxYouKickedServer => '你被踢出服务器';
-
-  @override
-  String get sfxYouWereBanned => '你被封禁';
-
-  @override
-  String get sfxYouWerePoked => '你被 Poke';
-
-  @override
-  String get sfxChatInbound => '收到聊天消息';
-
-  @override
-  String get sfxChatOutbound => '发送聊天消息';
-
-  @override
-  String get sfxConnected => '连接成功';
-
-  @override
-  String get sfxDisconnected => '已断开';
-
-  @override
-  String get sfxConnectionLost => '连接丢失';
-
-  @override
-  String get sfxError => '错误';
-
-  @override
-  String get sfxMicActivated => '麦克风启用';
-
-  @override
-  String get sfxMicMuted => '麦克风静音';
-
-  @override
-  String get sfxSoundMuted => '扬声器静音';
-
-  @override
-  String get sfxSoundResumed => '扬声器恢复';
-
-  @override
-  String get sfxAwayActivated => '离开状态开启';
-
-  @override
-  String get sfxAwayDeactivated => '离开状态关闭';
-
-  @override
-  String get sfxChannelCreated => '频道创建';
-
-  @override
-  String get sfxChannelDeleted => '频道删除';
-
-  @override
-  String get sfxChannelEdited => '频道编辑';
-
-  @override
-  String get sfxChannelMoved => '频道移动';
-
-  @override
-  String get sfxChannelgroupChanged => '频道组变更';
-
-  @override
   String get sfxDefault => '默认';
 
   @override
-  String get sfxPreview => '试听';
+  String get sfxPackNone => '内置音效';
 
   @override
-  String get sfxSelectWav => '选择 WAV';
+  String get sfxPackNoneDesc => '未启用语音包';
 
   @override
-  String get sfxReset => '恢复默认';
+  String get sfxPackActive => '使用中';
 
   @override
-  String get sfxImported => '自定义提示音已保存。';
+  String get sfxPackImport => '导入语音包（.zip）';
 
   @override
-  String get sfxTooLong => '音频过长（最长 2 秒）。';
+  String sfxPackImported(String name) {
+    return '语音包“$name”已启用。';
+  }
 
   @override
-  String get sfxFormatError => '不支持的音频格式，请使用 16 位 PCM 或 float32 WAV，时长不超过 2 秒。';
+  String get sfxPackActivate => '启用此语音包';
 
   @override
-  String get sfxImportFailed => '保存自定义提示音失败。';
+  String get sfxPackDeactivate => '停用此语音包';
+
+  @override
+  String get sfxPackDelete => '删除语音包';
+
+  @override
+  String sfxPackDeleteBody(String name) {
+    return '删除语音包“$name”吗？';
+  }
+
+  @override
+  String get sfxPackInvalidZip => '不是有效的语音包：缺少 pack.json 或文件不是 zip 压缩包。';
+
+  @override
+  String get sfxPackInvalidManifest =>
+      'pack.json 无效：需要 name 字段，以及把事件 ID（1–37）映射到压缩包内 WAV 文件的 sounds 表。';
+
+  @override
+  String get sfxPackPartialLoad => '语音包中部分音频被跳过（格式不支持或超过 2 秒）。';
 
   @override
   String get poke => 'Poke';

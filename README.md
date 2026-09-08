@@ -27,6 +27,8 @@
 - **Voice settings** — VAD / PTT / mic gain / threshold tuning from the settings
   screen, by long-pressing the mic button, or by tapping your own name in the
   user list, with a live mic level + mic test
+- **Voice packs** — replace all channel sounds at once by importing a zip pack
+  (see [Voice Packs](#voice-packs) for the format)
 - **Desktop support** — the same Rust core runs on Windows and Linux; mic capture
   uses a cpal input stream inside the native library, playback negotiates the
   device format with an automatic fallback chain
@@ -142,6 +144,83 @@ adb shell dumpsys activity services com.senlinjun.nek0  # Foreground service sta
 | `WAKE_LOCK` | Keep the CPU awake for audio while connected |
 | `REQUEST_INSTALL_PACKAGES` | OTA update APK installation |
 | `WRITE_EXTERNAL_STORAGE` | OTA download (API <= 28) |
+
+## Voice Packs
+
+Channel sounds can be replaced as a whole by importing a voice pack — a
+`.zip` archive containing a `pack.json` manifest and the WAV files it
+references:
+
+```
+my-pack.zip
+├── pack.json
+├── connected.wav
+├── disconnected.wav
+└── ...
+```
+
+`pack.json`:
+
+```json
+{
+  "name": "My pack",
+  "description": "A short description shown in the settings screen",
+  "sounds": {
+    "11": "connected.wav",
+    "12": "disconnected.wav"
+  }
+}
+```
+
+- `sounds` maps **event IDs** (table below) to WAV file names inside the zip.
+  Events without an entry keep the built-in sound, so packs may cover only a
+  few events.
+- WAV requirements: PCM 16-bit or float32, mono or stereo, at most **2 seconds**
+  per file (other sample rates are resampled to 48 kHz automatically).
+- Import packs in **Settings → Audio → Channel sounds**. Importing a new
+  version of the same pack (same manifest) updates it in place.
+
+### Event IDs
+
+| ID | Event |
+|----|-------|
+| 1 | You switched channels |
+| 2 | Someone switched into your channel |
+| 3 | Someone switched away from your channel |
+| 4 | You were moved |
+| 5 | You were kicked from a channel |
+| 6 | You were kicked from the server |
+| 7 | You were banned |
+| 8 | You were poked |
+| 9 | Incoming message |
+| 10 | Message sent |
+| 11 | Connected |
+| 12 | Disconnected |
+| 13 | Connection lost |
+| 14 | Error |
+| 15 | Mic activated |
+| 16 | Mic muted |
+| 17 | Sound muted |
+| 18 | Sound resumed |
+| 19 | Away activated |
+| 20 | Away deactivated |
+| 21 | Channel created |
+| 22 | Channel deleted |
+| 23 | Channel edited |
+| 24 | Channel moved |
+| 25 | Channel group changed |
+| 26 | User connected to your channel |
+| 27 | User disconnected from the server |
+| 28 | User connection lost (timeout) |
+| 29 | User moved into your channel |
+| 30 | User moved out of your channel |
+| 31 | User kicked into your channel |
+| 32 | User kicked out of your channel |
+| 33 | User kicked from the server |
+| 34 | User banned from the server |
+| 35 | User started recording |
+| 36 | User stopped recording |
+| 37 | Recording active in channel |
 
 ## Project Structure
 

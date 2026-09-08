@@ -7,13 +7,13 @@ import 'l10n/generated/app_localizations.dart';
 import 'models/app_locale.dart';
 import 'models/background_settings.dart';
 import 'screens/home_screen.dart';
-import 'services/sfx_service.dart';
+import 'services/sfx_pack_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Restore custom channel-event sounds persisted in the private documents
-  // directory (built-in samples remain active for kinds without a file).
-  await SfxService.init();
+  // Re-apply the active voice pack persisted in the private documents
+  // directory (built-in samples remain active without one).
+  await SfxPackService.init();
   runApp(const ProviderScope(child: TeamSpeakApp()));
 }
 
