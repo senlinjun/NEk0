@@ -20,7 +20,10 @@ anyhow = "1"
 once_cell = "1"
 parking_lot = "0.12"
 futures = "0.3"
-opus-rs = "0.1"
+# >= 0.1.33 required: earlier releases undersize the decoder's SILK work
+# buffer (w_pcm_i16 = 640 samples), so 40/60 ms SILK frames (up to 960
+# samples per channel) panic with a slice range error in release builds.
+opus-rs = "0.1.33"
 arrayvec = "0.7"
 cpal = "0.15"
 dashmap = "6"

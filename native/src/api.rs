@@ -52,6 +52,31 @@ fn push_diag(msg: &str) {
     });
 }
 
+/// Extracts a human-readable message from a `catch_unwind` panic payload.
+fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".into()
+    }
+}
+
+/// Runs `f` with panics contained: logs and swallows them so a handler bug
+/// cannot unwind into the event loop and kill the session.
+fn contain_panic<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => Some(v),
+        Err(p) => {
+            let msg = panic_msg(&p);
+            eprintln!("{} PANICKED: {}", what, msg);
+            push_diag(&format!("{} PANICKED: {}", what, msg));
+            None
+        }
+    }
+}
+
 // ─── File transfer helpers ──────────────────────────────────────────
 
 /// Reads a NUL-terminated C string from a raw pointer ("" for NULL).
@@ -685,14 +710,32 @@ async fn do_connect(
         match result {
             Ok(_) => push_diag("event_loop: exited normally"),
             Err(e) => {
-                let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".into()
-                };
+                let msg = panic_msg(&e);
+                eprintln!("event_loop PANICKED: {} (gen={})", msg, generation);
                 push_diag(&format!("event_loop PANICKED: {}", msg));
+                // The loop died without running any of its teardown paths.
+                // Leave a clean "disconnected" state behind — otherwise the
+                // UI stays stuck on a ghost connection (no audio, disconnect
+                // dead, reconnect blocked by connected=true).
+                let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+                if current_gen == generation {
+                    let mut s = STATE.lock();
+                    s.connected = false;
+                    s.disconnect_requested = false;
+                    s.pending_events.push_back(TsEvent::Disconnected {
+                        reason: format!("Internal error: {}", msg),
+                    });
+                    drop(s);
+                    schedule_sfx_teardown(SFX_CONNECTION_LOST);
+                    // File transfer bookkeeping dies with the connection:
+                    // pending directory listings are gone, and active workers
+                    // notice via their sockets.
+                    FT_LISTS.lock().clear();
+                    FT_OPS.lock().clear();
+                    PERM_OPS.lock().clear();
+                    TEXT_SENDS.lock().clear();
+                    *COMMAND_TX.lock() = None;
+                }
             }
         }
         crate::EVENT_LOOP_ALIVE.store(false, Ordering::SeqCst);
@@ -750,25 +793,33 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     let stereo_packet = !opus_vec.is_empty() && (opus_vec[0] >> 2) & 1 == 1;
     let out_len = if stereo_packet { FRAME * 2 } else { FRAME };
     let mut pcm_out = vec![0.0f32; out_len];
-    let ok = if stereo_packet {
-        let mut decoder = AUDIO_DECODERS_STEREO.entry(from_id)
-            .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
-        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("opus stereo decode error from client {}: {}", from_id, e);
-                false
-            }
+    // A panic here (malformed packet, decoder bug) must not unwind into the
+    // event loop and kill the session: drop the packet, evict the possibly
+    // corrupt decoder so the next one starts fresh, keep the connection up.
+    let decode_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if stereo_packet {
+            let mut decoder = AUDIO_DECODERS_STEREO.entry(from_id)
+                .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
+            decoder.decode(&opus_vec, FRAME, &mut pcm_out)
+        } else {
+            let mut decoder = AUDIO_DECODERS.entry(from_id)
+                .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
+            decoder.decode(&opus_vec, FRAME, &mut pcm_out)
         }
-    } else {
-        let mut decoder = AUDIO_DECODERS.entry(from_id)
-            .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
-        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("opus decode error from client {}: {}", from_id, e);
-                false
-            }
+    }));
+    let ok = match decode_res {
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => {
+            eprintln!("opus decode error from client {}: {}", from_id, e);
+            false
+        }
+        Err(panic) => {
+            let msg = panic_msg(&panic);
+            eprintln!("opus decode panicked for client {}: {}", from_id, msg);
+            push_diag(&format!("opus decode panicked (client {}): {}", from_id, msg));
+            AUDIO_DECODERS_STEREO.remove(&from_id);
+            AUDIO_DECODERS.remove(&from_id);
+            false
         }
     };
 
@@ -2095,10 +2146,14 @@ fn drain_raw_incoming(con: &mut Connection) {
 fn handle_event_item(item: StreamItem, con: &mut Connection, generation: u64) {
     match item {
         StreamItem::FileDownload(handle, result) => {
-            handle_file_download(handle.0, result);
+            contain_panic("file download handler", || {
+                handle_file_download(handle.0, result);
+            });
         }
         StreamItem::FileUpload(handle, result) => {
-            handle_file_upload(handle.0, result);
+            contain_panic("file upload handler", || {
+                handle_file_upload(handle.0, result);
+            });
         }
         other => handle_control_item(&other, con, generation),
     }
@@ -3756,6 +3811,23 @@ pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect(
         let mut s = STATE.lock();
         s.connected = false;
         s.disconnect_requested = false;
+    } else if STATE.lock().connected {
+        // Zombie state: no live event loop and nothing in the stash (e.g. the
+        // event loop panicked without running its teardown). Reset so the UI
+        // does not stay stuck on a ghost connection.
+        let mut s = STATE.lock();
+        s.connected = false;
+        s.disconnect_requested = false;
+        s.pending_events.push_back(TsEvent::Disconnected {
+            reason: "User disconnected".into(),
+        });
+        drop(s);
+        FT_LISTS.lock().clear();
+        FT_OPS.lock().clear();
+        PERM_OPS.lock().clear();
+        TEXT_SENDS.lock().clear();
+        *COMMAND_TX.lock() = None;
+        teardown_output_state();
     }
 }
 
@@ -3785,6 +3857,23 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
         AUDIO_DECODERS_STEREO.clear();
         PLAYED_SAMPLES.store(0, Ordering::Relaxed);
         ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
+    } else if STATE.lock().connected {
+        // Zombie state: no live event loop and nothing in the stash (e.g. the
+        // event loop panicked without running its teardown). Reset everything
+        // so the UI is not stuck on a ghost connection and can reconnect.
+        let mut s = STATE.lock();
+        s.connected = false;
+        s.disconnect_requested = false;
+        s.pending_events.push_back(TsEvent::Disconnected {
+            reason: "User disconnected".into(),
+        });
+        drop(s);
+        FT_LISTS.lock().clear();
+        FT_OPS.lock().clear();
+        PERM_OPS.lock().clear();
+        TEXT_SENDS.lock().clear();
+        *COMMAND_TX.lock() = None;
+        teardown_output_state();
     }
     to_c_str(r#"{"type":"disconnected","reason":"User disconnected"}"#.to_string())
 }

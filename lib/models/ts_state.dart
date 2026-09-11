@@ -193,6 +193,10 @@ class ServerListState {
 
 class TsConnectionNotifier extends Notifier<TsConnectionState> {
   Timer? _pollTimer;
+  // Fires when Rust never confirms a user-initiated disconnect (e.g. the
+  // Rust event loop died) — forces the same local cleanup so disconnect
+  // and app exit cannot hang forever.
+  Timer? _disconnectFallbackTimer;
   AudioService? _audioService;
   bool _micEnabled = false;
   bool _micGranted =
@@ -270,6 +274,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
 
     ref.onDispose(() {
       _pollTimer?.cancel();
+      _disconnectFallbackTimer?.cancel();
       ForegroundService.onToggleMute = null;
       ForegroundService.onSetAwayMute = null;
       ForegroundService.onNotificationDisconnect = null;
@@ -487,18 +492,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       case 'disconnected':
         if (state.connecting)
           break; // stale event from previous connection, ignore
-        _pollTimer?.cancel();
-        _audioService?.stop();
-        _audioService = null;
-        ForegroundService.stop();
-        _channelPasswords.clear();
-        ref.read(avatarCacheProvider.notifier).reset();
-        for (final c in _permCompleters.values) {
-          c.complete(_l10n?.permNotConnected ?? 'Not connected');
-        }
-        _permCompleters.clear();
-        _ownPerms = const [];
-        state = const TsConnectionState();
+        _finalizeDisconnected();
         break;
 
       case 'error':
@@ -664,6 +658,25 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     }
   }
 
+  /// Shared teardown for the real 'disconnected' event and for the local
+  /// fallback timeout in disconnect() (fires when Rust never confirms).
+  void _finalizeDisconnected() {
+    _disconnectFallbackTimer?.cancel();
+    _disconnectFallbackTimer = null;
+    _pollTimer?.cancel();
+    _audioService?.stop();
+    _audioService = null;
+    ForegroundService.stop();
+    _channelPasswords.clear();
+    ref.read(avatarCacheProvider.notifier).reset();
+    for (final c in _permCompleters.values) {
+      c.complete(_l10n?.permNotConnected ?? 'Not connected');
+    }
+    _permCompleters.clear();
+    _ownPerms = const [];
+    state = const TsConnectionState();
+  }
+
   Future<void> disconnect() async {
     debugPrint('TS: disconnect called, connected=${state.connected}');
     if (!state.connected && !state.connecting) return;
@@ -679,6 +692,17 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     // The poll timer keeps running — _handleEvent('disconnected') will
     // cancel it, reset state, and trigger the server_screen pop listener.
     state = state.copyWith(connecting: false);
+    // Safety net: if the Rust side never confirms, force the same cleanup
+    // locally so a broken connection cannot wedge the UI or block exit.
+    _disconnectFallbackTimer?.cancel();
+    _disconnectFallbackTimer = Timer(const Duration(seconds: 5), () {
+      if (state.connected) {
+        debugPrint(
+          'TS: no disconnected event after 5s — forcing local cleanup',
+        );
+        _finalizeDisconnected();
+      }
+    });
   }
 
   Future<void> sendChannelMessage(String text) async {
