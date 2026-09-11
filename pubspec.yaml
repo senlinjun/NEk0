@@ -50,6 +50,8 @@ dependencies:
   image: ^4.3.0
   # Unzipping user-imported SFX voice packs (pure Dart, no platform plugin).
   archive: ^3.6.1
+  window_manager: ^0.5.2
+  tray_manager: ^0.5.3
 
 dev_dependencies:
   flutter_test:
@@ -72,6 +74,11 @@ flutter:
 
   assets:
     - assets/logo.png
+    # Tray icons, generated from the rounded resource/logo.png (the .ico is
+    # required by tray_manager on Windows — LoadImage only reads real .ico
+    # files; the .png is used on Linux).
+    - assets/tray_icon.ico
+    - assets/tray_icon.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

@@ -10,6 +10,7 @@ import '../l10n/generated/app_localizations.dart';
 import '../models/app_locale.dart';
 import '../models/background_settings.dart';
 import '../models/ts_state.dart';
+import '../models/window_settings.dart';
 import '../services/audio_service.dart';
 import '../services/background_service.dart';
 import '../services/ota_service.dart';
@@ -150,6 +151,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       'en' => al.languageEnglish,
       'zh' => al.languageChinese,
       _ => al.languageSystem,
+    };
+  }
+
+  String _closeActionLabel(BuildContext context, WindowCloseAction action) {
+    final al = AppLocalizations.of(context);
+    return switch (action) {
+      WindowCloseAction.ask => al.closeActionAsk,
+      WindowCloseAction.hide => al.closeActionHide,
+      WindowCloseAction.exit => al.closeActionExit,
     };
   }
 
@@ -743,6 +753,45 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         _onInputDeviceChanged,
                       ),
                     ],
+                  ),
+                ),
+              ),
+              // Window close behavior: Android has no window close button,
+              // so this only shows on desktop.
+              const SizedBox(height: 24),
+              _SectionHeader(AppLocalizations.of(context).windowSection),
+              const SizedBox(height: 8),
+              Card(
+                color: const Color(0xFF1A1A2E),
+                margin: EdgeInsets.zero,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: RadioGroup<WindowCloseAction>(
+                    groupValue: ref.watch(windowSettingsProvider).closeAction,
+                    onChanged: (action) {
+                      if (action == null) return;
+                      ref
+                          .read(windowSettingsProvider.notifier)
+                          .setCloseAction(action);
+                    },
+                    child: Column(
+                      children: [
+                        for (final action in WindowCloseAction.values)
+                          RadioListTile<WindowCloseAction>(
+                            contentPadding: EdgeInsets.zero,
+                            dense: true,
+                            activeColor: Colors.blue,
+                            title: Text(
+                              _closeActionLabel(context, action),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                              ),
+                            ),
+                            value: action,
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               ),

@@ -361,5 +361,18 @@
   "bgPickImage": "选择图片",
   "bgDim": "背景变暗",
   "bgOpacity": "背景不透明度",
-  "bgReset": "恢复默认"
+  "bgReset": "恢复默认",
+  "windowSection": "窗口",
+  "closeActionAsk": "每次询问",
+  "closeActionHide": "隐藏到托盘",
+  "closeActionExit": "直接退出",
+  "closeDialogTitle": "关闭 NEk0",
+  "closeDialogBody": "要退出 NEk0，还是让它继续在系统托盘中运行？",
+  "closeDialogConnectedBody": "当前仍连接在服务器上，退出会离开服务器。也可以让 NEk0 继续在托盘中运行。",
+  "closeDialogQuit": "退出",
+  "closeDialogHide": "隐藏到托盘",
+  "closeDialogDontAskAgain": "不再询问",
+  "trayMenuShow": "显示主窗口",
+  "trayMenuDisconnect": "断开连接",
+  "trayMenuQuit": "退出 NEk0"
 }

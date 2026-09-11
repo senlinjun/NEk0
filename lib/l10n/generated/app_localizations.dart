@@ -1753,6 +1753,84 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Reset'**
   String get bgReset;
+
+  /// No description provided for @windowSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Window'**
+  String get windowSection;
+
+  /// No description provided for @closeActionAsk.
+  ///
+  /// In en, this message translates to:
+  /// **'Ask every time'**
+  String get closeActionAsk;
+
+  /// No description provided for @closeActionHide.
+  ///
+  /// In en, this message translates to:
+  /// **'Hide to tray'**
+  String get closeActionHide;
+
+  /// No description provided for @closeActionExit.
+  ///
+  /// In en, this message translates to:
+  /// **'Quit the app'**
+  String get closeActionExit;
+
+  /// No description provided for @closeDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Close NEk0'**
+  String get closeDialogTitle;
+
+  /// No description provided for @closeDialogBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Do you want to quit NEk0, or keep it running in the system tray?'**
+  String get closeDialogBody;
+
+  /// No description provided for @closeDialogConnectedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'You are still connected — quitting will leave the server. You can also keep NEk0 running in the tray.'**
+  String get closeDialogConnectedBody;
+
+  /// No description provided for @closeDialogQuit.
+  ///
+  /// In en, this message translates to:
+  /// **'Quit'**
+  String get closeDialogQuit;
+
+  /// No description provided for @closeDialogHide.
+  ///
+  /// In en, this message translates to:
+  /// **'Hide to tray'**
+  String get closeDialogHide;
+
+  /// No description provided for @closeDialogDontAskAgain.
+  ///
+  /// In en, this message translates to:
+  /// **'Don\'t ask again'**
+  String get closeDialogDontAskAgain;
+
+  /// No description provided for @trayMenuShow.
+  ///
+  /// In en, this message translates to:
+  /// **'Show NEk0'**
+  String get trayMenuShow;
+
+  /// No description provided for @trayMenuDisconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Disconnect'**
+  String get trayMenuDisconnect;
+
+  /// No description provided for @trayMenuQuit.
+  ///
+  /// In en, this message translates to:
+  /// **'Quit NEk0'**
+  String get trayMenuQuit;
 }
 
 class _AppLocalizationsDelegate

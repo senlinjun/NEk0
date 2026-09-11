@@ -879,4 +879,44 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get bgReset => '恢复默认';
+
+  @override
+  String get windowSection => '窗口';
+
+  @override
+  String get closeActionAsk => '每次询问';
+
+  @override
+  String get closeActionHide => '隐藏到托盘';
+
+  @override
+  String get closeActionExit => '直接退出';
+
+  @override
+  String get closeDialogTitle => '关闭 NEk0';
+
+  @override
+  String get closeDialogBody => '要退出 NEk0，还是让它继续在系统托盘中运行？';
+
+  @override
+  String get closeDialogConnectedBody =>
+      '当前仍连接在服务器上，退出会离开服务器。也可以让 NEk0 继续在托盘中运行。';
+
+  @override
+  String get closeDialogQuit => '退出';
+
+  @override
+  String get closeDialogHide => '隐藏到托盘';
+
+  @override
+  String get closeDialogDontAskAgain => '不再询问';
+
+  @override
+  String get trayMenuShow => '显示主窗口';
+
+  @override
+  String get trayMenuDisconnect => '断开连接';
+
+  @override
+  String get trayMenuQuit => '退出 NEk0';
 }

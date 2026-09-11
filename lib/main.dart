@@ -2,18 +2,27 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'l10n/generated/app_localizations.dart';
 import 'models/app_locale.dart';
 import 'models/background_settings.dart';
 import 'screens/home_screen.dart';
 import 'services/sfx_pack_service.dart';
+import 'widgets/desktop_window_scope.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Re-apply the active voice pack persisted in the private documents
   // directory (built-in samples remain active without one).
   await SfxPackService.init();
+  // Desktop: intercept the window close button so DesktopWindowScope can
+  // ask whether to quit or hide to the tray. The close handling itself
+  // needs providers, so it lives in that widget once the app is running.
+  if (!Platform.isAndroid) {
+    await windowManager.ensureInitialized();
+    await windowManager.setPreventClose(true);
+  }
   runApp(const ProviderScope(child: TeamSpeakApp()));
 }
 
@@ -72,7 +81,7 @@ class TeamSpeakApp extends ConsumerWidget {
           },
         );
       },
-      home: const HomeScreen(),
+      home: const DesktopWindowScope(child: HomeScreen()),
     );
   }
 

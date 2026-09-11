@@ -396,5 +396,18 @@
   "bgPickImage": "Pick Image",
   "bgDim": "Dim",
   "bgOpacity": "Opacity",
-  "bgReset": "Reset"
+  "bgReset": "Reset",
+  "windowSection": "Window",
+  "closeActionAsk": "Ask every time",
+  "closeActionHide": "Hide to tray",
+  "closeActionExit": "Quit the app",
+  "closeDialogTitle": "Close NEk0",
+  "closeDialogBody": "Do you want to quit NEk0, or keep it running in the system tray?",
+  "closeDialogConnectedBody": "You are still connected \u2014 quitting will leave the server. You can also keep NEk0 running in the tray.",
+  "closeDialogQuit": "Quit",
+  "closeDialogHide": "Hide to tray",
+  "closeDialogDontAskAgain": "Don't ask again",
+  "trayMenuShow": "Show NEk0",
+  "trayMenuDisconnect": "Disconnect",
+  "trayMenuQuit": "Quit NEk0"
 }

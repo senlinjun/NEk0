@@ -895,4 +895,45 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get bgReset => 'Reset';
+
+  @override
+  String get windowSection => 'Window';
+
+  @override
+  String get closeActionAsk => 'Ask every time';
+
+  @override
+  String get closeActionHide => 'Hide to tray';
+
+  @override
+  String get closeActionExit => 'Quit the app';
+
+  @override
+  String get closeDialogTitle => 'Close NEk0';
+
+  @override
+  String get closeDialogBody =>
+      'Do you want to quit NEk0, or keep it running in the system tray?';
+
+  @override
+  String get closeDialogConnectedBody =>
+      'You are still connected — quitting will leave the server. You can also keep NEk0 running in the tray.';
+
+  @override
+  String get closeDialogQuit => 'Quit';
+
+  @override
+  String get closeDialogHide => 'Hide to tray';
+
+  @override
+  String get closeDialogDontAskAgain => 'Don\'t ask again';
+
+  @override
+  String get trayMenuShow => 'Show NEk0';
+
+  @override
+  String get trayMenuDisconnect => 'Disconnect';
+
+  @override
+  String get trayMenuQuit => 'Quit NEk0';
 }
