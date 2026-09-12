@@ -4,8 +4,7 @@ use crate::{
     COMMAND_TX, FRAME_SIZE, FT_CLIENT_FT, FT_KIND_DOWNLOAD, FT_KIND_UPLOAD, FT_LISTS, FT_OPS,
     FT_TASK_BY_RC, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, PERM_OPS, PLAYED_SAMPLES,
     ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
-    SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
-    PendingFtList,
+    SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, OUTPUT_RESTART_REQUESTED, PendingFtList,
 };
 
 use futures::prelude::*;
@@ -50,31 +49,6 @@ fn push_diag(msg: &str) {
     STATE.lock().pending_events.push_back(TsEvent::Diag {
         msg: format!("#{} {}", seq, msg),
     });
-}
-
-/// Extracts a human-readable message from a `catch_unwind` panic payload.
-fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".into()
-    }
-}
-
-/// Runs `f` with panics contained: logs and swallows them so a handler bug
-/// cannot unwind into the event loop and kill the session.
-fn contain_panic<R>(what: &str, f: impl FnOnce() -> R) -> Option<R> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(v) => Some(v),
-        Err(p) => {
-            let msg = panic_msg(&p);
-            eprintln!("{} PANICKED: {}", what, msg);
-            push_diag(&format!("{} PANICKED: {}", what, msg));
-            None
-        }
-    }
 }
 
 // ─── File transfer helpers ──────────────────────────────────────────
@@ -136,39 +110,6 @@ fn maybe_publish_ft_progress(task_id: u32, task: &crate::FtTask, force: bool) {
             transferred: task.done.load(Ordering::Relaxed),
         });
     }
-}
-
-/// After a confirmed avatar upload, announce the new avatar (clientupdate
-/// `client_flag_avatar` = MD5 of the uploaded file) — the server does not
-/// infer the hash from the transfer, so without this the avatar never shows
-/// up on any client. Queued as a command so it works both from the event
-/// loop and from a transfer worker thread.
-fn publish_avatar_hash(md5: String) {
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        let _ = tx.send(Command::SetAvatarHash { hash: md5 });
-    }
-}
-
-/// MD5 of a local file as lowercase hex. Avatars are tiny; chunked anyway
-/// so a mispointed path cannot blow up memory.
-fn md5_file_hex(path: &str) -> std::io::Result<String> {
-    use md5::{Digest, Md5};
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Md5::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect())
 }
 
 /// Downloads the payload of an accepted ftinitdownload onto the local disk.
@@ -273,11 +214,6 @@ fn spawn_upload_worker(task_id: u32, mut stream: std::net::TcpStream, src: Strin
                     crate::finish_ft_task(task_id, false, Some("canceled".into()));
                     return Ok(());
                 }
-            }
-            // Avatar upload: announce the hash before the task is removed —
-            // the status handler never ran, so this is the only success path.
-            if let Some(md5) = FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone()) {
-                publish_avatar_hash(md5);
             }
             crate::finish_ft_task(task_id, true, None);
             Ok(())
@@ -710,32 +646,14 @@ async fn do_connect(
         match result {
             Ok(_) => push_diag("event_loop: exited normally"),
             Err(e) => {
-                let msg = panic_msg(&e);
-                eprintln!("event_loop PANICKED: {} (gen={})", msg, generation);
+                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".into()
+                };
                 push_diag(&format!("event_loop PANICKED: {}", msg));
-                // The loop died without running any of its teardown paths.
-                // Leave a clean "disconnected" state behind — otherwise the
-                // UI stays stuck on a ghost connection (no audio, disconnect
-                // dead, reconnect blocked by connected=true).
-                let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
-                if current_gen == generation {
-                    let mut s = STATE.lock();
-                    s.connected = false;
-                    s.disconnect_requested = false;
-                    s.pending_events.push_back(TsEvent::Disconnected {
-                        reason: format!("Internal error: {}", msg),
-                    });
-                    drop(s);
-                    schedule_sfx_teardown(SFX_CONNECTION_LOST);
-                    // File transfer bookkeeping dies with the connection:
-                    // pending directory listings are gone, and active workers
-                    // notice via their sockets.
-                    FT_LISTS.lock().clear();
-                    FT_OPS.lock().clear();
-                    PERM_OPS.lock().clear();
-                    TEXT_SENDS.lock().clear();
-                    *COMMAND_TX.lock() = None;
-                }
             }
         }
         crate::EVENT_LOOP_ALIVE.store(false, Ordering::SeqCst);
@@ -793,33 +711,25 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     let stereo_packet = !opus_vec.is_empty() && (opus_vec[0] >> 2) & 1 == 1;
     let out_len = if stereo_packet { FRAME * 2 } else { FRAME };
     let mut pcm_out = vec![0.0f32; out_len];
-    // A panic here (malformed packet, decoder bug) must not unwind into the
-    // event loop and kill the session: drop the packet, evict the possibly
-    // corrupt decoder so the next one starts fresh, keep the connection up.
-    let decode_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if stereo_packet {
-            let mut decoder = AUDIO_DECODERS_STEREO.entry(from_id)
-                .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
-            decoder.decode(&opus_vec, FRAME, &mut pcm_out)
-        } else {
-            let mut decoder = AUDIO_DECODERS.entry(from_id)
-                .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
-            decoder.decode(&opus_vec, FRAME, &mut pcm_out)
+    let ok = if stereo_packet {
+        let mut decoder = AUDIO_DECODERS_STEREO.entry(from_id)
+            .or_insert_with(|| OpusDecoder::new(48000, 2).expect("stereo decoder"));
+        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("opus stereo decode error from client {}: {}", from_id, e);
+                false
+            }
         }
-    }));
-    let ok = match decode_res {
-        Ok(Ok(_)) => true,
-        Ok(Err(e)) => {
-            eprintln!("opus decode error from client {}: {}", from_id, e);
-            false
-        }
-        Err(panic) => {
-            let msg = panic_msg(&panic);
-            eprintln!("opus decode panicked for client {}: {}", from_id, msg);
-            push_diag(&format!("opus decode panicked (client {}): {}", from_id, msg));
-            AUDIO_DECODERS_STEREO.remove(&from_id);
-            AUDIO_DECODERS.remove(&from_id);
-            false
+    } else {
+        let mut decoder = AUDIO_DECODERS.entry(from_id)
+            .or_insert_with(|| OpusDecoder::new(48000, 1).expect("mono decoder"));
+        match decoder.decode(&opus_vec, FRAME, &mut pcm_out) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("opus decode error from client {}: {}", from_id, e);
+                false
+            }
         }
     };
 
@@ -1348,23 +1258,7 @@ fn pick_device(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
 /// and jitter/decoders are rebuilt on the next incoming audio. Called on
 /// connect and, from the maintenance task, when `OUTPUT_RESTART_REQUESTED`
 /// is set (device route change or stream error).
-///
-/// The rebuild runs inside `catch_unwind`: cpal's Android backend touches
-/// JNI-dependent paths (device probing, buffer-size queries), and a panic
-/// here must degrade to "no audio" instead of killing the enclosing task —
-/// on the connect path that task also owns the event loop, so its death
-/// would leave the UI without the channel tree. The panic hook still records
-/// the message (flushed to Dart as a Diag event).
 fn restart_output_stream() {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        restart_output_stream_inner();
-    }));
-    if result.is_err() {
-        eprintln!("cpal: output stream rebuild panicked; audio stays off until the next restart");
-    }
-}
-
-fn restart_output_stream_inner() {
     // Drop the old stream first so the new one is the only active consumer.
     AUDIO_STREAM.lock().unwrap().0 = None;
     crate::clear_sfx_queue();
@@ -2055,27 +1949,6 @@ fn encoded_cpw(password: &Option<String>) -> String {
         .unwrap_or_default()
 }
 
-/// Builds an ftdeletefile command — every entry is one part of the same
-/// packet, so multiple paths die with one server round-trip.
-fn ft_delete_cmd(cid: u64, names: &[String], password: &Option<String>) -> OutCommand {
-    let mut packet = OutCommand::new(
-        Direction::C2S,
-        Flags::empty(),
-        PacketType::Command,
-        "ftdeletefile",
-    );
-    let cpw = encoded_cpw(password);
-    for (i, name) in names.iter().enumerate() {
-        if i > 0 {
-            packet.start_new_part();
-        }
-        packet.write_arg("cid", &cid);
-        packet.write_arg("cpw", &cpw);
-        packet.write_arg("name", name);
-    }
-    packet
-}
-
 /// Schedules the deferred finalize of a listing. The server streams the
 /// rows after the result frame, and our event pipeline may surface those
 /// rows one or two poll ticks late — so the finalize waits long enough for
@@ -2146,14 +2019,10 @@ fn drain_raw_incoming(con: &mut Connection) {
 fn handle_event_item(item: StreamItem, con: &mut Connection, generation: u64) {
     match item {
         StreamItem::FileDownload(handle, result) => {
-            contain_panic("file download handler", || {
-                handle_file_download(handle.0, result);
-            });
+            handle_file_download(handle.0, result);
         }
         StreamItem::FileUpload(handle, result) => {
-            contain_panic("file upload handler", || {
-                handle_file_upload(handle.0, result);
-            });
+            handle_file_upload(handle.0, result);
         }
         other => handle_control_item(&other, con, generation),
     }
@@ -2253,7 +2122,6 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
-                                        to_client_id: 0,
                                         target_mode: 3u8,
                                         message: message.clone(),
                                     });
@@ -2262,20 +2130,14 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
-                                        to_client_id: 0,
                                         target_mode: 2u8,
                                         message: message.clone(),
                                     });
                                 }
-                                tsclientlib::MessageTarget::Client(target_id) => {
+                                tsclientlib::MessageTarget::Client(_) => {
                                     STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                                         from_client: invoker.name.clone(),
                                         from_client_id: invoker.id.0 as u32,
-                                        // The echo of our own sent PM carries the
-                                        // OTHER party here — that is what lets
-                                        // Dart file the message under the right
-                                        // conversation.
-                                        to_client_id: target_id.0 as u32,
                                         target_mode: 1u8,
                                         message: message.clone(),
                                     });
@@ -2365,7 +2227,6 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                         STATE.lock().pending_events.push_back(TsEvent::TextMessage {
                             from_client: p.invoker_name.clone(),
                             from_client_id: p.invoker_id.0 as u32,
-                            to_client_id: p.target_client_id.map(|c| c.0 as u32).unwrap_or(0),
                             target_mode: p.target as u8,
                             message: p.message.clone(),
                         });
@@ -2448,21 +2309,6 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                         ok: res.is_ok(),
                         error: err_text.clone(),
                     });
-                }
-                // A text-message send that the server refused (missing send
-                // permission etc.) — tell Dart instead of dropping the
-                // message silently.
-                if TEXT_SENDS.lock().remove(&handle.0) {
-                    if let Some(e) = res.as_ref().err() {
-                        let reason = match e.missing_permission {
-                            Some(perm) => format!("missing permission {}", perm.0),
-                            None => format!("{:?}", e.error),
-                        };
-                        push_diag(&format!("text message rejected: {}", reason));
-                        STATE.lock().pending_events.push_back(TsEvent::SendFailed {
-                            error: reason,
-                        });
-                    }
                 }
                 if let Some(op) = FT_OPS.lock().remove(&handle.0) {
                     push_diag(&format!(
@@ -2552,14 +2398,6 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                     let kind = FT_TASKS.get(&task_id).map(|t| t.kind);
                     match kind {
                         Some(k) if k == FT_KIND_UPLOAD && ok_status => {
-                            // Avatar upload: the status confirmation is the
-                            // success signal — announce the hash so the server
-                            // broadcasts the new avatar.
-                            if let Some(md5) =
-                                FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone())
-                            {
-                                publish_avatar_hash(md5);
-                            }
                             crate::finish_ft_task(task_id, true, None);
                         }
                         _ => {
@@ -2664,7 +2502,6 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
             }
             return;
@@ -2674,34 +2511,18 @@ async fn event_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 Command::SendMessage {
-                    target_mode,
-                    target_cid,
+                    target_mode: _,
+                    target_cid: _,
                     message,
                 } => {
-                    // target_mode follows the wire encoding: 1=Client, 2=Channel
-                    // (default), 3=Server.
-                    let (target, target_client_id) = match target_mode {
-                        1 => (
-                            tsclientlib::TextMessageTargetMode::Client,
-                            Some(ClientId(target_cid as u16)),
-                        ),
-                        3 => (tsclientlib::TextMessageTargetMode::Server, None),
-                        _ => (tsclientlib::TextMessageTargetMode::Channel, None),
-                    };
                     let part = OutSendTextMessagePart {
-                        target,
-                        target_client_id,
+                        target: tsclientlib::TextMessageTargetMode::Channel,
+                        target_client_id: None,
                         message: Cow::Owned(message),
                     };
-                    // send_with_result attaches a return_code so the server's
-                    // answer (e.g. a permission rejection) resolves through
-                    // StreamItem::MessageResult instead of a bare CommandError;
-                    // TEXT_SENDS marks which return_codes are ours.
                     let result =
-                        OutSendTextMessageMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con);
-                    if let Ok(handle) = result {
-                        TEXT_SENDS.lock().insert(handle.0);
+                        OutSendTextMessageMessage::new(&mut std::iter::once(part)).send(&mut con);
+                    if result.is_ok() {
                         // Outbound chat sound (the server echoes the message
                         // back; the inbound sound skips our own echoes).
                         push_sfx(SFX_CHAT_OUTBOUND, "message sent");
@@ -2794,57 +2615,6 @@ async fn event_loop(
                         badges: None,
                     };
                     let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
-                }
-                Command::SetAvatarHash { hash } => {
-                    let part = OutClientUpdatePart {
-                        name: None,
-                        input_muted: None,
-                        output_muted: None,
-                        is_away: None,
-                        away_message: None,
-                        input_hardware_enabled: None,
-                        output_hardware_enabled: None,
-                        is_channel_commander: None,
-                        avatar_hash: Some(Cow::Owned(hash)),
-                        phonetic_name: None,
-                        talk_power_request: None,
-                        talk_power_request_message: None,
-                        is_recording: None,
-                        badges: None,
-                    };
-                    let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
-                }
-                Command::DeleteAvatar { path, token } => {
-                    push_diag(&format!("avatar delete {}: {}", token, path));
-                    // 1. Announce "no avatar": client_flag_avatar present but
-                    //    EMPTY, which write_arg serializes as the bare flag
-                    //    the server itself broadcasts for avatar-less clients.
-                    //    Tracked via perm_op_send so Dart gets the server's
-                    //    real answer for the token.
-                    let part = OutClientUpdatePart {
-                        name: None,
-                        input_muted: None,
-                        output_muted: None,
-                        is_away: None,
-                        away_message: None,
-                        input_hardware_enabled: None,
-                        output_hardware_enabled: None,
-                        is_channel_commander: None,
-                        avatar_hash: Some(Cow::Borrowed("")),
-                        phonetic_name: None,
-                        talk_power_request: None,
-                        talk_power_request_message: None,
-                        is_recording: None,
-                        badges: None,
-                    };
-                    let result = OutClientUpdateMessage::new(&mut std::iter::once(part))
-                        .send_with_result(&mut con);
-                    perm_op_send(result, &token);
-                    // 2. Best-effort removal of the stored file — not tracked:
-                    //    an orphan in channel-0 storage is harmless and gets
-                    //    overwritten by the next upload.
-                    let packet = ft_delete_cmd(0, std::slice::from_ref(&path), &None);
-                    let _ = RawCmd(packet).send(&mut con);
                 }
                 Command::SendPoke { client_id, message } => {
                     // Poke is a dedicated clientpoke request message.
@@ -3401,7 +3171,21 @@ async fn event_loop(
                 Command::FtDelete { cid, names, password, token } => {
                     push_diag(&format!("ft delete {}: {} path(s)", token, names.len()));
                     // Every deleted entry is one part of a single ftdeletefile.
-                    let packet = ft_delete_cmd(cid, &names, &password);
+                    let mut packet = OutCommand::new(
+                        Direction::C2S,
+                        Flags::empty(),
+                        PacketType::Command,
+                        "ftdeletefile",
+                    );
+                    let cpw = encoded_cpw(&password);
+                    for (i, name) in names.iter().enumerate() {
+                        if i > 0 {
+                            packet.start_new_part();
+                        }
+                        packet.write_arg("cid", &cid);
+                        packet.write_arg("cpw", &cpw);
+                        packet.write_arg("name", name);
+                    }
                     push_wire_diag(&format!("delete {}", token), &packet);
                     match RawCmd(packet).send_with_result(&mut con) {
                         Ok(handle) => {
@@ -3509,7 +3293,6 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                     }
                     return;
@@ -3630,7 +3413,6 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                 }
                 // The stream errored out (same termination as Ok(None)):
@@ -3665,7 +3447,6 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                 }
                 // The stream is truly over — do not fall through to the
@@ -3710,7 +3491,6 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
                     }
                     // The stream errored out — return immediately instead of
@@ -3766,7 +3546,6 @@ async fn event_loop(
             FT_LISTS.lock().clear();
             FT_OPS.lock().clear();
             PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
             *COMMAND_TX.lock() = None;
             }
             return;
@@ -3811,23 +3590,6 @@ pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect(
         let mut s = STATE.lock();
         s.connected = false;
         s.disconnect_requested = false;
-    } else if STATE.lock().connected {
-        // Zombie state: no live event loop and nothing in the stash (e.g. the
-        // event loop panicked without running its teardown). Reset so the UI
-        // does not stay stuck on a ghost connection.
-        let mut s = STATE.lock();
-        s.connected = false;
-        s.disconnect_requested = false;
-        s.pending_events.push_back(TsEvent::Disconnected {
-            reason: "User disconnected".into(),
-        });
-        drop(s);
-        FT_LISTS.lock().clear();
-        FT_OPS.lock().clear();
-        PERM_OPS.lock().clear();
-        TEXT_SENDS.lock().clear();
-        *COMMAND_TX.lock() = None;
-        teardown_output_state();
     }
 }
 
@@ -3857,23 +3619,6 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
         AUDIO_DECODERS_STEREO.clear();
         PLAYED_SAMPLES.store(0, Ordering::Relaxed);
         ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
-    } else if STATE.lock().connected {
-        // Zombie state: no live event loop and nothing in the stash (e.g. the
-        // event loop panicked without running its teardown). Reset everything
-        // so the UI is not stuck on a ghost connection and can reconnect.
-        let mut s = STATE.lock();
-        s.connected = false;
-        s.disconnect_requested = false;
-        s.pending_events.push_back(TsEvent::Disconnected {
-            reason: "User disconnected".into(),
-        });
-        drop(s);
-        FT_LISTS.lock().clear();
-        FT_OPS.lock().clear();
-        PERM_OPS.lock().clear();
-        TEXT_SENDS.lock().clear();
-        *COMMAND_TX.lock() = None;
-        teardown_output_state();
     }
     to_c_str(r#"{"type":"disconnected","reason":"User disconnected"}"#.to_string())
 }
@@ -3901,48 +3646,6 @@ pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsRestartAudioOu
     _class: *mut std::ffi::c_void,
 ) {
     ts_restart_audio_output();
-}
-
-/// JNI entry called once from MainActivity.onCreate: hands the JVM and the
-/// application context to `ndk-context`, which cpal/oboe consult when they
-/// build audio streams on Android (the AudioTrack/AudioRecord buffer-size
-/// queries go through JNI). A plain Flutter FFI app has no ndk-glue, so
-/// nothing else initializes it — without this the first stream build panics
-/// with "android context was not initialized". Android-only.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "system" fn Java_com_senlinjun_nek0_MainActivity_tsInitAndroid(
-    env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-    context: jni::objects::JObject,
-) {
-    // initialize_android_context asserts when called twice; the guard also
-    // turns repeated MainActivity.onCreate calls (activity recreation) into
-    // no-ops.
-    static INITIALIZED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    if INITIALIZED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let init = || -> Result<(), jni::errors::Error> {
-        let vm = env.get_java_vm()?;
-        // Leak the global reference on purpose: ndk-context stores the raw
-        // jobject for the process lifetime, so the ref must never be freed.
-        let gref = env.new_global_ref(&context)?;
-        let raw = gref.as_raw();
-        std::mem::forget(gref);
-        unsafe {
-            ndk_context::initialize_android_context(
-                vm.get_java_vm_pointer() as *mut std::ffi::c_void,
-                raw as *mut std::ffi::c_void,
-            );
-        }
-        Ok(())
-    };
-    match init() {
-        Ok(()) => eprintln!("tsInitAndroid: ndk-context initialized"),
-        Err(e) => eprintln!("tsInitAndroid failed: {}", e),
-    }
 }
 
 // ─── Poll / Getters ─────────────────────────────────────────────────
@@ -4014,60 +3717,6 @@ pub extern "C" fn ts_send_channel_message(_cid: u32, msg: *const c_char) -> u8 {
         if tx
             .send(Command::SendMessage {
                 target_mode: 2,
-                target_cid: 0,
-                message: msg,
-            })
-            .is_ok()
-        {
-            1
-        } else {
-            0
-        }
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn ts_send_private_message(client_id: u16, msg: *const c_char) -> u8 {
-    let msg = unsafe { std::ffi::CStr::from_ptr(msg) }
-        .to_string_lossy()
-        .into_owned();
-    if !STATE.lock().connected {
-        return 0;
-    }
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx
-            .send(Command::SendMessage {
-                target_mode: 1,
-                target_cid: client_id as u64,
-                message: msg,
-            })
-            .is_ok()
-        {
-            1
-        } else {
-            0
-        }
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn ts_send_server_message(msg: *const c_char) -> u8 {
-    let msg = unsafe { std::ffi::CStr::from_ptr(msg) }
-        .to_string_lossy()
-        .into_owned();
-    if !STATE.lock().connected {
-        return 0;
-    }
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx
-            .send(Command::SendMessage {
-                target_mode: 3,
                 target_cid: 0,
                 message: msg,
             })
@@ -5218,7 +4867,6 @@ fn ft_new_task(kind: u8, name: String, local_path: String, total: u64) -> u32 {
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // Placeholder until the event loop binds the protocol id.
             client_ft_id: std::sync::atomic::AtomicU16::new(u16::MAX),
-            avatar_md5: None,
             last_event: parking_lot::Mutex::new(None),
         }),
     );
@@ -5415,18 +5063,6 @@ pub extern "C" fn ts_ft_download(
     task_id
 }
 
-/// The `/avatar_<uid>` remote path for a wire-format uid (base64), or None
-/// when the uid is malformed. Shared by avatar download / upload / delete —
-/// avatars live in the channel-0 file storage without a password.
-fn avatar_remote_path(uid: &str) -> Option<String> {
-    let raw = BASE64_STANDARD.decode(uid.as_bytes()).ok()?;
-    let path = normalize_remote_path(&format!(
-        "/avatar_{}",
-        tsproto_types::Uid::from_bytes(&raw).as_avatar()
-    ));
-    valid_remote_path(&path).then_some(path)
-}
-
 /// Starts downloading a client's avatar into `dest` (local absolute path).
 /// The remote path follows the TS3 convention: `/avatar_<uid>` where the uid
 /// is base64-decoded and hex-encoded with the alphabet [a-p]
@@ -5439,9 +5075,17 @@ pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) ->
         return 0;
     }
     let uid = unsafe { cstr_to_string(uid) };
-    let Some(path) = avatar_remote_path(&uid) else {
-        return 0;
+    let raw = match BASE64_STANDARD.decode(uid.as_bytes()) {
+        Ok(raw) => raw,
+        Err(_) => return 0,
     };
+    let path = normalize_remote_path(&format!(
+        "/avatar_{}",
+        tsproto_types::Uid::from_bytes(&raw).as_avatar()
+    ));
+    if !valid_remote_path(&path) {
+        return 0;
+    }
     let dest = unsafe { cstr_to_string(dest) };
     if dest.is_empty() {
         return 0;
@@ -5464,64 +5108,6 @@ pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) ->
         }
     }
     // Event loop unreachable — fail the task immediately so no job hangs.
-    crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
-    task_id
-}
-
-/// Starts uploading the local file `src` as our own avatar. The remote path
-/// follows the TS3 convention: `/avatar_<uid>` (uid base64-decoded, hex-
-/// encoded with the alphabet [a-p] via `Uid::as_avatar`), written into the
-/// channel-0 file storage without a password, overwriting the previous
-/// avatar. On success the transfer machinery additionally announces the
-/// file's MD5 via clientupdate (`client_flag_avatar`) — without that the
-/// new avatar never becomes visible. Returns the task id (>0) for
-/// progress/cancel tracking, 0 when not queued (not connected, malformed
-/// uid, missing source file).
-#[no_mangle]
-pub extern "C" fn ts_upload_avatar(uid: *const c_char, src: *const c_char) -> u32 {
-    if !ft_ready() || src.is_null() {
-        return 0;
-    }
-    let uid = unsafe { cstr_to_string(uid) };
-    let Some(path) = avatar_remote_path(&uid) else {
-        return 0;
-    };
-    let src = unsafe { cstr_to_string(src) };
-    let meta = std::fs::metadata(&src);
-    // Only existing local files are accepted.
-    if src.is_empty() || meta.as_ref().map(|m| !m.is_file()).unwrap_or(true) {
-        return 0;
-    }
-    // Hash BEFORE queueing: the announced hash must match the uploaded
-    // bytes, and Dart must not touch the file between the two.
-    let md5 = match md5_file_hex(&src) {
-        Ok(md5) => md5,
-        Err(_) => return 0,
-    };
-    let total = meta.map(|m| m.len()).unwrap_or(0);
-    let name = remote_basename(&path);
-    let task_id = ft_new_task(FT_KIND_UPLOAD, name.clone(), src.clone(), total);
-    if let Some(mut t) = FT_TASKS.get_mut(&task_id) {
-        // Still exclusively held in the map — no worker has touched it yet.
-        if let Some(task) = Arc::get_mut(&mut t) {
-            task.avatar_md5 = Some(md5);
-        }
-    }
-    ft_push_started(task_id);
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx
-            .send(Command::FtUpload {
-                cid: 0,
-                path,
-                password: None,
-                task_id,
-            })
-            .is_ok()
-        {
-            return task_id;
-        }
-    }
     crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
     task_id
 }
@@ -5568,36 +5154,6 @@ pub extern "C" fn ts_ft_upload(
     }
     crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
     task_id
-}
-
-/// Clears our own avatar: announces an EMPTY `client_flag_avatar` (the
-/// server broadcasts "no avatar" and every client drops the image) and
-/// best-effort removes the stored `/avatar_<uid>` file from the channel-0
-/// storage. The Dart caller receives the server's real answer for the
-/// announce via the `perm_op` event for `token`; the file removal is not
-/// tracked (an orphan is harmless and overwritten by the next upload).
-/// Returns 1 when queued, 0 when not connected / malformed uid / token.
-#[no_mangle]
-pub extern "C" fn ts_delete_avatar(uid: *const c_char, token: *const c_char) -> u8 {
-    if !ft_ready() || token.is_null() {
-        return 0;
-    }
-    let uid = unsafe { cstr_to_string(uid) };
-    let Some(path) = avatar_remote_path(&uid) else {
-        return 0;
-    };
-    let token = unsafe { cstr_to_string(token) };
-    if token.is_empty() {
-        return 0;
-    }
-    let tx = COMMAND_TX.lock();
-    match tx
-        .as_ref()
-        .map(|tx| tx.send(Command::DeleteAvatar { path, token }))
-    {
-        Some(Ok(())) => 1,
-        _ => 0,
-    }
 }
 
 /// Requests cancellation of an active transfer (cooperative flag).

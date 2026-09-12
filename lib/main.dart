@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
@@ -50,6 +51,34 @@ class TeamSpeakApp extends ConsumerWidget {
         ),
         cardColor: const Color(0xFF1A1A2E),
         dividerColor: const Color(0xFF2A2A4A),
+        // Page transitions fade routes over an opaque scrim by default
+        // (FadeForwards on Android pads with ColorScheme.surface for the
+        // whole animation, Zoom on desktop draws a 60% surface tint), which
+        // would hide the app-wide background until the animation completes.
+        // Transparent transition backgrounds keep the wallpaper visible while
+        // pages animate; the background layer's base color below the navigator
+        // still prevents any black flash between two fading pages.
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: {
+            // fallbackColor only affects programmatic push/pop, which the
+            // predictive back builder serves through its FadeForwards
+            // fallback; the actual back-gesture animation has no scrim.
+            TargetPlatform.android: PredictiveBackPageTransitionsBuilder(
+              fallbackColor: Colors.transparent,
+            ),
+            // Zoom's scrim is applied via withOpacity and can therefore not
+            // be made fully transparent — desktop uses the fade-forwards
+            // transition instead (slide + fade, matching Android).
+            TargetPlatform.linux: FadeForwardsPageTransitionsBuilder(
+              backgroundColor: Colors.transparent,
+            ),
+            TargetPlatform.windows: FadeForwardsPageTransitionsBuilder(
+              backgroundColor: Colors.transparent,
+            ),
+            TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+          },
+        ),
       ),
       // App-wide custom background: base color → optional image → dim
       // overlay → real content. Cards, app bars and dialogs stay opaque so
@@ -62,19 +91,33 @@ class TeamSpeakApp extends ConsumerWidget {
             return Stack(
               fit: StackFit.expand,
               children: [
-                const ColoredBox(color: Color(0xFF0F0F23)),
-                if (path != null)
-                  Opacity(
-                    opacity: settings.opacity,
-                    child: Image.file(
-                      File(path),
-                      fit: BoxFit.cover,
-                      cacheWidth: _backgroundCacheWidth(context),
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                    ),
+                // Own repaint boundary so the static background keeps a
+                // stable retained raster layer: Impeller has been seen to
+                // drop the wallpaper texture after route transitions until
+                // some later rebuild re-rasterizes the root layer.
+                RepaintBoundary(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      const ColoredBox(color: Color(0xFF0F0F23)),
+                      if (path != null)
+                        Image.file(
+                          File(path),
+                          fit: BoxFit.cover,
+                          // Baked into the image paint itself — a wrapping
+                          // Opacity widget would add a separate opacity
+                          // layer that Impeller can drop after transitions.
+                          opacity: AlwaysStoppedAnimation(settings.opacity),
+                          cacheWidth: _backgroundCacheWidth(context),
+                          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                        ),
+                      if (path != null)
+                        ColoredBox(
+                          color: Color.fromRGBO(0, 0, 0, settings.dim),
+                        ),
+                    ],
                   ),
-                if (path != null)
-                  ColoredBox(color: Color.fromRGBO(0, 0, 0, settings.dim)),
+                ),
                 if (child != null) child,
               ],
             );

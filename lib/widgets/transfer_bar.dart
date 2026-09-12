@@ -18,7 +18,12 @@ class TransferBar extends StatelessWidget {
       listenable: FtTransferService.instance,
       builder: (context, _) {
         final jobs = FtTransferService.instance.jobs;
-        if (jobs.isEmpty) return const SizedBox.shrink();
+        if (jobs.isEmpty) {
+          // Nothing to show, but keep the bottom inset reserved (transparent)
+          // so list content does not slide under the gesture-nav area — the
+          // screen's SafeArea no longer pads the bottom.
+          return SafeArea(top: false, child: const SizedBox.shrink());
+        }
         final active = jobs.where((j) => j.isActive).toList();
         final headline = active.isNotEmpty
             ? active.last
@@ -27,120 +32,130 @@ class TransferBar extends StatelessWidget {
         final al = AppLocalizations.of(context);
         return Material(
           type: MaterialType.transparency,
-          child: Container(
+          // The bar extends into the gesture-nav inset (the screen's SafeArea
+          // no longer pads the bottom); the content stays above the inset.
+          child: ColoredBox(
             color: const Color(0xFF1A1A2E),
-            padding: const EdgeInsets.fromLTRB(12, 6, 8, 10),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                InkWell(
-                  onTap: () => _showDetailsSheet(context, al, jobs),
-                  child: Row(
-                    children: [
-                      Icon(
-                        headline.kind == TransferKind.upload
-                            ? Icons.upload_outlined
-                            : Icons.download_outlined,
-                        size: 16,
-                        color: Colors.blueAccent,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          headline.displayName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
+            child: SafeArea(
+              top: false,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(12, 6, 8, 10),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    InkWell(
+                      onTap: () => _showDetailsSheet(context, al, jobs),
+                      child: Row(
+                        children: [
+                          Icon(
+                            headline.kind == TransferKind.upload
+                                ? Icons.upload_outlined
+                                : Icons.download_outlined,
+                            size: 16,
+                            color: Colors.blueAccent,
                           ),
-                        ),
-                      ),
-                      Text(
-                        '${(headline.progress * 100).toStringAsFixed(0)}%',
-                        style: const TextStyle(
-                          color: Colors.grey,
-                          fontSize: 11,
-                        ),
-                      ),
-                      if (active.length > 1)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 6),
-                          child: Text(
-                            '+${active.length - 1}',
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              headline.displayName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            '${(headline.progress * 100).toStringAsFixed(0)}%',
                             style: const TextStyle(
                               color: Colors.grey,
                               fontSize: 11,
                             ),
                           ),
-                        ),
-                      const SizedBox(width: 4),
-                      const Icon(
-                        Icons.keyboard_arrow_up,
-                        size: 16,
-                        color: Colors.grey,
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    Expanded(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(3),
-                        child: LinearProgressIndicator(
-                          value: headline.state == TransferState.active
-                              ? (headline.progress > 0
-                                    ? headline.progress
-                                    : null)
-                              : 1,
-                          minHeight: 5,
-                          color: Colors.blue,
-                          backgroundColor: const Color(0xFF2A2A4A),
-                        ),
+                          if (active.length > 1)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 6),
+                              child: Text(
+                                '+${active.length - 1}',
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                          const SizedBox(width: 4),
+                          const Icon(
+                            Icons.keyboard_arrow_up,
+                            size: 16,
+                            color: Colors.grey,
+                          ),
+                        ],
                       ),
                     ),
-                    if (headline.isActive)
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 32,
-                          minHeight: 32,
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(3),
+                            child: LinearProgressIndicator(
+                              value: headline.state == TransferState.active
+                                  ? (headline.progress > 0
+                                        ? headline.progress
+                                        : null)
+                                  : 1,
+                              minHeight: 5,
+                              color: Colors.blue,
+                              backgroundColor: const Color(0xFF2A2A4A),
+                            ),
+                          ),
                         ),
-                        tooltip: al.fmCancelTransfer,
-                        icon: const Icon(
-                          Icons.close,
-                          size: 16,
-                          color: Colors.redAccent,
-                        ),
-                        onPressed: () =>
-                            FtTransferService.instance.cancel(headline.taskId),
-                      )
-                    else ...[
-                      const Spacer(),
-                      TextButton.icon(
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          minimumSize: Size.zero,
-                          foregroundColor: Colors.grey,
-                        ),
-                        onPressed: () {
-                          FtTransferService.instance.clearFinished();
-                          onClearFinished();
-                        },
-                        icon: const Icon(Icons.clear_all, size: 14),
-                        label: Text(
-                          al.fmClearHistory,
-                          style: const TextStyle(fontSize: 11),
-                        ),
-                      ),
-                    ],
+                        if (headline.isActive)
+                          IconButton(
+                            visualDensity: VisualDensity.compact,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(
+                              minWidth: 32,
+                              minHeight: 32,
+                            ),
+                            tooltip: al.fmCancelTransfer,
+                            icon: const Icon(
+                              Icons.close,
+                              size: 16,
+                              color: Colors.redAccent,
+                            ),
+                            onPressed: () => FtTransferService.instance.cancel(
+                              headline.taskId,
+                            ),
+                          )
+                        else ...[
+                          const Spacer(),
+                          TextButton.icon(
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                              minimumSize: Size.zero,
+                              foregroundColor: Colors.grey,
+                            ),
+                            onPressed: () {
+                              FtTransferService.instance.clearFinished();
+                              onClearFinished();
+                            },
+                            icon: const Icon(Icons.clear_all, size: 14),
+                            label: Text(
+                              al.fmClearHistory,
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ],
                 ),
-              ],
+              ),
             ),
           ),
         );

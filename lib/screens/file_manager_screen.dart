@@ -598,7 +598,10 @@ class _FileManagerScreenState extends State<FileManagerScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
       ),
+      // bottom: false — TransferBar extends into the gesture-nav inset
+      // itself and keeps the inset reserved even when hidden.
       body: SafeArea(
+        bottom: false,
         child: Column(
           children: [
             _buildToolbar(connected),

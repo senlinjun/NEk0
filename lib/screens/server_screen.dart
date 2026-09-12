@@ -244,7 +244,10 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     final connNotifier = ref.read(tsConnectionProvider.notifier);
 
     return Scaffold(
+      // bottom: false — the bottom controls bar extends into the gesture-nav
+      // inset itself (see _buildControls), the body must not pad it away.
       body: SafeArea(
+        bottom: false,
         child: Column(
           children: [
             ConnectionBar(
@@ -939,89 +942,96 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       micColor = conn.voiceActive ? Colors.blue : Colors.green;
     }
 
-    return Container(
-      height: 52,
-      // Translucent so a custom background tints through.
+    // Translucent so a custom background tints through. The bar itself
+    // extends into the gesture-nav inset (the body SafeArea no longer pads
+    // the bottom); the controls row stays above the inset.
+    return ColoredBox(
       color: const Color(0xD916213E),
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          // --- Mic icon (tap mute, long-press settings) ---
-          GestureDetector(
-            key: _micKey,
-            onTap: () => notifier.toggleInputMute(),
-            onLongPress: () => _showVoiceSettings(notifier),
-            onSecondaryTapUp: (_) => _showVoiceSettings(notifier),
-            child: Icon(Icons.mic, color: micColor, size: 28),
-          ),
-          const SizedBox(width: 24),
-          // --- Away toggle ---
-          Tooltip(
-            message: conn.away
-                ? AppLocalizations.of(context).awayDisable
-                : AppLocalizations.of(context).awayEnable,
-            child: GestureDetector(
-              onTap: () => notifier.toggleAway(),
-              child: Icon(
-                Icons.access_time,
-                color: conn.away ? Colors.amber : Colors.grey,
-                size: 28,
+      child: SafeArea(
+        top: false,
+        child: Container(
+          height: 52,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // --- Mic icon (tap mute, long-press settings) ---
+              GestureDetector(
+                key: _micKey,
+                onTap: () => notifier.toggleInputMute(),
+                onLongPress: () => _showVoiceSettings(notifier),
+                onSecondaryTapUp: (_) => _showVoiceSettings(notifier),
+                child: Icon(Icons.mic, color: micColor, size: 28),
               ),
-            ),
-          ),
-          // --- PTT button (only in PTT mode) ---
-          if (conn.pttMode) ...[
-            const SizedBox(width: 24),
-
-            IgnorePointer(
-              ignoring: conn.inputMuted,
-              child: Listener(
-                onPointerDown: (_) => notifier.setPttPressed(true),
-                onPointerUp: (_) => notifier.setPttPressed(false),
-                onPointerCancel: (_) => notifier.setPttPressed(false),
-                child: Container(
-                  width: 64,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: conn.pttPressed
-                        ? const Color(0xFF4444AA)
-                        : const Color(0xFF2A2A4A),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: const Color(0xFF888888),
-                      // color: conn.pttPressed
-                      //     ? Colors.lightGreenAccent
-                      //     : const Color(0xFF888888),
-                      width: 2,
-                    ),
+              const SizedBox(width: 24),
+              // --- Away toggle ---
+              Tooltip(
+                message: conn.away
+                    ? AppLocalizations.of(context).awayDisable
+                    : AppLocalizations.of(context).awayEnable,
+                child: GestureDetector(
+                  onTap: () => notifier.toggleAway(),
+                  child: Icon(
+                    Icons.access_time,
+                    color: conn.away ? Colors.amber : Colors.grey,
+                    size: 28,
                   ),
-                  child: const Center(
-                    child: Text(
-                      'PTT',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 13,
+                ),
+              ),
+              // --- PTT button (only in PTT mode) ---
+              if (conn.pttMode) ...[
+                const SizedBox(width: 24),
+
+                IgnorePointer(
+                  ignoring: conn.inputMuted,
+                  child: Listener(
+                    onPointerDown: (_) => notifier.setPttPressed(true),
+                    onPointerUp: (_) => notifier.setPttPressed(false),
+                    onPointerCancel: (_) => notifier.setPttPressed(false),
+                    child: Container(
+                      width: 64,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: conn.pttPressed
+                            ? const Color(0xFF4444AA)
+                            : const Color(0xFF2A2A4A),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: const Color(0xFF888888),
+                          // color: conn.pttPressed
+                          //     ? Colors.lightGreenAccent
+                          //     : const Color(0xFF888888),
+                          width: 2,
+                        ),
+                      ),
+                      child: const Center(
+                        child: Text(
+                          'PTT',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
+              ],
+              const SizedBox(width: 24),
+              // --- Speaker icon (toggle output mute) ---
+              GestureDetector(
+                key: _speakerKey,
+                onTap: () => notifier.toggleOutputMute(),
+                child: Icon(
+                  Icons.volume_up,
+                  color: conn.outputMuted ? Colors.red : Colors.green,
+                  size: 28,
+                ),
               ),
-            ),
-          ],
-          const SizedBox(width: 24),
-          // --- Speaker icon (toggle output mute) ---
-          GestureDetector(
-            key: _speakerKey,
-            onTap: () => notifier.toggleOutputMute(),
-            child: Icon(
-              Icons.volume_up,
-              color: conn.outputMuted ? Colors.red : Colors.green,
-              size: 28,
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
