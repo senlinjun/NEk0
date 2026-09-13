@@ -178,6 +178,27 @@ typedef _MoveClientNative =
     Uint8 Function(Uint16, Uint32, Pointer<Utf8>, Pointer<Utf8>);
 typedef _MoveClientDart = int Function(int, int, Pointer<Utf8>, Pointer<Utf8>);
 
+// ─── Recording (see native/src/recording.rs) ────────────────────────
+
+// ts_set_recording_config(backtrack_secs: u32, work_dir: *const c_char) -> u8
+typedef _SetRecordingConfigNative = Uint8 Function(Uint32, Pointer<Utf8>);
+typedef _SetRecordingConfigDart = int Function(int, Pointer<Utf8>);
+
+// ts_start_recording(include_backtrack: u8) / ts_stop_recording() /
+// ts_discard_recording() -> u8
+typedef _RecordingStartNative = Uint8 Function(Uint8);
+typedef _RecordingStartDart = int Function(int);
+typedef _RecordingToggleNative = Uint8 Function();
+typedef _RecordingToggleDart = int Function();
+
+// ts_get_recording_status() -> *mut c_char (JSON, freed via ts_free_string)
+typedef _GetRecordingStatusNative = Pointer<Utf8> Function();
+typedef _GetRecordingStatusDart = Pointer<Utf8> Function();
+
+// ts_save_recording(window_ms: u32, mode: u8, dir: *const c_char) -> u8
+typedef _SaveRecordingNative = Uint8 Function(Uint32, Uint8, Pointer<Utf8>);
+typedef _SaveRecordingDart = int Function(int, int, Pointer<Utf8>);
+
 // ─── Channel management ─────────────────────────────────────────────
 
 // ts_channel_create(args_json, token) -> bool
@@ -427,6 +448,30 @@ final _banClient = _lib.lookupFunction<_BanClientNative, _BanClientDart>(
 final _moveClient = _lib.lookupFunction<_MoveClientNative, _MoveClientDart>(
   'ts_move_client',
 );
+final _setRecordingConfig = _lib
+    .lookupFunction<_SetRecordingConfigNative, _SetRecordingConfigDart>(
+      'ts_set_recording_config',
+    );
+final _startRecording = _lib
+    .lookupFunction<_RecordingStartNative, _RecordingStartDart>(
+      'ts_start_recording',
+    );
+final _stopRecording = _lib
+    .lookupFunction<_RecordingToggleNative, _RecordingToggleDart>(
+      'ts_stop_recording',
+    );
+final _getRecordingStatus = _lib
+    .lookupFunction<_GetRecordingStatusNative, _GetRecordingStatusDart>(
+      'ts_get_recording_status',
+    );
+final _saveRecording = _lib
+    .lookupFunction<_SaveRecordingNative, _SaveRecordingDart>(
+      'ts_save_recording',
+    );
+final _discardRecording = _lib
+    .lookupFunction<_RecordingToggleNative, _RecordingToggleDart>(
+      'ts_discard_recording',
+    );
 final _channelCreate = _lib
     .lookupFunction<_ChannelCreateNative, _ChannelCreateDart>(
       'ts_channel_create',
@@ -1235,6 +1280,62 @@ class TsNative {
       malloc.free(p);
       malloc.free(t);
     }
+  }
+
+  // ─── Recording ────────────────────────────────────────────────────
+
+  /// Arms the recorder for a new connection (resets leftover state) and sets
+  /// the backtrack window size plus the auto-save directory used when a
+  /// recording is interrupted by a disconnect.
+  static void setRecordingConfig(int backtrackSecs, String workDir) {
+    final ptr = _strToPtr(workDir);
+    try {
+      _setRecordingConfig(backtrackSecs, ptr);
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Starts a continuous recording; with [includeBacktrack] the recording
+  /// opens with the buffered backtrack window. Returns false when already
+  /// recording.
+  static bool startRecording({required bool includeBacktrack}) {
+    final ok = _startRecording(includeBacktrack ? 1 : 0) != 0;
+    debugLog('startRecording(includeBacktrack=$includeBacktrack) -> $ok');
+    return ok;
+  }
+
+  /// Stops the continuous recording; the buffer is kept for save/discard.
+  static bool stopRecording() {
+    final ok = _stopRecording() != 0;
+    debugLog('stopRecording -> $ok');
+    return ok;
+  }
+
+  /// Status snapshot as JSON:
+  /// `{recording, hold, backtrack_secs, available_secs, recording_secs,
+  ///   tracks: [{client_id, uid, name}]}` (client_id 0 = own mic track).
+  static String getRecordingStatus() {
+    return _ptrToString(_getRecordingStatus());
+  }
+
+  /// Saves a window async: [windowMs] == 0 → the whole stopped recording,
+  /// otherwise the trailing window. [mode]: 0 = one mixed file, 1 = one file
+  /// per user. Result arrives as a `recording_saved` /
+  /// `recording_save_failed` event. Returns false when busy or empty.
+  static bool saveRecording(int windowMs, int mode, String dir) {
+    debugLog('saveRecording(window=${windowMs}ms, mode=$mode)');
+    final ptr = _strToPtr(dir);
+    try {
+      return _saveRecording(windowMs, mode, ptr) != 0;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Drops the pinned recording buffer (save dialog cancelled).
+  static void discardRecording() {
+    _discardRecording();
   }
 }
 

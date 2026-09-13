@@ -198,4 +198,66 @@ class ForegroundService {
     }
     return candidate;
   }
+
+  // ─── User-picked recordings directory ─────────────────────────────
+
+  /// Lets the user pick the recordings save directory. Android: SAF directory
+  /// tree (persisted permission, returns a tree URI string). Desktop: system
+  /// directory dialog (returns an absolute path). Null = cancelled/failed.
+  static Future<String?> pickSaveDir() async {
+    try {
+      final result = await _channel.invokeMethod('pick_save_dir');
+      return result as String?;
+    } catch (e) {
+      debugPrint('ForegroundService: pickSaveDir failed: $e');
+      return null;
+    }
+  }
+
+  /// Copies [srcPath] into the SAF directory tree the user picked earlier
+  /// ([treeUri] as returned by [pickSaveDir]), inside the [subDir] per-save
+  /// subfolder when given (created on demand). Returns a user-facing
+  /// destination description ("<folder>/<sub>/<file>"), or null on failure.
+  static Future<String?> saveToPickedDir({
+    required String srcPath,
+    required String displayName,
+    required String treeUri,
+    String? subDir,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('save_to_saf', {
+        'src_path': srcPath,
+        'display_name': displayName,
+        'tree_uri': treeUri,
+        if (subDir != null && subDir.isNotEmpty) 'sub_dir': subDir,
+      });
+      if (result is Map) {
+        return (result['destination'] as String?) ?? '';
+      }
+      return null;
+    } catch (e) {
+      debugPrint('ForegroundService: saveToPickedDir failed: $e');
+      return null;
+    }
+  }
+
+  /// Copies [srcPath] into a user-chosen directory (desktop). Collisions
+  /// resolved with the same "name (2).ext" scheme as [saveToDownloads].
+  /// Returns the full destination path, or null on failure.
+  static Future<String?> saveToCustomDir({
+    required String srcPath,
+    required String displayName,
+    required String dir,
+  }) async {
+    try {
+      final d = Directory(dir);
+      await d.create(recursive: true);
+      final destPath = '${d.path}/${_freeFileName(d, displayName)}';
+      await File(srcPath).copy(destPath);
+      return destPath;
+    } catch (e) {
+      debugPrint('ForegroundService: saveToCustomDir failed: $e');
+      return null;
+    }
+  }
 }

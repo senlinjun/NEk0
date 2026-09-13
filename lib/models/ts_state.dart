@@ -11,6 +11,7 @@ import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/chat_message.dart';
 import '../models/perm.dart';
+import '../models/recording_settings.dart';
 import '../models/server.dart';
 import '../l10n/generated/app_localizations.dart';
 import '../services/ts_ffi.dart';
@@ -18,6 +19,7 @@ import '../services/audio_service.dart';
 import '../services/avatar_cache.dart';
 import '../services/foreground_service.dart';
 import '../services/ft_service.dart';
+import '../services/recording_service.dart';
 
 // ─── Immutable State ────────────────────────────────────────────────
 
@@ -320,6 +322,13 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       TsNative.setMicGain(savedMicGain);
       state = state.copyWith(micGain: savedMicGain);
     }
+    // Arm the multi-track recorder: backtrack window + auto-save dir used
+    // when the connection drops mid-recording. Discard first so a stale
+    // buffer from a previous session can never bleed into this one.
+    TsNative.discardRecording();
+    await RecordingService.applyConfig(
+      minutes: RecordingSettingsNotifier.fromPrefs(prefs).backtrackMinutes,
+    );
     // Apply persisted audio device choices before any stream is built
     // (desktop only — Android routes through the system automatically).
     if (!Platform.isAndroid) {
@@ -634,6 +643,13 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         FtTransferService.instance.handleEvent(event);
         break;
 
+      // Recording events go to their own service too (see recording.rs).
+      case 'recording_saved':
+      case 'recording_save_failed':
+      case 'recording_state':
+        RecordingService.instance.handleEvent(event);
+        break;
+
       case 'perm_op':
         // Result of a permission-management command (group add/remove,
         // channel group set/clear, channel perm grant/revoke). Resolves the
@@ -667,6 +683,7 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     _audioService?.stop();
     _audioService = null;
     ForegroundService.stop();
+    RecordingService.instance.reset();
     _channelPasswords.clear();
     ref.read(avatarCacheProvider.notifier).reset();
     for (final c in _permCompleters.values) {

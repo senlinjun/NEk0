@@ -1,4 +1,5 @@
 mod api;
+mod recording;
 
 use crossbeam::queue::SegQueue;
 use crossbeam::atomic::AtomicCell;
@@ -305,6 +306,31 @@ pub enum TsEvent {
     /// to the caller via `token`; `error` carries the server's rejection text.
     #[serde(rename = "perm_op")]
     PermOp { token: String, ok: bool, error: Option<String> },
+    /// Recording saved: `files` are the WAVs Rust wrote into the temp
+    /// directory (Dart moves them into Downloads). `reason` is "manual" or
+    /// "disconnected" (auto-save when a recording was active at teardown).
+    #[serde(rename = "recording_saved")]
+    RecordingSaved { reason: String, files: Vec<TsRecordingFile> },
+    #[serde(rename = "recording_save_failed")]
+    RecordingSaveFailed { reason: String, error: String },
+    /// Continuous recording started/stopped (also fired on the 4h cap).
+    #[serde(rename = "recording_state")]
+    RecordingState { recording: bool },
+}
+
+/// One WAV file produced by the recorder (see recording.rs).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TsRecordingFile {
+    /// Absolute path of the temp file Rust wrote; Dart moves it.
+    pub path: String,
+    /// Client id the track belongs to; 0 for the mixed file and for our own
+    /// microphone track.
+    pub client_id: u32,
+    pub uid: Option<String>,
+    /// Display nickname of the track (empty for the mixed file).
+    pub name: String,
+    /// true = the single mixed file, false = one per-user track.
+    pub mixed: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

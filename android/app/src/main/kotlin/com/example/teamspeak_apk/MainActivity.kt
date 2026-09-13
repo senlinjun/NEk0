@@ -26,6 +26,8 @@ import java.nio.ByteOrder
 
 class MainActivity : FlutterActivity() {
     companion object {
+        private const val REQUEST_PICK_SAVE_DIR = 4101
+
         init {
             // Load the native library at app start so tsInitAndroid can bind
             // before anything else. KeepAliveService loads it again later,
@@ -120,6 +122,16 @@ class MainActivity : FlutterActivity() {
                         val name = call.argument<String>("display_name") ?: "file"
                         val relDir = call.argument<String>("relative_dir")
                         result.success(saveToDownloads(src, name, relDir))
+                    }
+                    "pick_save_dir" -> {
+                        pickSaveDir(result)
+                    }
+                    "save_to_saf" -> {
+                        val src = call.argument<String>("src_path") ?: ""
+                        val name = call.argument<String>("display_name") ?: "file"
+                        val treeUri = call.argument<String>("tree_uri") ?: ""
+                        val subDir = call.argument<String>("sub_dir") ?: ""
+                        result.success(saveToSaf(src, name, treeUri, subDir))
                     }
                     else -> result.notImplemented()
                 }
@@ -239,6 +251,121 @@ class MainActivity : FlutterActivity() {
             }
         } catch (_: Exception) {
             mapOf("ok" to false)
+        }
+    }
+
+    // ─── User-picked recordings directory (SAF) ─────────────────────
+
+    private var pendingSaveDirResult: MethodChannel.Result? = null
+
+    /// Launches the system directory picker (ACTION_OPEN_DOCUMENT_TREE) and
+    /// persists read/write permission on the picked tree. Resolves with the
+    /// tree URI string, or null when cancelled/unavailable.
+    @Suppress("DEPRECATION")
+    private fun pickSaveDir(result: MethodChannel.Result) {
+        if (pendingSaveDirResult != null) {
+            // A picker is already in flight; never stack two pending results.
+            result.success(null)
+            return
+        }
+        pendingSaveDirResult = result
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                    or Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        }
+        startActivityForResult(intent, REQUEST_PICK_SAVE_DIR)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_PICK_SAVE_DIR) return
+        val pending = pendingSaveDirResult
+        pendingSaveDirResult = null
+        val uri = if (resultCode == RESULT_OK) data?.data else null
+        if (pending == null || uri == null) {
+            pending?.success(null)
+            return
+        }
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            pending.success(uri.toString())
+        } catch (_: Exception) {
+            pending.success(null)
+        }
+    }
+
+    /// Copies a recording into the user-picked SAF directory tree, inside the
+    /// [subDir] per-save subfolder when given (created on demand, named by
+    /// date+time). The provider deduplicates colliding display names on its
+    /// own. Returns {ok, destination:"<folder>/<sub>/<file>"} for feedback.
+    private fun saveToSaf(
+        srcPath: String,
+        displayName: String,
+        treeUriString: String,
+        subDir: String,
+    ): Map<String, Any> {
+        val src = java.io.File(srcPath)
+        if (!src.exists() || !src.isFile || treeUriString.isBlank()) {
+            return mapOf("ok" to false)
+        }
+        return try {
+            val treeUri = Uri.parse(treeUriString)
+            val resolver = contentResolver
+            val rootDir = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                treeUri,
+                android.provider.DocumentsContract.getTreeDocumentId(treeUri),
+            )
+            var targetDir = rootDir
+            if (subDir.isNotBlank()) {
+                targetDir = android.provider.DocumentsContract.createDocument(
+                    resolver,
+                    rootDir,
+                    android.provider.DocumentsContract.Document.MIME_TYPE_DIR,
+                    subDir,
+                ) ?: return mapOf("ok" to false)
+            }
+            val ext = displayName.substringAfterLast('.', "").lowercase()
+            val mime = android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+            val newDoc = android.provider.DocumentsContract.createDocument(
+                resolver, targetDir, mime, displayName,
+            ) ?: return mapOf("ok" to false)
+            resolver.openOutputStream(newDoc)?.use { out ->
+                src.inputStream().use { it.copyTo(out) }
+            } ?: return mapOf("ok" to false)
+            // Resolve the real names (the provider may have renamed on a
+            // collision) for the destination toast.
+            val dirName = queryDisplayName(rootDir) ?: ""
+            val fileName = queryDisplayName(newDoc) ?: displayName
+            val destination = if (subDir.isNotBlank()) {
+                "$dirName/$subDir/$fileName"
+            } else {
+                "$dirName/$fileName"
+            }
+            mapOf("ok" to true, "destination" to destination)
+        } catch (_: Exception) {
+            mapOf("ok" to false)
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(
+                uri,
+                arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                null, null, null,
+            )?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 

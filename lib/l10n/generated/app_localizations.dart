@@ -230,6 +230,18 @@ abstract class AppLocalizations {
   /// **'Tap to mute your mic. Long-press for voice settings (VAD, PTT, mic gain).'**
   String get guideMicDesc;
 
+  /// No description provided for @guideRecordTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording'**
+  String get guideRecordTitle;
+
+  /// No description provided for @guideRecordDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap: save the last minutes at any time, or record (optionally with them). Each user is a separate track.'**
+  String get guideRecordDesc;
+
   /// No description provided for @guideSpeakerTitle.
   ///
   /// In en, this message translates to:
@@ -1831,6 +1843,150 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Quit NEk0'**
   String get trayMenuQuit;
+
+  /// No description provided for @recordingTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording'**
+  String get recordingTitle;
+
+  /// No description provided for @recordingLive.
+  ///
+  /// In en, this message translates to:
+  /// **'REC'**
+  String get recordingLive;
+
+  /// No description provided for @recordingStopped.
+  ///
+  /// In en, this message translates to:
+  /// **'Stopped'**
+  String get recordingStopped;
+
+  /// No description provided for @recordingStart.
+  ///
+  /// In en, this message translates to:
+  /// **'Start recording'**
+  String get recordingStart;
+
+  /// No description provided for @recordingStartWithBacktrack.
+  ///
+  /// In en, this message translates to:
+  /// **'Start recording (with last {minutes} min)'**
+  String recordingStartWithBacktrack(int minutes);
+
+  /// No description provided for @recordingStop.
+  ///
+  /// In en, this message translates to:
+  /// **'Stop recording'**
+  String get recordingStop;
+
+  /// No description provided for @recordingSaveReplay.
+  ///
+  /// In en, this message translates to:
+  /// **'Save last {minutes} min'**
+  String recordingSaveReplay(int minutes);
+
+  /// No description provided for @recordingSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Save recording'**
+  String get recordingSave;
+
+  /// No description provided for @recordingDiscard.
+  ///
+  /// In en, this message translates to:
+  /// **'Discard recording'**
+  String get recordingDiscard;
+
+  /// No description provided for @recordingSaveTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Save recording'**
+  String get recordingSaveTitle;
+
+  /// No description provided for @recordingSaveMixed.
+  ///
+  /// In en, this message translates to:
+  /// **'Mix into one file (includes own voice)'**
+  String get recordingSaveMixed;
+
+  /// No description provided for @recordingSaveSeparate.
+  ///
+  /// In en, this message translates to:
+  /// **'One file per user ({count} tracks)'**
+  String recordingSaveSeparate(int count);
+
+  /// No description provided for @recordingSaving.
+  ///
+  /// In en, this message translates to:
+  /// **'Saving recording…'**
+  String get recordingSaving;
+
+  /// No description provided for @recordingSavedCount.
+  ///
+  /// In en, this message translates to:
+  /// **'Saved {count} file(s)'**
+  String recordingSavedCount(int count);
+
+  /// No description provided for @recordingSaveFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Recording save failed'**
+  String get recordingSaveFailed;
+
+  /// No description provided for @recordingNothing.
+  ///
+  /// In en, this message translates to:
+  /// **'No recording to save'**
+  String get recordingNothing;
+
+  /// No description provided for @recordingAutoSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Disconnected — auto-saved {count} recording file(s)'**
+  String recordingAutoSaved(int count);
+
+  /// No description provided for @recordingBacktrack.
+  ///
+  /// In en, this message translates to:
+  /// **'Backtrack recording'**
+  String get recordingBacktrack;
+
+  /// No description provided for @recordingSaveDir.
+  ///
+  /// In en, this message translates to:
+  /// **'Save location'**
+  String get recordingSaveDir;
+
+  /// No description provided for @recordingSaveDirDefault.
+  ///
+  /// In en, this message translates to:
+  /// **'Default (Downloads/NEk0/Recordings)'**
+  String get recordingSaveDirDefault;
+
+  /// No description provided for @recordingSaveDirPick.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose…'**
+  String get recordingSaveDirPick;
+
+  /// No description provided for @recordingSaveDirReset.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset'**
+  String get recordingSaveDirReset;
+
+  /// No description provided for @minutesCount.
+  ///
+  /// In en, this message translates to:
+  /// **'{n} min'**
+  String minutesCount(int n);
+
+  /// No description provided for @recordingBacktrackHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Session audio is buffered while connected: save the last minutes at any time, and optionally start a recording with that prefix. Each user is kept as a separate track.'**
+  String get recordingBacktrackHint;
 }
 
 class _AppLocalizationsDelegate

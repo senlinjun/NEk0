@@ -5,7 +5,7 @@ use crate::{
     FT_TASK_BY_RC, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, PERM_OPS, PLAYED_SAMPLES,
     ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
     SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
-    PendingFtList,
+    PendingFtList, recording,
 };
 
 use futures::prelude::*;
@@ -868,7 +868,7 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     // One atomic load: base_seq and base_slot always come from the same mapping.
     let base_pair = buf.base_pair.load(Ordering::Acquire);
     let mut base_seq = (base_pair >> 32) as u32;
-    let base_slot = base_pair & 0xFFFF_FFFF;
+    let mut base_slot = base_pair & 0xFFFF_FFFF;
     let global_seq = unwrap_seq(seq_u16, base_seq as u16);
     let write_seq_before = buf.write_seq.load(Ordering::Relaxed);
 
@@ -936,9 +936,18 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
                 "[jbuf] rebase client={} old_base={} new_base={} behind={} kept={} freed={}",
                 from_id, base_seq, new_base_seq, behind, kept, freed
             );
-            base_seq = new_base_seq; // local sync after rebase (base_slot unused below)
+            base_seq = new_base_seq; // local sync after rebase
+            base_slot = new_base_slot; // recording tap maps seq → slot below
         }
     }
+
+    // Recording tap: file the raw Opus packet at its playback slot so the
+    // per-user tracks stay aligned with the mix clock (see recording.rs).
+    recording::push_remote(
+        from_id,
+        base_slot.wrapping_add(global_seq.wrapping_sub(base_seq) as u64),
+        &opus_vec,
+    );
 
     // Write frame to the lock-free jitter buffer
     let slot_idx = (global_seq.wrapping_sub(base_seq)) as usize % crate::JITTER_SLOTS;
@@ -1230,6 +1239,9 @@ fn gen_output_mix_frame(ring: &mut OutRing, sfx_slots: &mut [SfxSlot; 2]) {
     for i in 0..FRAME_SIZE as usize {
         ring.push([mix_l[i], mix_r[i]]);
     }
+    // Recording tap: capture the exact playback mix (positional gains, per-
+    // client volumes, SFX). The recorder thread encodes it to Opus.
+    recording::push_mix(slot, &mix_l, &mix_r);
     let old = PLAYED_SAMPLES.fetch_add(FRAME_SIZE, Ordering::Relaxed);
     // Clock-drift diagnostic: consecutive generations must observe perfectly
     // sequential PLAYED_SAMPLES values (FRAME_SIZE apart).
@@ -1604,6 +1616,7 @@ fn push_sfx(kind: u8, detail: &str) {
 /// body the disconnect paths used to run inline; it is reused by the
 /// deferred teardown task so a disconnect/error sound can finish playing.
 fn teardown_output_state() {
+    recording::on_disconnect();
     AUDIO_STREAM.lock().unwrap().0 = None;
     crate::clear_sfx_queue();
     CLIENT_BUFFERS.clear();
@@ -3560,6 +3573,13 @@ async fn event_loop(
                                     let mut opus_out = vec![0u8; 4000];
                                     match encoder.encode(&gained, FRAME, &mut opus_out) {
                                         Ok(len) => {
+                                            // Recording tap: our own uplink
+                                            // packet at the current mix slot.
+                                            recording::push_mic(
+                                                PLAYED_SAMPLES.load(Ordering::Relaxed)
+                                                    / FRAME_SIZE,
+                                                &opus_out[..len],
+                                            );
                                             let seq = state.audio_seq;
                                             state.audio_seq = state.audio_seq.wrapping_add(1);
                                             Some((seq, opus_out[..len].to_vec()))
@@ -3851,6 +3871,7 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
         s.connected = false;
         s.disconnect_requested = false;
         drop(s);
+        recording::on_disconnect();
         AUDIO_STREAM.lock().unwrap().0 = None;
         CLIENT_BUFFERS.clear();
         AUDIO_DECODERS.clear();
@@ -5682,4 +5703,57 @@ pub extern "C" fn ts_play_sfx(kind: u8) -> i32 {
     crate::SFX_QUEUE.push(kind);
     eprintln!("[sfx] manual preview kind={}", kind);
     0
+}
+
+// ─── Recording (see recording.rs) ───────────────────────────────────
+
+/// Arms the recorder for a new connection and sets the backtrack window.
+/// Dart calls this right after `connected`; resets any leftover state.
+/// `backtrack_secs` is clamped to 10..=3600.
+#[no_mangle]
+pub extern "C" fn ts_set_recording_config(backtrack_secs: u32, work_dir: *const c_char) -> u8 {
+    let dir = unsafe { cstr_to_string(work_dir) };
+    recording::set_config(backtrack_secs, dir);
+    1
+}
+
+/// Start a continuous recording. With `include_backtrack` != 0 the recording
+/// opens with the buffered backtrack window. Returns 1 on success, 0 if
+/// already running.
+#[no_mangle]
+pub extern "C" fn ts_start_recording(include_backtrack: u8) -> u8 {
+    recording::start_recording(include_backtrack != 0) as u8
+}
+
+/// Stop the continuous recording and pin its buffer until saved/discarded.
+/// Returns 1 on success, 0 if nothing was recording.
+#[no_mangle]
+pub extern "C" fn ts_stop_recording() -> u8 {
+    recording::stop_recording() as u8
+}
+
+/// Status snapshot for the save dialog as JSON:
+/// `{recording, hold, backtrack_secs, available_secs, recording_secs,
+///   tracks: [{client_id, uid, name}]}` (client_id 0 = our own mic track).
+#[no_mangle]
+pub extern "C" fn ts_get_recording_status() -> *mut c_char {
+    to_c_str(recording::status_json())
+}
+
+/// Save a recording window async. `window_ms == 0` saves the whole stopped
+/// recording, otherwise the trailing window. `mode`: 0 = one mixed file,
+/// 1 = one file per user. `dir` is the (Dart-created) output directory.
+/// Returns 1 when the save job was started, 0 when busy or there is no data;
+/// the result arrives as a `recording_saved` / `recording_save_failed` event.
+#[no_mangle]
+pub extern "C" fn ts_save_recording(window_ms: u32, mode: u8, dir: *const c_char) -> u8 {
+    let dir = unsafe { cstr_to_string(dir) };
+    recording::request_save(window_ms, mode, dir) as u8
+}
+
+/// Drop the pinned recording buffer without saving (dialog cancelled).
+#[no_mangle]
+pub extern "C" fn ts_discard_recording() -> u8 {
+    recording::discard();
+    1
 }

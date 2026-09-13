@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -9,10 +10,12 @@ import 'package:url_launcher/url_launcher.dart';
 import '../l10n/generated/app_localizations.dart';
 import '../models/app_locale.dart';
 import '../models/background_settings.dart';
+import '../models/recording_settings.dart';
 import '../models/ts_state.dart';
 import '../models/window_settings.dart';
 import '../services/audio_service.dart';
 import '../services/background_service.dart';
+import '../services/foreground_service.dart';
 import '../services/ota_service.dart';
 import '../services/sfx_pack_service.dart';
 import '../services/ts_ffi.dart';
@@ -587,6 +590,122 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// Recording: size of the always-on backtrack buffer. Sessions record
+  /// per-user tracks continuously; this setting only bounds how far back a
+  /// on-demand replay save can reach.
+  Widget _buildRecordingSection(BuildContext context) {
+    final al = AppLocalizations.of(context);
+    final recording = ref.watch(recordingSettingsProvider);
+
+    return Card(
+      color: const Color(0xFF1A1A2E),
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              al.recordingBacktrack,
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: Slider(
+                    value: recording.backtrackMinutes.toDouble(),
+                    min: 1,
+                    max: 60,
+                    divisions: 59,
+                    label: '${recording.backtrackMinutes}',
+                    activeColor: Colors.blue,
+                    onChanged: (v) => ref
+                        .read(recordingSettingsProvider.notifier)
+                        .setBacktrackMinutes(v.round()),
+                  ),
+                ),
+                Text(
+                  al.minutesCount(recording.backtrackMinutes),
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ],
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        al.recordingSaveDir,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _recordingSaveDirLabel(recording.saveDir),
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: _pickRecordingSaveDir,
+                  child: Text(al.recordingSaveDirPick),
+                ),
+                if (recording.saveDir.isNotEmpty)
+                  TextButton(
+                    onPressed: () => ref
+                        .read(recordingSettingsProvider.notifier)
+                        .setSaveDir(''),
+                    child: Text(al.recordingSaveDirReset),
+                  ),
+              ],
+            ),
+            Text(
+              al.recordingBacktrackHint,
+              style: const TextStyle(color: Colors.grey, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Short user-facing description of the current recordings location:
+  /// the localized default line, or the picked folder's own name (a SAF
+  /// tree URI on Android decodes to its last path segment).
+  String _recordingSaveDirLabel(String saveDir) {
+    final al = AppLocalizations.of(context);
+    if (saveDir.isEmpty) return al.recordingSaveDirDefault;
+    if (Platform.isAndroid) {
+      final raw = saveDir.split('/tree/').last;
+      final name = Uri.decodeComponent(raw.split(':').last);
+      return name.isEmpty ? saveDir : name;
+    }
+    final parts = saveDir.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty);
+    return parts.isEmpty ? saveDir : parts.last;
+  }
+
+  /// Opens the platform directory picker for the recordings location:
+  /// SAF tree picker on Android, system directory dialog on desktop.
+  /// Cancelled pickers keep the current setting.
+  Future<void> _pickRecordingSaveDir() async {
+    final al = AppLocalizations.of(context);
+    final picked = Platform.isAndroid
+        ? await ForegroundService.pickSaveDir()
+        : await FilePicker.getDirectoryPath(
+            dialogTitle: al.recordingSaveDirPick,
+          );
+    if (picked == null || !mounted) return;
+    await ref.read(recordingSettingsProvider.notifier).setSaveDir(picked);
+  }
+
   /// Everything audio related (voice parameters, mic test, channel sounds)
   /// folded into one expandable block, collapsed by default so the settings
   /// page stays scannable.
@@ -665,6 +784,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ),
+          const SizedBox(height: 12),
+          _buildRecordingSection(context),
           const SizedBox(height: 20),
           _buildSfxSection(context),
         ],

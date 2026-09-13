@@ -79,6 +79,13 @@ class AppLocalizationsEn extends AppLocalizations {
       'Tap to mute your mic. Long-press for voice settings (VAD, PTT, mic gain).';
 
   @override
+  String get guideRecordTitle => 'Recording';
+
+  @override
+  String get guideRecordDesc =>
+      'Tap: save the last minutes at any time, or record (optionally with them). Each user is a separate track.';
+
+  @override
   String get guideSpeakerTitle => 'Speaker';
 
   @override
@@ -936,4 +943,89 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get trayMenuQuit => 'Quit NEk0';
+
+  @override
+  String get recordingTitle => 'Recording';
+
+  @override
+  String get recordingLive => 'REC';
+
+  @override
+  String get recordingStopped => 'Stopped';
+
+  @override
+  String get recordingStart => 'Start recording';
+
+  @override
+  String recordingStartWithBacktrack(int minutes) {
+    return 'Start recording (with last $minutes min)';
+  }
+
+  @override
+  String get recordingStop => 'Stop recording';
+
+  @override
+  String recordingSaveReplay(int minutes) {
+    return 'Save last $minutes min';
+  }
+
+  @override
+  String get recordingSave => 'Save recording';
+
+  @override
+  String get recordingDiscard => 'Discard recording';
+
+  @override
+  String get recordingSaveTitle => 'Save recording';
+
+  @override
+  String get recordingSaveMixed => 'Mix into one file (includes own voice)';
+
+  @override
+  String recordingSaveSeparate(int count) {
+    return 'One file per user ($count tracks)';
+  }
+
+  @override
+  String get recordingSaving => 'Saving recording…';
+
+  @override
+  String recordingSavedCount(int count) {
+    return 'Saved $count file(s)';
+  }
+
+  @override
+  String get recordingSaveFailed => 'Recording save failed';
+
+  @override
+  String get recordingNothing => 'No recording to save';
+
+  @override
+  String recordingAutoSaved(int count) {
+    return 'Disconnected — auto-saved $count recording file(s)';
+  }
+
+  @override
+  String get recordingBacktrack => 'Backtrack recording';
+
+  @override
+  String get recordingSaveDir => 'Save location';
+
+  @override
+  String get recordingSaveDirDefault => 'Default (Downloads/NEk0/Recordings)';
+
+  @override
+  String get recordingSaveDirPick => 'Choose…';
+
+  @override
+  String get recordingSaveDirReset => 'Reset';
+
+  @override
+  String minutesCount(int n) {
+    return '$n min';
+  }
+
+  @override
+  String get recordingBacktrackHint =>
+      'Session audio is buffered while connected: save the last minutes at any time, and optionally start a recording with that prefix. Each user is kept as a separate track.';
 }

@@ -12,11 +12,13 @@ import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/group.dart';
 import '../models/privilege.dart';
+import '../models/recording_settings.dart';
 import '../models/server_info.dart';
 import '../models/ts_state.dart';
 import '../services/avatar_cache.dart';
 import '../services/avatar_upload.dart';
 import '../services/foreground_service.dart';
+import '../services/recording_service.dart';
 import '../services/ts_ffi.dart';
 import '../widgets/channel_edit_screen.dart';
 import '../widgets/channel_password_dialog.dart';
@@ -47,6 +49,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
 
   // Targets for the first-use spotlight guide.
   final GlobalKey _micKey = GlobalKey();
+  final GlobalKey _recordKey = GlobalKey();
   final GlobalKey _speakerKey = GlobalKey();
   final GlobalKey _chatKey = GlobalKey();
   final GlobalKey _treeKey = GlobalKey();
@@ -160,6 +163,12 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         padding: 4,
         title: al.guideMicTitle,
         description: al.guideMicDesc,
+      ),
+      TourStep(
+        targetKey: _recordKey,
+        padding: 4,
+        title: al.guideRecordTitle,
+        description: al.guideRecordDesc,
       ),
       TourStep(
         targetKey: _speakerKey,
@@ -964,6 +973,26 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
                 child: Icon(Icons.mic, color: micColor, size: 28),
               ),
               const SizedBox(width: 24),
+              // --- Recording menu (continuous record + backtrack save) ---
+              ListenableBuilder(
+                listenable: RecordingService.instance,
+                builder: (ctx, _) {
+                  final active = RecordingService.instance.recording;
+                  return Tooltip(
+                    message: AppLocalizations.of(ctx).recordingTitle,
+                    child: GestureDetector(
+                      key: _recordKey,
+                      onTap: _showRecordingSheet,
+                      child: Icon(
+                        Icons.fiber_manual_record,
+                        color: active ? Colors.red : Colors.grey,
+                        size: 28,
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(width: 24),
               // --- Away toggle ---
               Tooltip(
                 message: conn.away
@@ -1065,6 +1094,270 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         );
       },
     );
+  }
+
+  // ─── Recording ─────────────────────────────────────────────────────
+
+  /// Recording menu: start/stop the continuous multi-track recording, save
+  /// a replay of the last backtrack window, or save/discard a just-stopped
+  /// recording whose buffer is still pinned on the Rust side.
+  void _showRecordingSheet() {
+    final al = AppLocalizations.of(context);
+    final minutes = ref.read(recordingSettingsProvider).backtrackMinutes;
+    final status = RecordingService.instance.status();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF12122A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+                child: Row(
+                  children: [
+                    Text(
+                      al.recordingTitle,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (status.recording)
+                      Text(
+                        '${al.recordingLive} ${_fmtClock(status.recordingSecs)}',
+                        style: const TextStyle(color: Colors.red, fontSize: 13),
+                      )
+                    else if (status.hold)
+                      Text(
+                        '${al.recordingStopped} ${_fmtClock(status.recordingSecs)}',
+                        style: const TextStyle(
+                          color: Colors.orange,
+                          fontSize: 13,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (status.recording)
+                ListTile(
+                  leading: const Icon(Icons.stop, color: Colors.red),
+                  title: Text(
+                    al.recordingStop,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    TsNative.stopRecording();
+                    _showRecordingSaveDialog(whole: true);
+                  },
+                )
+              else ...[
+                // Two start entries: with the backtrack prefix (the file
+                // opens with the last N minutes), or from the current moment.
+                ListTile(
+                  leading: const Icon(
+                    Icons.fiber_manual_record,
+                    color: Colors.green,
+                  ),
+                  title: Text(
+                    al.recordingStartWithBacktrack(minutes),
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  enabled: status.availableSecs > 0,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    TsNative.startRecording(includeBacktrack: true);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(
+                    Icons.fiber_manual_record,
+                    color: Colors.blue,
+                  ),
+                  title: Text(
+                    al.recordingStart,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    TsNative.startRecording(includeBacktrack: false);
+                  },
+                ),
+              ],
+              ListTile(
+                leading: const Icon(Icons.history, color: Colors.blue),
+                title: Text(
+                  al.recordingSaveReplay(minutes),
+                  style: const TextStyle(color: Colors.white),
+                ),
+                enabled: status.availableSecs > 0,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _showRecordingSaveDialog(whole: false);
+                },
+              ),
+              if (status.hold) ...[
+                ListTile(
+                  leading: const Icon(Icons.save, color: Colors.orange),
+                  title: Text(
+                    al.recordingSave,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    _showRecordingSaveDialog(whole: true);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.delete_outline, color: Colors.red),
+                  title: Text(
+                    al.recordingDiscard,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    TsNative.discardRecording();
+                  },
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Mix-vs-separate chooser followed by the actual save + export to
+  /// Downloads. Cancelling keeps the pinned buffer (it can still be saved
+  /// from the menu or is auto-saved on disconnect).
+  Future<void> _showRecordingSaveDialog({required bool whole}) async {
+    if (!mounted) return;
+    final al = AppLocalizations.of(context);
+    final status = RecordingService.instance.status();
+    if (whole && status.recordingSecs <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(al.recordingNothing),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+    var selection = 0; // 0 = mixed, 1 = separate per-user files
+    final names = status.tracks.map((t) => t.name).toList();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: Text(
+          al.recordingSaveTitle,
+          style: const TextStyle(color: Colors.white),
+        ),
+        content: StatefulBuilder(
+          builder: (ctx, setDialogState) => RadioGroup<int>(
+            groupValue: selection,
+            onChanged: (v) => setDialogState(() => selection = v ?? 0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioListTile<int>(
+                  value: 0,
+                  title: Text(
+                    al.recordingSaveMixed,
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                ),
+                RadioListTile<int>(
+                  value: 1,
+                  title: Text(
+                    al.recordingSaveSeparate(names.length),
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                  subtitle: names.isEmpty
+                      ? null
+                      : Text(
+                          names.join(', '),
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(al.cancel),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(al.save),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final minutes = ref.read(recordingSettingsProvider).backtrackMinutes;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(al.recordingSaving),
+        duration: const Duration(seconds: 60),
+      ),
+    );
+    try {
+      final saved = await RecordingService.instance.saveAndExport(
+        windowMs: whole ? 0 : minutes * 60 * 1000,
+        mixed: selection == 0,
+        mixedDisplayName: _recordingBaseName(),
+      );
+      if (!mounted) return;
+      messenger.clearSnackBars();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(al.recordingSavedCount(saved.length)),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.clearSnackBars();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('${al.recordingSaveFailed}: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  /// Timestamped base name for the mixed export file.
+  String _recordingBaseName() {
+    final n = DateTime.now();
+    String p2(int v) => v.toString().padLeft(2, '0');
+    return 'NEk0_${n.year}${p2(n.month)}${p2(n.day)}_${p2(n.hour)}${p2(n.minute)}${p2(n.second)}';
+  }
+
+  /// mm:ss (or h:mm:ss) for the recording status lines.
+  String _fmtClock(int seconds) {
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    String p2(int v) => v.toString().padLeft(2, '0');
+    return h > 0 ? '$h:${p2(m)}:${p2(s)}' : '${p2(m)}:${p2(s)}';
   }
 }
 

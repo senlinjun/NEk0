@@ -6,6 +6,7 @@ import '../l10n/generated/app_localizations.dart';
 import '../models/server.dart';
 import '../models/ts_state.dart';
 import '../services/ota_service.dart';
+import '../services/recording_service.dart';
 import '../widgets/server_form_dialog.dart';
 import '../widgets/spotlight_tour.dart';
 import 'server_screen.dart';
@@ -30,6 +31,38 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _maybeAutoCheckUpdate(),
     );
+    // Toast the outcome of a disconnect auto-save (the recording menu is
+    // gone by then; this screen is where the user lands afterwards).
+    RecordingService.instance.addListener(_onRecordingServiceChanged);
+  }
+
+  @override
+  void dispose() {
+    RecordingService.instance.removeListener(_onRecordingServiceChanged);
+    super.dispose();
+  }
+
+  void _onRecordingServiceChanged() {
+    final svc = RecordingService.instance;
+    if (!mounted) return;
+    if (svc.pendingAutoExportCount != null) {
+      final count = svc.pendingAutoExportCount!;
+      svc.pendingAutoExportCount = null;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppLocalizations.of(context).recordingAutoSaved(count)),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } else if (svc.pendingAutoExportError != null) {
+      svc.pendingAutoExportError = null;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppLocalizations.of(context).recordingSaveFailed),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 
   /// Show the one-step "Add server" guide on first launch only.

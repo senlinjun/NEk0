@@ -29,6 +29,8 @@
   "chat": "Chat",
   "guideMicTitle": "Mic",
   "guideMicDesc": "Tap to mute your mic. Long-press for voice settings (VAD, PTT, mic gain).",
+  "guideRecordTitle": "Recording",
+  "guideRecordDesc": "Tap: save the last minutes at any time, or record (optionally with them). Each user is a separate track.",
   "guideSpeakerTitle": "Speaker",
   "guideSpeakerDesc": "Mute everyone's audio (output).",
   "guideChatTitle": "Chat",
@@ -409,5 +411,59 @@
   "closeDialogDontAskAgain": "Don't ask again",
   "trayMenuShow": "Show NEk0",
   "trayMenuDisconnect": "Disconnect",
-  "trayMenuQuit": "Quit NEk0"
+  "trayMenuQuit": "Quit NEk0",
+  "recordingTitle": "Recording",
+  "recordingLive": "REC",
+  "recordingStopped": "Stopped",
+  "recordingStart": "Start recording",
+  "recordingStartWithBacktrack": "Start recording (with last {minutes} min)",
+  "@recordingStartWithBacktrack": {
+    "placeholders": {
+      "minutes": { "type": "int" }
+    }
+  },
+  "recordingStop": "Stop recording",
+  "recordingSaveReplay": "Save last {minutes} min",
+  "@recordingSaveReplay": {
+    "placeholders": {
+      "minutes": { "type": "int" }
+    }
+  },
+  "recordingSave": "Save recording",
+  "recordingDiscard": "Discard recording",
+  "recordingSaveTitle": "Save recording",
+  "recordingSaveMixed": "Mix into one file (includes own voice)",
+  "recordingSaveSeparate": "One file per user ({count} tracks)",
+  "@recordingSaveSeparate": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "recordingSaving": "Saving recording…",
+  "recordingSavedCount": "Saved {count} file(s)",
+  "@recordingSavedCount": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "recordingSaveFailed": "Recording save failed",
+  "recordingNothing": "No recording to save",
+  "recordingAutoSaved": "Disconnected — auto-saved {count} recording file(s)",
+  "@recordingAutoSaved": {
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "recordingBacktrack": "Backtrack recording",
+  "recordingSaveDir": "Save location",
+  "recordingSaveDirDefault": "Default (Downloads/NEk0/Recordings)",
+  "recordingSaveDirPick": "Choose…",
+  "recordingSaveDirReset": "Reset",
+  "minutesCount": "{n} min",
+  "@minutesCount": {
+    "placeholders": {
+      "n": { "type": "int" }
+    }
+  },
+  "recordingBacktrackHint": "Session audio is buffered while connected: save the last minutes at any time, and optionally start a recording with that prefix. Each user is kept as a separate track."
 }

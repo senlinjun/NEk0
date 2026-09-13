@@ -77,6 +77,12 @@ class AppLocalizationsZh extends AppLocalizations {
   String get guideMicDesc => '点击静音麦克风。长按打开语音设置（VAD、PTT、麦克风增益）。';
 
   @override
+  String get guideRecordTitle => '录音';
+
+  @override
+  String get guideRecordDesc => '点击打开录音菜单：可随时保存最近的回溯，也可开始录音（可选包含回溯）。每位用户独立音轨。';
+
+  @override
   String get guideSpeakerTitle => '扬声器';
 
   @override
@@ -919,4 +925,89 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get trayMenuQuit => '退出 NEk0';
+
+  @override
+  String get recordingTitle => '录音';
+
+  @override
+  String get recordingLive => '录音中';
+
+  @override
+  String get recordingStopped => '已停止';
+
+  @override
+  String get recordingStart => '开始录音';
+
+  @override
+  String recordingStartWithBacktrack(int minutes) {
+    return '开始录音（含最近 $minutes 分钟）';
+  }
+
+  @override
+  String get recordingStop => '停止录音';
+
+  @override
+  String recordingSaveReplay(int minutes) {
+    return '保存最近 $minutes 分钟';
+  }
+
+  @override
+  String get recordingSave => '保存录音';
+
+  @override
+  String get recordingDiscard => '放弃录音';
+
+  @override
+  String get recordingSaveTitle => '保存录音';
+
+  @override
+  String get recordingSaveMixed => '混合为一个文件（含自己的声音）';
+
+  @override
+  String recordingSaveSeparate(int count) {
+    return '按用户分别保存（$count 个音轨）';
+  }
+
+  @override
+  String get recordingSaving => '正在保存录音…';
+
+  @override
+  String recordingSavedCount(int count) {
+    return '已保存 $count 个文件';
+  }
+
+  @override
+  String get recordingSaveFailed => '录音保存失败';
+
+  @override
+  String get recordingNothing => '没有可保存的录音';
+
+  @override
+  String recordingAutoSaved(int count) {
+    return '连接已断开，已自动保存 $count 个录音文件';
+  }
+
+  @override
+  String get recordingBacktrack => '回溯录音';
+
+  @override
+  String get recordingSaveDir => '保存位置';
+
+  @override
+  String get recordingSaveDirDefault => '默认（下载/NEk0/Recordings）';
+
+  @override
+  String get recordingSaveDirPick => '选择…';
+
+  @override
+  String get recordingSaveDirReset => '重置';
+
+  @override
+  String minutesCount(int n) {
+    return '$n 分钟';
+  }
+
+  @override
+  String get recordingBacktrackHint =>
+      '连接期间持续缓冲会话语音：可随时保存最近一段回溯，也可以让录音以这段回溯开头。每位用户保存为独立音轨。';
 }
