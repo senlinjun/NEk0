@@ -6,6 +6,9 @@ use crate::{
     ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
     SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
     PendingFtList, recording,
+    JITTER_STATS, MIN_SURPLUS_FRAMES, OUTPUT_PERIOD_MS, OUTPUT_RATE,
+    TALKING_CLIENTS, TARGET_FRAMES_CEIL, TARGET_FRAMES_FLOOR, CLOCK_REF,
+    play_time_ms, publish_clock_ref,
 };
 
 use futures::prelude::*;
@@ -439,12 +442,10 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                 server_groups,
                 server_group_names,
                 channel_group: c.channel_group.0 as u32,
-                is_talking: {
-                    let state = STATE.lock();
-                    state.talking_clients.get(&(c.id.0 as u16))
-                        .map(|t| t.elapsed().as_millis() < 500)
-                        .unwrap_or(false)
-                },
+                is_talking: TALKING_CLIENTS
+                    .get(&(c.id.0 as u16))
+                    .map(|t| t.elapsed().as_millis() < 500)
+                    .unwrap_or(false),
                 volume,
                 pos_x: pos.map(|p| p.0),
                 pos_y: pos.map(|p| p.1),
@@ -766,9 +767,11 @@ fn unwrap_seq(seq: u16, base: u16) -> u32 {
 /// Decode an incoming audio packet with a per-client OpusDecoder and push
 /// the decoded frame into that client's lock-free jitter buffer.
 /// No STATE lock held — decoders and buffers are in DashMaps.
+///
+/// The playout lead of the stream this packet belongs to is anchored here and
+/// adapted from the arrival margins measured here (see [crate::JitterStats]).
 fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     const FRAME: usize = 960;
-    const TARGET_DELAY: u64 = 6; // 120ms jitter buffer (absorbs network blips)
     const REBASE_LEAD: u64 = 4; // reader ≥4 frames (80ms) ahead before realigning
 
     // Extract data from the self_cell-wrapped buffer
@@ -831,36 +834,40 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
         frame[i] = (s.clamp(-1.0, 1.0) * 32767.0).clamp(-32768.0, 32767.0) as i16;
     }
 
-    // Get or create per-client jitter buffer — DashMap, no STATE lock
-    let buf = CLIENT_BUFFERS.entry(from_id).or_insert_with(|| {
-        let b = crate::ClientJitterBuffer::new();
-        // Inherit persisted per-UID settings when creating a new jitter
-        // buffer: resolve the client's UID from the roster, then look up the
-        // UID-keyed tables (volume + 2D position survive reconnects).
-        let state = STATE.lock();
-        let uid = state
-            .clients
-            .iter()
-            .find(|c| c.id as u16 == from_id)
-            .and_then(|c| c.uid.as_ref());
-        if let Some(db) = uid.and_then(|uid| state.client_volumes.get(uid.as_str()).copied()) {
-            let gain = 10.0_f32.powf(db / 20.0);
-            b.volume.store(f32::to_bits(gain), Ordering::Release);
-        }
-        if let Some(pos) = uid.and_then(|uid| state.client_positions.get(uid.as_str()).copied()) {
-            b.pos_x.store(f32::to_bits(pos.0), Ordering::Release);
-            b.pos_y.store(f32::to_bits(pos.1), Ordering::Release);
-        }
-        drop(state);
-        b
-    });
+    // Get or create the per-client jitter buffer — DashMap, no STATE lock.
+    // A freshly created buffer is published to the audio-callback snapshot
+    // immediately: the snapshot is otherwise only refreshed by the 500ms
+    // maintenance tick, and a client who starts talking in between would have
+    // the start of their burst skipped by the mixer.
+    let mut created = false;
+    if !CLIENT_BUFFERS.contains_key(&from_id) {
+        CLIENT_BUFFERS.insert(from_id, crate::ClientJitterBuffer::new());
+        created = true;
+    }
+    let Some(buf) = CLIENT_BUFFERS.get(&from_id) else {
+        return;
+    };
+    if created {
+        inherit_client_settings(&buf, from_id);
+        publish_active_client(from_id);
+    }
+    // Adaptive playout state for this speaker. Held for the rest of the packet
+    // so the anchor, the re-anchor and the margin fold share one lookup (this
+    // is the same thread that owns the packet; nothing else writes it).
+    let stats = JITTER_STATS.entry(from_id).or_default();
+    let now = crate::now_ms();
+    let period_ms = OUTPUT_PERIOD_MS.load(Ordering::Relaxed) as u64;
 
     // Init baseline with compare_exchange on the packed base_pair (prevents
     // races when two packets arrive simultaneously).
     let tmp_global = unwrap_seq(seq_u16, 0);
     if buf.base_pair.load(Ordering::Relaxed) == 0 {
+        // Lead learned for this client on earlier bursts; TARGET_FRAMES_INIT
+        // (the historical fixed 120ms) until anything has been measured.
+        let lead = stats.anchor_target(now, period_ms);
+        buf.target_frames.store(lead, Ordering::Relaxed);
         let now_slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / crate::FRAME_SIZE;
-        let init_pair = ((tmp_global as u64) << 32) | (now_slot + TARGET_DELAY);
+        let init_pair = ((tmp_global as u64) << 32) | (now_slot + lead as u64);
         if buf.base_pair.compare_exchange(0, init_pair, Ordering::Release, Ordering::Relaxed).is_ok() {
             // Baseline established with this packet.
         }
@@ -880,6 +887,11 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
         let distance = forward.min(backward);
         if distance > 1000 {
             return;
+        }
+        // A forward jump (not a reordered packet, which wraps `forward` to a
+        // huge value) = one or more packets never arrived.
+        if forward > 1 && forward <= 1000 {
+            stats.gap_total.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -901,8 +913,16 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
             && behind >= REBASE_LEAD
             && behind < 4096
         {
+            // `behind >= REBASE_LEAD` means the mixing clock is already past
+            // every frame still in the ring (the reader is further ahead than
+            // the frames in flight), so none of them is going to play: this is
+            // the one moment where the playout lead can be *shortened* without
+            // cutting audio, which is why the adaptive target is applied here
+            // and never mid-stream.
+            let lead = stats.anchor_target(now, period_ms);
+            buf.target_frames.store(lead, Ordering::Relaxed);
             let new_base_seq = global_seq;
-            let new_base_slot = current_slot + TARGET_DELAY;
+            let new_base_slot = current_slot + lead as u64;
             // Non-destructive rebase: re-home frames that are still playable
             // under the new mapping instead of wiping the whole window.
             // Old slot i held the newest frame with seq ≡ old_base + i
@@ -933,11 +953,28 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
                 Ordering::Release,
             );
             eprintln!(
-                "[jbuf] rebase client={} old_base={} new_base={} behind={} kept={} freed={}",
-                from_id, base_seq, new_base_seq, behind, kept, freed
+                "[jbuf] rebase client={} old_base={} new_base={} behind={} lead={} kept={} freed={}",
+                from_id, base_seq, new_base_seq, behind, lead, kept, freed
             );
             base_seq = new_base_seq; // local sync after rebase
             base_slot = new_base_slot; // recording tap maps seq → slot below
+        }
+    }
+
+    // Fold this packet's arrival margin into the adaptive state: the time it
+    // waits before the slot it belongs to is mixed. A packet that arrived too
+    // late to make its own slot makes `observe_margin` ask for one more frame
+    // of lead, which is applied by pushing the whole mapping one slot later —
+    // the reader then expects one sequence number earlier than it has already
+    // drained, so the mixer inserts a frame of silence and no packet is cut.
+    let play_slot = base_slot.wrapping_add(global_seq.wrapping_sub(base_seq) as u64);
+    if let Some(play_ms) = play_time_ms(play_slot) {
+        if stats.observe_margin(play_ms - now as i64, now) {
+            base_slot = base_slot.wrapping_add(1);
+            buf.base_pair.store(
+                ((base_seq as u64) << 32) | base_slot,
+                Ordering::Release,
+            );
         }
     }
 
@@ -967,8 +1004,42 @@ fn decode_to_client_buffer(audio_buf: InAudioBuf) {
     buf.write_seq.store(global_seq, Ordering::Release);
     buf.last_packet.store(Some(Instant::now()));
 
-    // Briefly lock STATE only for talking_clients update (monotonic Instant)
-    STATE.lock().talking_clients.insert(from_id, Instant::now());
+    // UI "is talking" heartbeat — a lock-free map, not STATE: this runs for
+    // every voice packet and must never queue behind Dart's polling calls.
+    TALKING_CLIENTS.insert(from_id, Instant::now());
+}
+
+/// Inherit the persisted per-UID settings (volume + 2D position survive
+/// reconnects) into a freshly created jitter buffer.
+fn inherit_client_settings(buf: &crate::ClientJitterBuffer, from_id: u16) {
+    let state = STATE.lock();
+    let uid = state
+        .clients
+        .iter()
+        .find(|c| c.id as u16 == from_id)
+        .and_then(|c| c.uid.as_ref());
+    if let Some(db) = uid.and_then(|uid| state.client_volumes.get(uid.as_str()).copied()) {
+        let gain = 10.0_f32.powf(db / 20.0);
+        buf.volume.store(f32::to_bits(gain), Ordering::Release);
+    }
+    if let Some(pos) = uid.and_then(|uid| state.client_positions.get(uid.as_str()).copied()) {
+        buf.pos_x.store(f32::to_bits(pos.0), Ordering::Release);
+        buf.pos_y.store(f32::to_bits(pos.1), Ordering::Release);
+    }
+}
+
+/// Add one client id to the audio-callback snapshot without waiting for the
+/// next maintenance tick. Copy-on-write of a list that holds a handful of
+/// entries, and only on the first packet of a speaker — the cost is nothing
+/// next to losing the first syllable of their burst.
+fn publish_active_client(id: u16) {
+    let current = ACTIVE_CLIENT_IDS.load();
+    if current.contains(&id) {
+        return;
+    }
+    let mut ids = current.as_ref().clone();
+    ids.push(id);
+    ACTIVE_CLIENT_IDS.store(Arc::new(ids));
 }
 
 // ─── Channel-event SFX playback ─────────────────────────────────────
@@ -1101,17 +1172,22 @@ impl OutRing {
 ///
 /// This IS the mixing clock: PLAYED_SAMPLES advances by FRAME_SIZE (per-
 /// channel samples — the logical frame number PLAYED_SAMPLES / FRAME_SIZE
-/// advances at 50/s regardless of the output channel count) and the jitter
-/// buffers schedule packets against it (base_slot + TARGET_DELAY), so
-/// generation must be driven strictly on demand as the output pass drains
-/// the ring — never ahead of real time.
+/// advances at 50/s regardless of the output channel count; the resampling
+/// loop may nudge that rate by up to 1% to drain a backlog). The jitter
+/// buffers schedule packets against it (`base_slot` plus the speaker's
+/// adaptive playout lead), so generation must be driven strictly on demand as
+/// the output pass drains the ring — never ahead of real time.
 fn gen_output_mix_frame(ring: &mut OutRing, sfx_slots: &mut [SfxSlot; 2]) {
     let slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / FRAME_SIZE;
     let mut mix_l = [0.0f32; FRAME_SIZE as usize];
     let mut mix_r = [0.0f32; FRAME_SIZE as usize];
     let mut active = 0u32;
 
-    // Phase A: collect one frame from each active client via snapshot
+    // Phase A: collect one frame from each active client via snapshot.
+    // Also track the smallest surplus (frames buffered ahead of the one being
+    // mixed, minus the speaker's own playout target) for the clock compression
+    // control loop at the end of this function.
+    let mut surplus_min = u32::MAX;
     let client_ids = ACTIVE_CLIENT_IDS.load();
     for &client_id in client_ids.iter() {
         if let Some(buf) = CLIENT_BUFFERS.get(&client_id) {
@@ -1131,6 +1207,15 @@ fn gen_output_mix_frame(ring: &mut OutRing, sfx_slots: &mut [SfxSlot; 2]) {
                 .wrapping_add(base_seq as u64);
             let write_seq = buf.write_seq.load(Ordering::Acquire) as u64;
             if write_seq >= expected_seq {
+                // Frames buffered ahead of the one playing now, over and above
+                // what this speaker's adaptive lead asks for.
+                let target = buf
+                    .target_frames
+                    .load(Ordering::Relaxed)
+                    .clamp(TARGET_FRAMES_FLOOR, TARGET_FRAMES_CEIL) as u64;
+                surplus_min = surplus_min.min(
+                    (write_seq - expected_seq).saturating_sub(target) as u32,
+                );
                 let idx = (expected_seq.wrapping_sub(base_seq as u64)) as usize
                     % crate::JITTER_SLOTS;
                 if let Some(frame) = buf.slots[idx].swap(None) {
@@ -1239,6 +1324,17 @@ fn gen_output_mix_frame(ring: &mut OutRing, sfx_slots: &mut [SfxSlot; 2]) {
     for i in 0..FRAME_SIZE as usize {
         ring.push([mix_l[i], mix_r[i]]);
     }
+    // Publish the slot just generated together with the wall-clock time it was
+    // generated at. The receive path turns this into "how long will an
+    // arriving packet wait before it plays", which is what the adaptive
+    // playout lead is built from.
+    publish_clock_ref(slot);
+    // Smallest surplus across the speakers mixed above (0 when nobody has
+    // audio in flight) — the caller's clock compression is driven by this.
+    MIN_SURPLUS_FRAMES.store(
+        if surplus_min == u32::MAX { 0 } else { surplus_min },
+        Ordering::Relaxed,
+    );
     // Recording tap: capture the exact playback mix (positional gains, per-
     // client volumes, SFX). The recorder thread encodes it to Opus.
     recording::push_mix(slot, &mix_l, &mix_r);
@@ -1251,6 +1347,59 @@ fn gen_output_mix_frame(ring: &mut OutRing, sfx_slots: &mut [SfxSlot; 2]) {
     }
     CB_STATS.expected_next_played.store(old + FRAME_SIZE, Ordering::Relaxed);
     CB_STATS.mix_frames.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Extra speed applied to the mixing clock, as a fraction (0.0 = none).
+///
+/// Driven by the smallest surplus across active speakers — compressing only
+/// while *everyone* has slack cannot pull anyone below their own playout
+/// target. 0.2% per surplus frame, capped at 1%: about 17 cents of pitch,
+/// inaudible on speech, and enough to shed a 120ms backlog in ~10s.
+fn compression_eps(min_surplus_frames: u32) -> f64 {
+    const EPS_PER_FRAME: f64 = 0.002;
+    const EPS_MAX: f64 = 0.01;
+    (min_surplus_frames.saturating_sub(1) as f64 * EPS_PER_FRAME).min(EPS_MAX)
+}
+
+/// Diagnostic snapshot for the 5s stats line:
+/// (min/max frames buffered ahead of the mix clock, largest playout target,
+/// late arrivals, sequence gaps) over the speakers currently being mixed.
+fn jitter_snapshot() -> (u64, u64, u64, u64, u64) {
+    let slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / FRAME_SIZE;
+    let mut depth_min = u64::MAX;
+    let mut depth_max = 0u64;
+    let mut target = 0u64;
+    for entry in CLIENT_BUFFERS.iter() {
+        let buf = entry.value();
+        let base_pair = buf.base_pair.load(Ordering::Acquire);
+        if base_pair == 0 {
+            continue;
+        }
+        let base_seq = (base_pair >> 32) as u32;
+        let base_slot = base_pair & 0xFFFF_FFFF;
+        let expected = slot.wrapping_sub(base_slot).wrapping_add(base_seq as u64);
+        let write = buf.write_seq.load(Ordering::Acquire) as u64;
+        if write < expected {
+            continue; // silent speaker, nothing in flight
+        }
+        depth_min = depth_min.min(write - expected);
+        depth_max = depth_max.max(write - expected);
+        target = target.max(
+            buf.target_frames
+                .load(Ordering::Relaxed)
+                .clamp(TARGET_FRAMES_FLOOR, TARGET_FRAMES_CEIL) as u64,
+        );
+    }
+    let mut late = 0u64;
+    let mut gaps = 0u64;
+    for entry in JITTER_STATS.iter() {
+        late += entry.value().late_total.load(Ordering::Relaxed);
+        gaps += entry.value().gap_total.load(Ordering::Relaxed);
+    }
+    if depth_min == u64::MAX {
+        depth_min = 0;
+    }
+    (depth_min, depth_max, target, late, gaps)
 }
 
 /// Rebuilds the cpal output stream. The internal mixing clock stays 48 kHz
@@ -1386,6 +1535,11 @@ fn restart_output_stream_inner() {
     PLAYED_SAMPLES.store(0, Ordering::Relaxed);
     ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
     CB_STATS.expected_next_played.store(0, Ordering::Relaxed);
+    // Nothing may be scheduled against the old stream's clock, and every
+    // speaker is anchored anew below — so the learned profiles stay valid, but
+    // the callbacks must not measure a margin across the restart.
+    CLOCK_REF.store(0, Ordering::Relaxed);
+    MIN_SURPLUS_FRAMES.store(0, Ordering::Relaxed);
 
     let host = cpal::default_host();
     let Some(device) = pick_device(&host, false) else {
@@ -1451,10 +1605,33 @@ fn restart_output_stream_inner() {
                 let rs_s0 = std::cell::Cell::new([0.0f32, 0.0f32]);
                 let rs_s1: std::cell::Cell<Option<[f32; 2]>> = std::cell::Cell::new(None);
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    // Callback interval: the rate the mixing clock actually
+                    // advances at, i.e. the granularity a frame has to be
+                    // buffered ahead by (published as OUTPUT_PERIOD_MS).
+                    let entry_ns = crate::now_ns();
+                    let prev_ns = CB_STATS
+                        .last_cb_entry_ns
+                        .swap(entry_ns, Ordering::Relaxed);
+                    if prev_ns != 0 && entry_ns > prev_ns {
+                        CB_STATS
+                            .last_interval_us
+                            .store((entry_ns - prev_ns) / 1_000, Ordering::Relaxed);
+                    }
+
                     let mut ring = ring.borrow_mut();
                     let mut sfx = sfx_slots.borrow_mut();
 
                     let n_out = data.len() / channels;
+                    // Clock compression: while every active speaker has audio
+                    // buffered beyond what their own playout target needs, the
+                    // mix clock is advanced slightly faster than the device
+                    // clock (≤1%) until that surplus is gone. This is what
+                    // stops a slow sender/device clock mismatch from becoming
+                    // ever-growing delay, and it is the only lever that can
+                    // shorten a stream mid-audio: a shrink at an anchor cannot
+                    // cut audio, a mid-stream one would.
+                    let step = ratio
+                        * (1.0 + compression_eps(MIN_SURPLUS_FRAMES.load(Ordering::Relaxed)));
                     let mut frac = rs_frac.get();
                     let mut s0 = rs_s0.get();
                     let mut s1 = rs_s1.take();
@@ -1477,7 +1654,7 @@ fn restart_output_stream_inner() {
                         } else {
                             data[base] = (l + r) * 0.5;
                         }
-                        frac += ratio;
+                        frac += step;
                         while frac >= 1.0 {
                             frac -= 1.0;
                             s0 = s1v;
@@ -1512,9 +1689,10 @@ fn restart_output_stream_inner() {
             Ok(stream) => match stream.play() {
                 Ok(()) => {
                     crate::AUDIO_STREAM.lock().unwrap().0 = Some(stream);
+                    OUTPUT_RATE.store(config.sample_rate.0, Ordering::Relaxed);
                     eprintln!(
-                        "cpal: output stream started ({} Hz, {} ch, mix resample ratio {:.4})",
-                        config.sample_rate.0, config.channels, ratio
+                        "cpal: output stream started ({} Hz, {} ch, mix resample ratio {:.4}, requested buffer {:?})",
+                        config.sample_rate.0, config.channels, ratio, config.buffer_size
                     );
                     return;
                 }
@@ -1573,6 +1751,26 @@ fn spawn_maintenance_task() {
                             AUDIO_DECODERS_STEREO.remove(id);
                         }
                     }
+
+                    // "Is talking" heartbeats: this used to run once per event
+                    // loop iteration (i.e. per voice packet), where the map scan
+                    // sat directly in the audio receive path. The consumers all
+                    // filter on a 500ms window anyway, so a coarse sweep is
+                    // enough.
+                    TALKING_CLIENTS.retain(|_, t| t.elapsed().as_millis() < 10_000);
+
+                    // Drop learned network profiles for clients that are gone
+                    // from the roster, so a recycled client id cannot inherit
+                    // another speaker's jitter history.
+                    let roster: HashSet<u16> = STATE
+                        .lock()
+                        .clients
+                        .iter()
+                        .map(|c| c.id as u16)
+                        .collect();
+                    if !roster.is_empty() {
+                        JITTER_STATS.retain(|id, _| roster.contains(id));
+                    }
                 }
                 _ = snapshot_tick.tick() => {
                     // Refresh client ID snapshot for the audio callback
@@ -1595,10 +1793,27 @@ fn spawn_maintenance_task() {
                     let samps = CB_STATS.samples_total.swap(0, Ordering::Relaxed);
                     let mixes = CB_STATS.mix_frames.swap(0, Ordering::Relaxed);
                     let mism = CB_STATS.played_mismatches.swap(0, Ordering::Relaxed);
-                    let intv_us = CB_STATS.last_interval_us.swap(0, Ordering::Relaxed);
+                    // A gauge, not a counter: swapping would report 0 for any
+                    // window in which the stream stopped again.
+                    let intv_us = CB_STATS.last_interval_us.load(Ordering::Relaxed);
+                    // Device period: samples handed to the driver per callback.
+                    // It is the mixing clock's granularity and the floor under
+                    // any playout slack — a host that grants a much larger
+                    // period than the requested 960 frames is worth seeing.
+                    if cbs > 0 && samps > 0 {
+                        let rate = OUTPUT_RATE.load(Ordering::Relaxed).max(1) as u64;
+                        let period_ms = ((samps / cbs).saturating_mul(1000) / rate).max(1);
+                        OUTPUT_PERIOD_MS.store(period_ms as u32, Ordering::Relaxed);
+                    }
                     if cbs > 0 {
-                        eprintln!("[cpal-stats] callbacks={} samples={} mix_frames={} interval_us={} mismatches={}",
-                            cbs, samps, mixes, intv_us, mism);
+                        let (d_min, d_max, target, late, gaps) = jitter_snapshot();
+                        eprintln!(
+                            "[cpal-stats] callbacks={} samples={} mix_frames={} interval_us={} mismatches={} period_ms={} depth_ms={}..{} target_ms={} late={} gaps={}",
+                            cbs, samps, mixes, intv_us, mism,
+                            OUTPUT_PERIOD_MS.load(Ordering::Relaxed),
+                            d_min * crate::FRAME_MS, d_max * crate::FRAME_MS,
+                            target * crate::FRAME_MS, late, gaps
+                        );
                     }
                 }
             }
@@ -1624,6 +1839,12 @@ fn teardown_output_state() {
     AUDIO_DECODERS_STEREO.clear();
     PLAYED_SAMPLES.store(0, Ordering::Relaxed);
     ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
+    // The clock reference and the learned playout profiles belong to the
+    // connection that just ended — client ids are only unique within it.
+    CLOCK_REF.store(0, Ordering::Relaxed);
+    JITTER_STATS.clear();
+    TALKING_CLIENTS.clear();
+    MIN_SURPLUS_FRAMES.store(0, Ordering::Relaxed);
 }
 
 /// Queue a disconnect/error SFX and defer the output-stream teardown until
@@ -2641,9 +2862,11 @@ async fn event_loop(
     push_diag(&format!("event_loop: started (gen={})", generation));
     crate::EVENT_LOOP_ALIVE.store(true, Ordering::SeqCst);
     loop {
-        // Clean up talking clients that haven't spoken in >2s
-        STATE.lock().talking_clients.retain(|_, t| t.elapsed().as_millis() < 2000);
-
+        // NOTE: no per-iteration cleanup of the "is talking" heartbeats here.
+        // This loop iterates once per event (i.e. per voice packet), and
+        // scanning a map per packet is exactly the kind of work that delays
+        // decoding past a packet's play slot; the maintenance task sweeps
+        // TALKING_CLIENTS on its 5s tick instead.
         if SWIPE_DISCONNECT.load(Ordering::SeqCst) {
             STATE.lock().disconnect_requested = true;
             SWIPE_DISCONNECT.store(false, Ordering::SeqCst);
@@ -3878,6 +4101,12 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
         AUDIO_DECODERS_STEREO.clear();
         PLAYED_SAMPLES.store(0, Ordering::Relaxed);
         ACTIVE_CLIENT_IDS.store(std::sync::Arc::new(Vec::new()));
+        // Same as teardown_output_state: the clock reference and the learned
+        // playout profiles belong to the connection that just ended.
+        CLOCK_REF.store(0, Ordering::Relaxed);
+        JITTER_STATS.clear();
+        TALKING_CLIENTS.clear();
+        MIN_SURPLUS_FRAMES.store(0, Ordering::Relaxed);
     } else if STATE.lock().connected {
         // Zombie state: no live event loop and nothing in the stash (e.g. the
         // event loop panicked without running its teardown). Reset everything
@@ -3991,13 +4220,12 @@ pub extern "C" fn ts_get_clients() -> *mut c_char {
     if !state.connected {
         return to_c_str("[]".to_string());
     }
-    // Recompute is_talking from live talking_clients data
-    // Collect talking client IDs first to avoid split-borrow conflict
-    let talking: Vec<u16> = state
-        .talking_clients
+    // Recompute is_talking from the live heartbeat map (outside STATE, so the
+    // receive path never contends with this call for the state lock).
+    let talking: Vec<u16> = TALKING_CLIENTS
         .iter()
-        .filter(|(_, t)| t.elapsed().as_millis() < 500)
-        .map(|(&id, _)| id)
+        .filter(|e| e.value().elapsed().as_millis() < 500)
+        .map(|e| *e.key())
         .collect();
     for c in &mut state.clients {
         c.is_talking = talking.contains(&(c.id as u16));

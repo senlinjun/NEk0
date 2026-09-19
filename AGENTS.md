@@ -19,7 +19,13 @@ python3 pre_build.py           # default: android when ANDROID_NDK_HOME is set, 
 dart format . --set-exit-if-changed
 flutter analyze
 
-# 3. App
+# 3. Rust checks — `cargo check` per changed target (the android targets need the
+#    NDK toolchain env, see pre_build.py), plus the pure-logic unit tests in
+#    lib.rs, which need neither an audio device nor a connection
+cd native && cargo check && cargo check --target x86_64-linux-android
+cargo test --lib
+
+# 4. App
 flutter run / flutter build apk          # Android
 flutter build linux --release            # Linux (needs alsa-lib, gtk3, ninja, pkg-config)
 flutter build windows --release          # Windows (needs VS C++ workload)
@@ -51,6 +57,31 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   default channels/rate) with in-callback linear resampling (`OutRing` +
   `gen_output_mix_frame` in api.rs). Device changes trigger rebuilds via
   `OUTPUT_RESTART_REQUESTED`.
+- **Inbound voice latency is a per-speaker *adaptive* playout lead**, not a fixed constant.
+  A speaker's stream is anchored `target_frames` (20 ms frames) ahead of the mixing clock;
+  the state lives in `JitterStats` (`lib.rs`), keyed by client id in `JITTER_STATS` and
+  deliberately outliving the 10 s `CLIENT_BUFFERS` teardown so a client's network profile
+  survives a quiet spell. The lead starts at `TARGET_FRAMES_INIT` (6 = 120 ms) and
+  `observe_margin`/`anchor_target` walk it down to `TARGET_FRAMES_FLOOR` (3 = 60 ms) using
+  the decaying minimum of the measured arrival margin, or up (≤1 frame per 2 s) when packets
+  arrive late. The lead may only *change* at an anchor — the first packet, or a ≥200 ms
+  arrival gap where the reader has overtaken the writer — because shortening it mid-stream
+  would skip already-buffered frames; a late-arrival growth instead inserts one frame of
+  silence and is safe anywhere. Arrival margins come from `CLOCK_REF` (packed
+  `(slot << 40) | ms`, published once per generated mix frame) via `play_time_ms`.
+  `MIN_SURPLUS_FRAMES` closes the clock-drift loop: while *every* active speaker has frames
+  buffered beyond their own target, the resampling loop advances the mix clock up to 1%
+  faster (`compression_eps`) until the surplus is gone — this is what stops a fast sender
+  clock from turning into ever-growing delay. The 5 s `[cpal-stats]` line reports
+  `period_ms` (measured device period, the floor under any playout slack), `depth_ms`,
+  `target_ms`, `late` and `gaps`; `[jbuf] rebase …` logs every re-anchor.
+- Never take `STATE.lock()` on the audio receive path: `decode_to_client_buffer` runs for
+  every voice packet, and Dart's 200 ms polling holds the same lock while serializing the
+  roster. The "is talking" heartbeat therefore lives in the `TALKING_CLIENTS` DashMap
+  (`talking_clients` is no longer a field of `TsConnection`), swept by the 5 s maintenance
+  tick instead of per event-loop iteration; the callback snapshot (`ACTIVE_CLIENT_IDS`) is
+  extended immediately when a speaker's buffer is created instead of waiting up to 500 ms
+  for the next tick.
 - Mic capture has two paths behind `AudioService` (`lib/services/audio_service.dart`):
   - Android: Kotlin `AudioRecord` in `MainActivity.kt` → EventChannel
     `com.senlinjun.nek0/mic` → Dart → `ts_send_audio`.
@@ -92,8 +123,10 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
 
 ## Conventions
 
-- No Dart/Rust tests exist in this repo; verification is `dart format` + `flutter analyze`
-  (+ `cargo check` for Rust changes; check host + both android targets when touching audio
+- No Dart tests exist; Rust has a `#[cfg(test)] mod tests` at the bottom of `lib.rs` covering
+  the pure logic (WAV parsing, the adaptive playout-lead state machine) — run `cargo test --lib`
+  in `native/`. Verification is `dart format` + `flutter analyze` (+ `cargo check` and
+  `cargo test --lib` for Rust changes; check host + both android targets when touching audio
   or FFI code).
 - Keep all code and comments in English.
 - i18n: all UI strings go through `AppLocalizations` (gen-l10n). After editing

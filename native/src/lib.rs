@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
@@ -544,7 +544,8 @@ pub struct TsClient {
 pub const JITTER_SLOTS: usize = 64;
 
 /// Lock-free per-client jitter buffer with 64 slots (1.28s window at 20ms/frame).
-/// Writer: decoding thread (one per client). Reader: cpal audio callback.
+/// Writer: the connection event loop (audio packets are decoded inline there).
+/// Reader: the cpal output callback.
 pub struct ClientJitterBuffer {
     /// Circular array of frame slots. AtomicCell swap provides lock-free read/write.
     pub slots: [AtomicCell<Option<Vec<i16>>>; JITTER_SLOTS],
@@ -570,6 +571,11 @@ pub struct ClientJitterBuffer {
     /// audio callback.
     pub pos_x: AtomicU32,
     pub pos_y: AtomicU32,
+    /// Mirror of this client's adaptive playout lead in frames (see
+    /// [JitterStats]), refreshed on every (re-)anchor. Read by the audio
+    /// callback through the lock-free snapshot, so the surplus metric below
+    /// never has to touch the JITTER_STATS map from the audio thread.
+    pub target_frames: AtomicU32,
 }
 
 impl ClientJitterBuffer {
@@ -585,7 +591,193 @@ impl ClientJitterBuffer {
             volume: AtomicU32::new(f32::to_bits(1.0)),
             pos_x: AtomicU32::new(f32::to_bits(f32::NAN)),
             pos_y: AtomicU32::new(f32::to_bits(f32::NAN)),
+            target_frames: AtomicU32::new(TARGET_FRAMES_INIT),
         }
+    }
+}
+
+// ─── Adaptive playout target ────────────────────────────────────────
+
+/// One frame of the internal mix clock: 960 samples at 48 kHz = 20 ms.
+pub const FRAME_MS: u64 = 20;
+
+/// Playout lead used for a speaker nothing has been learned about yet. Kept
+/// at the historical fixed value: a cold start stays conservative and the
+/// stream walks down from here once measurements exist.
+pub const TARGET_FRAMES_INIT: u32 = 6; // 120 ms
+/// Shallowest lead the adaptation may reach. One frame of lead plus one frame
+/// of callback granularity still leaves room for late arrivals, and going
+/// below this trades gaps for latency.
+pub const TARGET_FRAMES_FLOOR: u32 = 3; // 60 ms
+/// Deepest lead the adaptation may reach before it stops reacting to jitter.
+pub const TARGET_FRAMES_CEIL: u32 = 12; // 240 ms
+/// Master switch: false restores the fixed `TARGET_FRAMES_INIT` behavior.
+pub const ADAPTIVE_JITTER: bool = true;
+/// Lead kept on top of the shallowest margin ever measured (one frame).
+const MARGIN_SAFETY_MS: u64 = FRAME_MS;
+/// The measured minimum rises by `MARGIN_DECAY_STEP_MS` every
+/// `MARGIN_DECAY_MS` of quiet, so one lucky packet cannot pin the target at
+/// the floor; it also keeps a late packet's evidence alive for a while.
+const MARGIN_DECAY_MS: u64 = 10_000;
+const MARGIN_DECAY_STEP_MS: u32 = 5;
+/// Margins beyond this are a stalled clock reference, not network jitter.
+const MARGIN_MAX_MS: u32 = 2_000;
+/// "No margin measured yet" marker for [JitterStats::min_margin_ms].
+pub const MARGIN_NONE: u32 = u32::MAX;
+/// Late arrivals within one growth window before the lead is extended.
+/// Two in a row is enough evidence; the cooldown keeps a bursty link from
+/// ratcheting the lead up frame by frame without pause.
+const GROW_LATE_STREAK: u64 = 2;
+/// Cooldowns between target changes. Growth must be prompt (a late packet was
+/// already dropped); shrinkage waits so a stretch of clean audio has to pass
+/// before the buffer is shaved again.
+const GROW_COOLDOWN_MS: u64 = 2_000;
+const SHRINK_COOLDOWN_MS: u64 = 5_000;
+
+/// Adaptive playout state for one remote speaker.
+///
+/// The playout lead is a trade: every frame of it is 20 ms of delay, and it
+/// buys tolerance for packets that arrive late. It is anchored when a stream
+/// starts (first packet of a connection, or of a burst after a gap) and can
+/// only be re-anchored at such a moment without cutting audio — during
+/// continuous audio a shorter lead would skip frames that are already
+/// buffered and about to play.
+///
+/// Keyed by client id in [JITTER_STATS] and deliberately *not* torn down with
+/// the audio buffers after 10 s of silence: the learned profile is what makes
+/// the next burst start at the right depth instead of re-learning the network.
+pub struct JitterStats {
+    /// Current playout lead in frames of 20 ms.
+    pub target_frames: AtomicU32,
+    /// Decaying minimum of the measured arrival margin, in ms: how long the
+    /// worst packet still waited before its play slot. Milliseconds of that
+    /// wait that no packet ever needs are lead that buys nothing but delay.
+    /// See [JitterStats::observe_margin] for why a late packet pins it to 0.
+    pub min_margin_ms: AtomicU32,
+    /// Timestamp (ms, [now_ms] epoch) of the last `min_margin_ms` update,
+    /// used as the decay anchor.
+    pub min_margin_stamp_ms: AtomicU64,
+    /// Timestamp of the last target change, per direction.
+    pub last_grow_ms: AtomicU64,
+    pub last_shrink_ms: AtomicU64,
+    /// Late arrivals since the last growth step, and over the lifetime of
+    /// this entry (diagnostics).
+    pub late_streak: AtomicU64,
+    pub late_total: AtomicU64,
+    /// Sequence jumps in the arrival stream: packets lost or never sent.
+    pub gap_total: AtomicU64,
+}
+
+impl Default for JitterStats {
+    fn default() -> Self {
+        Self {
+            target_frames: AtomicU32::new(TARGET_FRAMES_INIT),
+            min_margin_ms: AtomicU32::new(MARGIN_NONE),
+            min_margin_stamp_ms: AtomicU64::new(0),
+            last_grow_ms: AtomicU64::new(0),
+            last_shrink_ms: AtomicU64::new(0),
+            late_streak: AtomicU64::new(0),
+            late_total: AtomicU64::new(0),
+            gap_total: AtomicU64::new(0),
+        }
+    }
+}
+
+impl JitterStats {
+    /// Current playout lead in frames.
+    pub fn target(&self) -> u32 {
+        self.target_frames
+            .load(Ordering::Relaxed)
+            .clamp(TARGET_FRAMES_FLOOR, TARGET_FRAMES_CEIL)
+    }
+
+    /// Fold one packet's arrival margin into the adaptive state.
+    ///
+    /// `margin_ms` is how long the packet waits (in wall-clock terms) before
+    /// the slot it plays in. Its running minimum says how much deeper than
+    /// necessary the current lead was for this client's network — that much
+    /// lead only adds delay. A packet that arrives *after* its slot (negative
+    /// margin) is the opposite signal: the buffer was too shallow, the packet
+    /// was dropped, and the lead must grow. Such a sample also pins the stored
+    /// minimum to 0, which is what stops the target from shrinking again until
+    /// the decay has lifted it — the hysteresis between the two directions.
+    ///
+    /// Returns true when the caller must give this client's stream one more
+    /// frame of lead.
+    pub fn observe_margin(&self, margin_ms: i64, now_ms: u64) -> bool {
+        if !ADAPTIVE_JITTER {
+            return false;
+        }
+        let mut grow = false;
+        if margin_ms < 0 {
+            self.late_total.fetch_add(1, Ordering::Relaxed);
+            let streak = self.late_streak.fetch_add(1, Ordering::Relaxed) + 1;
+            if streak >= GROW_LATE_STREAK
+                && now_ms.saturating_sub(self.last_grow_ms.load(Ordering::Relaxed))
+                    >= GROW_COOLDOWN_MS
+            {
+                let next = (self.target() + 1).min(TARGET_FRAMES_CEIL);
+                self.target_frames.store(next, Ordering::Relaxed);
+                self.last_grow_ms.store(now_ms, Ordering::Relaxed);
+                self.late_streak.store(0, Ordering::Relaxed);
+                grow = true;
+            }
+        }
+        // Decay the stored minimum to `now`, then fold this sample in.
+        let stored = self.min_margin_ms.load(Ordering::Relaxed);
+        let floor = if stored == MARGIN_NONE {
+            MARGIN_NONE
+        } else {
+            let stamp = self.min_margin_stamp_ms.load(Ordering::Relaxed);
+            let steps = now_ms.saturating_sub(stamp) / MARGIN_DECAY_MS;
+            (stored as u64 + steps * MARGIN_DECAY_STEP_MS as u64).min(MARGIN_MAX_MS as u64) as u32
+        };
+        // A late packet contributes 0 slack: enough to block shrinking, not
+        // enough to look like a measurement the target can be built on.
+        let sample = margin_ms.clamp(0, MARGIN_MAX_MS as i64) as u32;
+        if floor == MARGIN_NONE || sample < floor {
+            self.min_margin_ms.store(sample, Ordering::Relaxed);
+            self.min_margin_stamp_ms.store(now_ms, Ordering::Relaxed);
+        } else if floor != stored {
+            self.min_margin_ms.store(floor, Ordering::Relaxed);
+            self.min_margin_stamp_ms.store(now_ms, Ordering::Relaxed);
+        }
+        grow
+    }
+
+    /// Playout lead to anchor this client's stream with, given the slack the
+    /// measured minimum allows. Called only where the buffer holds no frames
+    /// that are still going to play, so spending the whole slack at once
+    /// cannot cut audio; repeated shrinkage is rate-limited so a lucky window
+    /// cannot collapse the lead to the floor in one go.
+    pub fn anchor_target(&self, now_ms: u64, period_ms: u64) -> u32 {
+        let current = self.target();
+        if !ADAPTIVE_JITTER {
+            return TARGET_FRAMES_INIT;
+        }
+        let measured = self.min_margin_ms.load(Ordering::Relaxed);
+        if measured == MARGIN_NONE {
+            return current;
+        }
+        // Slack: how much earlier than required the worst packet still
+        // arrived. A frame has to be buffered at least one callback period
+        // ahead to be present when its slot is generated, hence the pad.
+        let pad = MARGIN_SAFETY_MS.max(period_ms);
+        let affordable = (measured as u64).saturating_sub(pad) / FRAME_MS;
+        let desired = (current as u64)
+            .saturating_sub(affordable)
+            .max(TARGET_FRAMES_FLOOR as u64) as u32;
+        let cooled = now_ms.saturating_sub(self.last_shrink_ms.load(Ordering::Relaxed))
+            >= SHRINK_COOLDOWN_MS;
+        if desired >= current || !cooled {
+            return current;
+        }
+        self.target_frames.store(desired, Ordering::Relaxed);
+        self.last_shrink_ms.store(now_ms, Ordering::Relaxed);
+        // The stored minimum belongs to the old, deeper lead: re-measure at
+        // the new one instead of shrinking again on stale evidence.
+        self.min_margin_ms.store(MARGIN_NONE, Ordering::Relaxed);
+        desired
     }
 }
 
@@ -628,8 +820,9 @@ pub struct TsConnection {
     pub voice_active: bool,
     pub disconnect_requested: bool,
     pub mic_gain: f32,
-    // Audio receive state
-    pub talking_clients: HashMap<u16, Instant>, // last audio timestamp per client (monotonic Instant)
+    // Audio receive state. "Is talking" lives in TALKING_CLIENTS (a global
+    // DashMap) instead of here: the receive path updates it per voice packet
+    // and must not queue behind the state lock that Dart's polling holds.
     /// Target cid + timestamp of the most recent outgoing clientmove. Server
     /// rejections for our commands arrive without a return_code, so this is
     /// how an invalid-channel-password error gets attributed back to that
@@ -672,7 +865,6 @@ impl TsConnection {
             voice_active: false,
             disconnect_requested: false,
             mic_gain: 1.0,
-            talking_clients: HashMap::new(),
             pending_move: None,
             client_volumes: HashMap::new(),
             client_positions: HashMap::new(),
@@ -702,13 +894,100 @@ pub const FRAME_SIZE: u64 = 960;
 /// Logical frame number = PLAYED_SAMPLES / FRAME_SIZE.
 pub static PLAYED_SAMPLES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 /// Client ID snapshot for the audio callback — avoids iterating DashMap in the callback.
-/// Refreshed by the maintenance task every 500ms. Lock-free via ArcSwap.
+/// Refreshed by the maintenance task every 500ms, and immediately when a
+/// client's jitter buffer is created (see `publish_active_client` in api.rs):
+/// a speaker who starts talking between two ticks must not have their first
+/// syllable dropped just because the snapshot is stale. Lock-free via ArcSwap.
 pub static ACTIVE_CLIENT_IDS: Lazy<arc_swap::ArcSwap<Vec<u16>>> =
     Lazy::new(|| arc_swap::ArcSwap::from(std::sync::Arc::new(Vec::new())));
 /// RMS of the most recent native-capture mic block (f32::to_bits, 0..1).
 /// Published by the cpal input callback (desktop / iOS), read by
 /// ts_get_mic_rms for the UI level meter. 0 = silence / capture inactive.
 pub static MIC_RMS: AtomicU32 = AtomicU32::new(0);
+
+// ─── Playback clock reference ───────────────────────────────────────
+
+/// Mapping from a play slot to wall-clock time, packed as
+/// `(slot << 40) | ms_since(CLOCK_EPOCH)`. Written by the audio callback once
+/// per generated mix frame; read by the receive path to measure how long an
+/// arriving packet will wait before the slot it plays in is generated. A
+/// single atomic store keeps slot and timestamp consistent for the reader.
+/// 0 = no reference (no output stream, or the stream was just rebuilt).
+pub static CLOCK_REF: AtomicU64 = AtomicU64::new(0);
+/// Epoch of the millisecond field of [CLOCK_REF] and of [now_ms].
+pub static CLOCK_EPOCH: Lazy<Instant> = Lazy::new(Instant::now);
+/// Play slots occupy the top 24 bits of [CLOCK_REF]: 16.7M slots ≈ 93 hours
+/// of continuous playback, far beyond one stream's lifetime.
+const CLOCK_REF_MS_BITS: u32 = 40;
+const CLOCK_REF_MS_MASK: u64 = (1 << CLOCK_REF_MS_BITS) - 1;
+/// A reference older than this is treated as "stream not running" — see
+/// [play_time_ms]. Generous next to the 20 ms callback period, tight enough
+/// that a stopped stream is noticed within one packet.
+const CLOCK_REF_MAX_AGE_MS: u64 = 1000;
+
+/// Milliseconds since [CLOCK_EPOCH] (monotonic).
+pub fn now_ms() -> u64 {
+    CLOCK_EPOCH.elapsed().as_millis() as u64
+}
+
+/// Nanoseconds since [CLOCK_EPOCH] (monotonic).
+pub fn now_ns() -> u64 {
+    CLOCK_EPOCH.elapsed().as_nanos() as u64
+}
+
+/// Publish the newest generated play slot together with the time it was
+/// generated. Both fields describe the same instant, so the receive path can
+/// convert any slot to the wall-clock time it plays at.
+pub fn publish_clock_ref(slot: u64) {
+    let packed = ((slot & 0xFF_FFFF) << CLOCK_REF_MS_BITS) | (now_ms() & CLOCK_REF_MS_MASK);
+    CLOCK_REF.store(packed, Ordering::Relaxed);
+}
+
+/// Wall-clock time (ms since [CLOCK_EPOCH]) at which `slot` is mixed, or None
+/// when there is no usable reference: none published yet, or the last one is
+/// stale — a reference that stopped being refreshed means the output stream is
+/// not running (device gone, stream being rebuilt), and its timestamps would
+/// read as ever-growing "late" arrivals.
+pub fn play_time_ms(slot: u64) -> Option<i64> {
+    let packed = CLOCK_REF.load(Ordering::Relaxed);
+    if packed == 0 {
+        return None;
+    }
+    let ref_slot = packed >> CLOCK_REF_MS_BITS;
+    let ref_ms = packed & CLOCK_REF_MS_MASK;
+    if now_ms().saturating_sub(ref_ms) > CLOCK_REF_MAX_AGE_MS {
+        return None;
+    }
+    Some(ref_ms as i64 + (slot as i64 - ref_slot as i64) * FRAME_MS as i64)
+}
+
+/// Callback period of the active output stream in ms — the granularity at
+/// which the mixing clock advances, as measured by the maintenance task. A
+/// frame has to be buffered at least this far ahead to be guaranteed present
+/// when its slot is generated, so it is the floor under any playout slack.
+pub static OUTPUT_PERIOD_MS: AtomicU32 = AtomicU32::new(FRAME_MS as u32);
+/// Device-side sample rate of the active output stream (set when it is built).
+/// Paired with CB_STATS::samples_total it yields [OUTPUT_PERIOD_MS].
+pub static OUTPUT_RATE: AtomicU32 = AtomicU32::new(48000);
+
+/// Smallest surplus (buffered frames minus the speaker's playout target) seen
+/// across the speakers mixed into the last generated frame. Published by
+/// `gen_output_mix_frame`, consumed by the resampling loop to decide how hard
+/// to compress the mixing clock. Compressing only while *every* speaker has
+/// surplus keeps it from pulling anyone below their own target.
+pub static MIN_SURPLUS_FRAMES: AtomicU32 = AtomicU32::new(0);
+
+/// Last received audio timestamp per client (drives the UI's "is talking"
+/// flag). Deliberately outside STATE: the audio receive path updates this for
+/// every voice packet, and taking the global state lock there — the same lock
+/// Dart's polling FFI calls hold while serializing the roster — would delay
+/// decoding past the packet's play slot.
+pub static TALKING_CLIENTS: Lazy<DashMap<u16, Instant>> = Lazy::new(DashMap::new);
+
+/// Adaptive playout state per client (see [JitterStats]). Not torn down with
+/// the audio buffers: the learned network profile outlives a silent spell.
+pub static JITTER_STATS: Lazy<DashMap<u16, JitterStats>> = Lazy::new(DashMap::new);
+
 
 // ─── Channel-event SFX (25 built-in sounds) ──────────────────────────
 
@@ -1215,5 +1494,162 @@ mod tests {
         wav.truncate(44);
         let err = parse_wav_pcm(&wav).expect_err("no data chunk should be rejected");
         assert!(err.contains("no audio data"), "got: {}", err);
+    }
+
+    // ─── Adaptive playout lead ──────────────────────────────────────
+    //
+    // The lead is the one latency knob in the receive path, so the rules that
+    // move it are pinned here: a cold start is conservative, a clean link
+    // walks down to the floor, a late packet grows it and blocks shrinking
+    // until the decay lifts the evidence again, and neither direction escapes
+    // its bounds.
+
+    use super::{
+        JitterStats, MARGIN_NONE, TARGET_FRAMES_CEIL, TARGET_FRAMES_FLOOR, TARGET_FRAMES_INIT,
+    };
+
+    /// Margins a perfectly paced sender produces at a given lead: exactly the
+    /// lead, with no packet ever late.
+    fn clean_margin(lead: u32) -> i64 {
+        lead as i64 * super::FRAME_MS as i64
+    }
+
+    #[test]
+    fn cold_start_uses_initial_lead() {
+        let stats = JitterStats::default();
+        assert_eq!(stats.target(), TARGET_FRAMES_INIT);
+        // Nothing measured yet → the anchor keeps the conservative default.
+        assert_eq!(stats.anchor_target(60_000, 20), TARGET_FRAMES_INIT);
+        assert_eq!(
+            stats.min_margin_ms.load(std::sync::atomic::Ordering::Relaxed),
+            MARGIN_NONE
+        );
+    }
+
+    #[test]
+    fn clean_link_shrinks_to_floor_and_stays() {
+        let stats = JitterStats::default();
+        let mut now = 60_000;
+        let mut lead = stats.anchor_target(now, 20);
+        assert_eq!(lead, TARGET_FRAMES_INIT);
+
+        // Three burst starts on a link that never delivers a late packet.
+        for _ in 0..3 {
+            now += 100;
+            let margin = clean_margin(lead);
+            assert!(!stats.observe_margin(margin, now), "nothing was late");
+            now += super::SHRINK_COOLDOWN_MS;
+            lead = stats.anchor_target(now, 20);
+        }
+        assert_eq!(lead, TARGET_FRAMES_FLOOR, "clean link should reach the floor");
+    }
+
+    #[test]
+    fn late_packets_grow_the_lead_once_per_streak() {
+        let stats = JitterStats::default();
+        stats.anchor_target(60_000, 20);
+        // First late packet: evidence, not yet a decision.
+        assert!(!stats.observe_margin(-30, 60_100));
+        assert_eq!(stats.target(), TARGET_FRAMES_INIT);
+        // Second one crosses the streak threshold and asks for one frame.
+        assert!(stats.observe_margin(-30, 60_200));
+        assert_eq!(stats.target(), TARGET_FRAMES_INIT + 1);
+        // The streak restarted with the growth: another single late packet
+        // cannot ratchet the lead again immediately.
+        assert!(!stats.observe_margin(-30, 60_300));
+        assert_eq!(stats.target(), TARGET_FRAMES_INIT + 1);
+    }
+
+    #[test]
+    fn late_packet_blocks_shrinking_until_healthy_packets_raise_the_floor() {
+        let stats = JitterStats::default();
+        stats.anchor_target(60_000, 20);
+        stats.observe_margin(clean_margin(TARGET_FRAMES_INIT), 60_100);
+        assert!(!stats.observe_margin(-30, 60_200));
+        assert_eq!(
+            stats.min_margin_ms.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a late packet is zero slack"
+        );
+        // Zero slack blocks shrinking, even long past the cooldown.
+        assert_eq!(
+            stats.anchor_target(600_000, 20),
+            TARGET_FRAMES_INIT,
+            "zero measured slack must not shorten the lead"
+        );
+
+        // The link recovers: packets arrive a full lead early again. The
+        // stored minimum then climbs (the sample is above the decayed floor)
+        // until a frame of slack is available and the anchor may shorten.
+        let mut now = 600_000;
+        let mut shortened = None;
+        for _ in 0..40 {
+            now += super::MARGIN_DECAY_MS;
+            stats.observe_margin(clean_margin(TARGET_FRAMES_INIT), now);
+            let lead = stats.anchor_target(now + super::SHRINK_COOLDOWN_MS, 20);
+            if lead < TARGET_FRAMES_INIT {
+                shortened = Some(lead);
+                break;
+            }
+        }
+        assert!(
+            shortened.is_some(),
+            "healthy packets must eventually allow a shorter lead"
+        );
+        assert_eq!(
+            stats.min_margin_ms.load(std::sync::atomic::Ordering::Relaxed),
+            MARGIN_NONE,
+            "the measurement restarts at the new lead"
+        );
+    }
+
+    #[test]
+    fn lead_stays_within_bounds() {
+        let stats = JitterStats::default();
+        // Twenty late packets, spaced past the growth cooldown each time.
+        for i in 0..20 {
+            let now = 60_000 + i * (super::GROW_COOLDOWN_MS + 1);
+            stats.observe_margin(-500, now);
+            stats.observe_margin(-500, now + 1);
+        }
+        assert_eq!(stats.target(), TARGET_FRAMES_CEIL, "growth is capped");
+
+        // Now a long clean stretch: the lead walks back down, never below the
+        // floor, even though the slack would allow more.
+        let mut now = 1_000_000;
+        let mut lead = stats.target();
+        for _ in 0..20 {
+            now += super::SHRINK_COOLDOWN_MS + super::MARGIN_DECAY_MS;
+            stats.observe_margin(clean_margin(lead), now);
+            lead = stats.anchor_target(now + 1, 20);
+        }
+        assert_eq!(lead, TARGET_FRAMES_FLOOR, "shrink is capped");
+    }
+
+    #[test]
+    fn a_longer_device_period_keeps_more_slack() {
+        // On a host that grants an 85 ms period the callback itself quantizes
+        // the clock, so the same measurement must leave a deeper lead than it
+        // would on a 20 ms device.
+        let fast = JitterStats::default();
+        let slow = JitterStats::default();
+        for stats in [&fast, &slow] {
+            stats.observe_margin(85, 60_000);
+        }
+        assert!(
+            slow.anchor_target(600_000, 85) >= fast.anchor_target(600_000, 20),
+            "a coarser device period must not shorten the lead further"
+        );
+    }
+
+    #[test]
+    fn clock_reference_maps_slots_to_wall_clock() {
+        // Publish slot 10_000; a slot 50 frames further on plays one second
+        // (50 × 20 ms) later.
+        super::publish_clock_ref(10_000);
+        let base = super::play_time_ms(10_000).expect("reference just published");
+        let later = super::play_time_ms(10_050).expect("reference is fresh");
+        assert_eq!(later - base, 50 * super::FRAME_MS as i64);
+        assert!(super::now_ms().saturating_sub(base as u64) < 100);
     }
 }
