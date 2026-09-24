@@ -5985,3 +5985,205 @@ pub extern "C" fn ts_discard_recording() -> u8 {
     recording::discard();
     1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── Return code / path parsing ─────────────────────────────────
+
+    #[test]
+    fn parses_return_codes() {
+        assert_eq!(parse_return_code("12"), Some(12));
+        // "cmd:id" — the id after the last colon is the handle.
+        assert_eq!(parse_return_code("12:5"), Some(5));
+        assert_eq!(parse_return_code("7:3:9"), Some(9));
+        assert_eq!(parse_return_code(""), None);
+        assert_eq!(parse_return_code("abc"), None);
+        assert_eq!(parse_return_code("12:xyz"), None);
+    }
+
+    #[test]
+    fn normalizes_remote_paths() {
+        assert_eq!(normalize_remote_path(""), "/");
+        assert_eq!(normalize_remote_path("/"), "/");
+        assert_eq!(normalize_remote_path("a/b"), "/a/b");
+        assert_eq!(normalize_remote_path("//a//b/"), "/a/b");
+        assert_eq!(normalize_remote_path("a//b//"), "/a/b");
+        assert_eq!(normalize_remote_path("  /a/b/  "), "/a/b");
+    }
+
+    // ─── Sequence unwrap ────────────────────────────────────────────
+
+    #[test]
+    fn unwrap_seq_tracks_forward_and_wrap() {
+        assert_eq!(unwrap_seq(100, 100), 100);
+        assert_eq!(unwrap_seq(150, 100), 150);
+        // seq just past 0 while base sits near the top of u16: forward wrap.
+        assert_eq!(unwrap_seq(1, 65535), 65537);
+        assert_eq!(unwrap_seq(0, 65533), 65536);
+        // A small backward step is interpreted as a forward wrap too (the
+        // 16-bit space rolled over between base and seq).
+        assert_eq!(unwrap_seq(50, 100), 65_586);
+        // Baseline use (base 0) is the identity for ordinary seqs.
+        assert_eq!(unwrap_seq(0, 0), 0);
+        assert_eq!(unwrap_seq(65535, 0), 65535);
+        assert_eq!(unwrap_seq(40000, 0), 40000);
+    }
+
+    #[test]
+    fn unwrap_seq_half_window_behind_maps_stale() {
+        // seq exactly half a u16 window behind base lands 32768 behind base
+        // in u32 space — the >1000-frame sanity check then discards it.
+        let stale = unwrap_seq(32868, 100);
+        assert_eq!(100u32.wrapping_sub(stale), 32768);
+    }
+
+    // ─── Positional gains ───────────────────────────────────────────
+
+    #[test]
+    fn nan_position_plays_centered() {
+        assert_eq!(positional_gains(0.8, f32::NAN, 0.0), (0.8, 0.8));
+        assert_eq!(positional_gains(0.8, 1.0, f32::NAN), (0.8, 0.8));
+    }
+
+    #[test]
+    fn centered_position_matches_unpositioned_loudness() {
+        assert_eq!(positional_gains(0.7, 0.0, 0.0), (0.7, 0.7));
+        // Plain stereo cannot place front vs back — only distance matters.
+        let front = positional_gains(1.0, 0.0, 3.0);
+        let back = positional_gains(1.0, 0.0, -3.0);
+        assert_eq!(front, back);
+        // At the reference distance straight ahead both sides are halved.
+        assert!((front.0 - 0.5).abs() < 1e-6);
+        assert!((front.1 - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn distance_attenuates_and_pan_clamps() {
+        // x = +3 m (the reference distance): full pan right, 0.5 attenuation.
+        let (l, r) = positional_gains(1.0, 3.0, 0.0);
+        assert!(l.abs() < 1e-6);
+        assert!((r - 1.0).abs() < 1e-6);
+        // Far right: pan clamps at the ±2 m boundary, attenuation keeps
+        // falling with distance.
+        let (l, r) = positional_gains(1.0, 10.0, 0.0);
+        assert_eq!(l, 0.0);
+        let atten = 1.0 / (1.0 + (10.0f32 / 3.0).powi(2));
+        assert!((r - 2.0 * atten).abs() < 1e-6);
+    }
+
+    // ─── Output ring ────────────────────────────────────────────────
+
+    #[test]
+    fn out_ring_is_fifo() {
+        let mut ring = OutRing::new();
+        for i in 0..5u32 {
+            ring.push([i as f32, 100.0 + i as f32]);
+        }
+        for i in 0..5u32 {
+            assert_eq!(ring.pop(), [i as f32, 100.0 + i as f32]);
+        }
+    }
+
+    #[test]
+    fn out_ring_wraps_and_keeps_order() {
+        let mut ring = OutRing::new();
+        // Alternating push/pop walks head around the whole buffer (through
+        // the compacting branch) twice.
+        for i in 0..(2 * OUT_RING_CAP as u32) {
+            ring.push([i as f32, 0.0]);
+            assert_eq!(ring.pop(), [i as f32, 0.0]);
+        }
+    }
+
+    #[test]
+    fn out_ring_drops_oldest_when_full() {
+        let mut ring = OutRing::new();
+        let extra = 10u32;
+        for i in 0..(OUT_RING_CAP as u32 + extra) {
+            ring.push([i as f32, 0.0]);
+        }
+        for i in extra..(OUT_RING_CAP as u32 + extra) {
+            assert_eq!(ring.pop(), [i as f32, 0.0]);
+        }
+    }
+
+    // ─── Clock compression ──────────────────────────────────────────
+
+    #[test]
+    fn compression_eps_curve() {
+        assert_eq!(compression_eps(0), 0.0);
+        // One surplus frame is not enough to compress (that is the target
+        // slack itself).
+        assert_eq!(compression_eps(1), 0.0);
+        assert!((compression_eps(2) - 0.002).abs() < 1e-12);
+        // Capped at 1%.
+        assert!((compression_eps(6) - 0.01).abs() < 1e-12);
+        assert_eq!(compression_eps(1000), 0.01);
+        // Monotonic.
+        let mut prev = 0.0;
+        for n in 0..20u32 {
+            let eps = compression_eps(n);
+            assert!(eps >= prev, "eps must not decrease at {} frames", n);
+            prev = eps;
+        }
+    }
+
+    // ─── Mic resampler ──────────────────────────────────────────────
+
+    #[test]
+    fn mic_resampler_48k_mono_passthrough() {
+        let mut r = MicResampler::new(1, 48000);
+        r.process(&[0.1, -0.2, 0.3]);
+        assert_eq!(r.out, vec![0.1, -0.2, 0.3]);
+    }
+
+    #[test]
+    fn mic_resampler_downmixes_stereo_at_48k() {
+        // Binary-exact values so the average is bit-exact too.
+        let mut r = MicResampler::new(2, 48000);
+        r.process(&[0.25, 0.5, -0.5, 0.0]);
+        assert_eq!(r.out, vec![0.375, -0.25]);
+    }
+
+    #[test]
+    fn mic_resampler_empty_input_is_noop() {
+        let mut r = MicResampler::new(1, 48000);
+        r.process(&[]);
+        assert!(r.out.is_empty());
+        assert!(!r.started);
+    }
+
+    #[test]
+    fn mic_resampler_44k1_chunked_matches_one_shot() {
+        // A ~110 ms ramp at 44.1 kHz.
+        let input: Vec<f32> = (0..4800).map(|i| i as f32 / 4800.0).collect();
+
+        let mut one_shot = MicResampler::new(1, 44100);
+        one_shot.process(&input);
+
+        // Odd-size chunks force the phase/state carry across callbacks; the
+        // arithmetic per sample is identical, so the output must be exactly
+        // the same, not just approximately.
+        let mut chunked = MicResampler::new(1, 44100);
+        for chunk in input.chunks(7) {
+            chunked.process(chunk);
+        }
+
+        assert_eq!(one_shot.out, chunked.out);
+        // The first output sample IS the first input sample.
+        assert_eq!(one_shot.out[0], input[0]);
+        // Output count lands on n × 48000/44100 (±2 for the phase quantization).
+        let expected = input.len() as f64 * 48000.0 / 44100.0;
+        assert!(
+            (one_shot.out.len() as f64 - expected).abs() <= 2.0,
+            "output length {} vs expected {}",
+            one_shot.out.len(),
+            expected
+        );
+        // A rising ramp stays rising and inside [0, 1].
+        assert!(one_shot.out.iter().all(|&s| (0.0..=1.0).contains(&s)));
+        assert!(one_shot.out.windows(2).all(|w| w[0] <= w[1]));
+    }
+}

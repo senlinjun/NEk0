@@ -41,6 +41,7 @@ jobs:
       run: |
         cd native
         cargo check
+        cargo test --lib
     - name: Prebuild (Android)
       env:
         ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
@@ -53,6 +54,7 @@ jobs:
         flutter gen-l10n
         dart format . --set-exit-if-changed
         flutter analyze
+        flutter test
     - name: Build Linux bundle
       if: startsWith(github.ref, 'refs/tags/')
       run: flutter build linux --release

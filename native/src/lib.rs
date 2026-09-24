@@ -1651,5 +1651,274 @@ mod tests {
         let later = super::play_time_ms(10_050).expect("reference is fresh");
         assert_eq!(later - base, 50 * super::FRAME_MS as i64);
         assert!(super::now_ms().saturating_sub(base as u64) < 100);
+
+        // Slots live in the top 24 bits: a wrapped slot is masked off, and
+        // the wrapped reference still maps nearby slots consistently. (This
+        // test owns CLOCK_REF for its whole body — every assertion that
+        // stores a crafted value lives here so parallel tests never race.)
+        super::publish_clock_ref(0x100_0005);
+        let ref_slot =
+            super::CLOCK_REF.load(std::sync::atomic::Ordering::Relaxed) >> super::CLOCK_REF_MS_BITS;
+        assert_eq!(ref_slot, 5, "slot is masked to 24 bits");
+        let t5 = super::play_time_ms(5).expect("fresh reference");
+        let t7 = super::play_time_ms(7).expect("fresh reference");
+        assert_eq!(t7 - t5, 2 * super::FRAME_MS as i64);
+
+        // A reference whose timestamp stopped being refreshed (stalled
+        // output stream) is unusable: its timestamps would read as
+        // ever-growing "late" arrivals. Fabricating a stale reference needs
+        // the monotonic clock past the max age (tests may run within the
+        // first second after the epoch) — wait it out instead of storing a
+        // value that only looks stale on a warmed-up clock.
+        while super::now_ms() <= super::CLOCK_REF_MAX_AGE_MS {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        super::CLOCK_REF.store(
+            5 << super::CLOCK_REF_MS_BITS, // ms field 0 = published long ago
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert_eq!(super::play_time_ms(5), None, "stale reference is rejected");
+
+        // No reference at all (no output stream, or just rebuilt).
+        super::CLOCK_REF.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(super::play_time_ms(5), None, "zero reference is rejected");
+    }
+
+    // ─── Dart-facing JSON contract ──────────────────────────────────
+    //
+    // ts_ffi.dart parses these objects with hand-written fromJson code, so
+    // the exact field names and the "type" tag spellings are API, not detail.
+
+    use super::{ChannelArgs, ClientJitterBuffer, SFX_BUILTIN, TsChannel, TsEvent, TsRecordingFile};
+
+    #[test]
+    fn ts_event_json_tags_and_fields() {
+        let event = TsEvent::TextMessage {
+            from_client: "Alice".into(),
+            from_client_id: 5,
+            to_client_id: 9,
+            target_mode: 1,
+            message: "hi".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "text_message");
+        assert_eq!(json["from_client"], "Alice");
+        assert_eq!(json["from_client_id"], 5);
+        assert_eq!(json["to_client_id"], 9);
+        assert_eq!(json["target_mode"], 1);
+        assert_eq!(json["message"], "hi");
+
+        // Nullable fields stay present as explicit nulls (Dart reads them
+        // as null).
+        let event = TsEvent::FtDone {
+            task_id: 3,
+            ok: true,
+            transferred: 128,
+            error: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "ft_done");
+        assert_eq!(json["task_id"], 3);
+        assert_eq!(json["transferred"], 128);
+        assert!(json["error"].is_null());
+
+        let event = TsEvent::Connected {
+            server_name: "The Nest".into(),
+            client_id: 1,
+            ask_for_privilegekey: false,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "connected");
+        assert_eq!(json["server_name"], "The Nest");
+        assert_eq!(json["client_id"], 1);
+        assert_eq!(json["ask_for_privilegekey"], false);
+    }
+
+    #[test]
+    fn recording_file_json_shape() {
+        let file = TsRecordingFile {
+            path: "/tmp/a.wav".into(),
+            client_id: 12,
+            uid: Some("abc=".into()),
+            name: "Alice".into(),
+            mixed: false,
+        };
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["path"], "/tmp/a.wav");
+        assert_eq!(json["client_id"], 12);
+        assert_eq!(json["uid"], "abc=");
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["mixed"], false);
+    }
+
+    #[test]
+    fn channel_args_deserialize_from_args_json() {
+        // Absent fields stay None = "untouched" on an edit.
+        let args: ChannelArgs = serde_json::from_str("{}").unwrap();
+        assert!(args.name.is_none());
+        assert!(args.parent_id.is_none());
+
+        let args: ChannelArgs = serde_json::from_str(
+            r#"{"parent_id": 2, "name": "Lobby", "topic": "", "password": "p",
+                "description": "d", "max_family_clients": 0, "max_clients": 10,
+                "is_permanent": true, "is_semi_permanent": false,
+                "is_default": false, "delete_delay": 30,
+                "needed_talk_power": 75, "order": 4}"#,
+        )
+        .unwrap();
+        assert_eq!(args.parent_id, Some(2));
+        assert_eq!(args.name.as_deref(), Some("Lobby"));
+        // Some("") means "clear" — distinct from None (untouched).
+        assert_eq!(args.topic.as_deref(), Some(""));
+        assert_eq!(args.password.as_deref(), Some("p"));
+        assert_eq!(args.description.as_deref(), Some("d"));
+        assert_eq!(args.max_family_clients, Some(0));
+        assert_eq!(args.max_clients, Some(10));
+        assert_eq!(args.is_permanent, Some(true));
+        assert_eq!(args.is_semi_permanent, Some(false));
+        assert_eq!(args.is_default, Some(false));
+        assert_eq!(args.delete_delay, Some(30));
+        assert_eq!(args.needed_talk_power, Some(75));
+        assert_eq!(args.order, Some(4));
+    }
+
+    #[test]
+    fn channel_json_matches_dart_field_names() {
+        let channel = TsChannel {
+            id: 7,
+            name: "Default".into(),
+            parent_id: 0,
+            topic: String::new(),
+            has_password: false,
+            client_count: 3,
+            order: 0,
+            is_default: true,
+            permission_hints: 1 | 64 | 128,
+            needed_talk_power: 0,
+            max_clients: -1,
+            is_permanent: true,
+            is_semi_permanent: false,
+            description: String::new(),
+            max_family_clients: -1,
+            delete_delay: 0,
+        };
+        let json = serde_json::to_value(&channel).unwrap();
+        for key in [
+            "id",
+            "name",
+            "parent_id",
+            "topic",
+            "has_password",
+            "client_count",
+            "order",
+            "is_default",
+            "permission_hints",
+            "needed_talk_power",
+            "max_clients",
+            "is_permanent",
+            "is_semi_permanent",
+            "description",
+            "max_family_clients",
+            "delete_delay",
+        ] {
+            assert!(json.get(key).is_some(), "missing key {}", key);
+        }
+        assert_eq!(json["id"], 7);
+        assert_eq!(json["client_count"], 3);
+        assert_eq!(json["permission_hints"], 1 | 64 | 128);
+        assert_eq!(json["max_clients"], -1);
+    }
+
+    // ─── Jitter buffer init ─────────────────────────────────────────
+
+    #[test]
+    fn jitter_buffer_starts_unconfigured() {
+        let buf = ClientJitterBuffer::new();
+        assert_eq!(
+            buf.base_pair.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "0 = uninitialized mapping"
+        );
+        assert_eq!(buf.write_seq.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(
+            buf.target_frames.load(std::sync::atomic::Ordering::Relaxed),
+            TARGET_FRAMES_INIT
+        );
+        // Volume starts at unity; the position is NaN = centered playback.
+        assert_eq!(
+            f32::from_bits(buf.volume.load(std::sync::atomic::Ordering::Relaxed)),
+            1.0
+        );
+        assert!(f32::from_bits(buf.pos_x.load(std::sync::atomic::Ordering::Relaxed)).is_nan());
+        assert!(f32::from_bits(buf.pos_y.load(std::sync::atomic::Ordering::Relaxed)).is_nan());
+        // AtomicCell<Option<Vec>> has no Copy load — swap(None) reads the
+        // slot (and leaves None in place on a fresh buffer).
+        assert!(buf.slots.iter().all(|s| s.swap(None).is_none()));
+    }
+
+    // ─── WAV parser edges ───────────────────────────────────────────
+
+    #[test]
+    fn skips_odd_sized_chunks_with_padding() {
+        let wav = wav_pcm16(48_000, 1, &[100, -100]);
+        // Splice a 3-byte JUNK chunk (padded to 4 per RIFF) in front of the
+        // data chunk and fix up the RIFF size.
+        let data_len = 2u32 * 2;
+        let mut out = Vec::new();
+        out.extend_from_slice(&wav[..36]);
+        out.extend_from_slice(b"JUNK");
+        out.extend_from_slice(&3u32.to_le_bytes());
+        out.extend_from_slice(b"abc");
+        out.push(0); // pad byte
+        out.extend_from_slice(&wav[36..]);
+        out[4..8].copy_from_slice(&(36u32 + 12 + data_len).to_le_bytes());
+
+        let pcm = parse_wav_pcm(&out).expect("odd chunk must be skipped with its padding");
+        assert_eq!(pcm.len(), 2);
+    }
+
+    #[test]
+    fn rejects_extra_channels_and_zero_rate() {
+        let wav = wav_pcm16(48_000, 3, &[0; 6]);
+        let err = parse_wav_pcm(&wav).expect_err("3 channels must be rejected");
+        assert!(err.contains("channel"), "got: {}", err);
+
+        let wav = wav_pcm16(0, 1, &[0]);
+        let err = parse_wav_pcm(&wav).expect_err("rate 0 must be rejected");
+        assert!(err.contains("sample rate"), "got: {}", err);
+    }
+
+    #[test]
+    fn rejects_short_fmt_and_truncated_data() {
+        // A fmt chunk declared shorter than the 16 bytes the parser needs.
+        let mut wav = wav_pcm16(48_000, 1, &[0]);
+        wav[16..20].copy_from_slice(&12u32.to_le_bytes()); // fmt chunk size
+        let err = parse_wav_pcm(&wav).expect_err("short fmt must be rejected");
+        assert!(err.contains("too short"), "got: {}", err);
+
+        // A data chunk whose size field overruns the file is dropped; with
+        // nothing left to decode the parser reports no audio data.
+        let mut wav = wav_pcm16(48_000, 1, &[1, 2]);
+        wav[40..44].copy_from_slice(&1000u32.to_le_bytes()); // data chunk size
+        let err = parse_wav_pcm(&wav).expect_err("truncated data must be rejected");
+        assert!(err.contains("no audio data"), "got: {}", err);
+    }
+
+    // ─── Built-in SFX assets ────────────────────────────────────────
+
+    // KNOWN BUG, left failing on purpose until fixed: five builtin assets
+    // exceed the 2 s parse limit and load as None (silent playback at
+    // runtime) — kinds 31-35 (neutral_kicked_channel_awayfromcurrentchannel,
+    // neutral_kicked_server_currentchannel, neutral_banned_server_currentchannel,
+    // neutral_recording_started_currentchannel, neutral_recording_stopped_currentchannel).
+    #[test]
+    fn builtin_sfx_assets_all_parse() {
+        assert_eq!(SFX_BUILTIN.len(), 37);
+        for (kind, sample) in SFX_BUILTIN.iter().enumerate() {
+            let samples = sample
+                .as_ref()
+                .unwrap_or_else(|| panic!("builtin sfx kind {} failed to parse", kind));
+            assert!(!samples.is_empty(), "builtin sfx kind {} is empty", kind);
+        }
     }
 }

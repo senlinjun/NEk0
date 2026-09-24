@@ -18,10 +18,12 @@ python3 pre_build.py           # default: android when ANDROID_NDK_HOME is set, 
 # 2. Dart checks — must pass before committing (CI runs `--set-exit-if-changed`)
 dart format . --set-exit-if-changed
 flutter analyze
+flutter test
 
 # 3. Rust checks — `cargo check` per changed target (the android targets need the
 #    NDK toolchain env, see pre_build.py), plus the pure-logic unit tests in
-#    lib.rs, which need neither an audio device nor a connection
+#    lib.rs / api.rs / recording.rs, which need neither an audio device nor a
+#    connection
 cd native && cargo check && cargo check --target x86_64-linux-android
 cargo test --lib
 
@@ -34,8 +36,9 @@ flutter build windows --release          # Windows (needs VS C++ workload)
 A missing native library does NOT fail the Gradle/CMake build — it crashes at runtime in
 `lib/services/ts_ffi.dart`, which loads `libtsclient.so` (Android), `<exe-dir>/lib/libtsclient.so`
 (Linux bundle), or `tsclient.dll` (Windows, exe dir). CI (`.github/workflows/ci.yml`) has two
-jobs: `android-linux` (ubuntu: `cargo check` → android+linux prebuild → `flutter gen-l10n` +
-`dart format` + `flutter analyze` → `flutter build linux` → tag: APKs + Linux tar.gz release)
+jobs: `android-linux` (ubuntu: `cargo check` + `cargo test --lib` → android+linux prebuild →
+`flutter gen-l10n` + `dart format` + `flutter analyze` + `flutter test` → `flutter build linux`
+→ tag: APKs + Linux tar.gz release)
 and `windows` (prebuild → `flutter build windows` → tag: zip release).
 
 ## Architecture
@@ -123,11 +126,18 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
 
 ## Conventions
 
-- No Dart tests exist; Rust has a `#[cfg(test)] mod tests` at the bottom of `lib.rs` covering
-  the pure logic (WAV parsing, the adaptive playout-lead state machine) — run `cargo test --lib`
-  in `native/`. Verification is `dart format` + `flutter analyze` (+ `cargo check` and
-  `cargo test --lib` for Rust changes; check host + both android targets when touching audio
-  or FFI code).
+- Dart tests live under `test/` (pure logic only: models, service state machines). They must
+  never call anything that reaches `TsNative` — its lazy `DynamicLibrary.open` would crash
+  the test isolate — and only public, FFI-free notifier/service methods are driven. Run with
+  `flutter test`. Rust has in-file `#[cfg(test)] mod tests` blocks in `lib.rs` (WAV parsing,
+  the adaptive playout-lead state machine, the Dart-facing serde JSON contract), `api.rs`
+  (sequence unwrap, positional gains, OutRing, compression_eps, the mic resampler) and
+  `recording.rs` (filenames, f32_to_i16, WavWriter) — run `cargo test --lib` in `native/`
+  (the `cdylib`-only crate type rules out a `tests/` directory). Verification is
+  `dart format` + `flutter analyze` + `flutter test` (+ `cargo check` and `cargo test --lib`
+  for Rust changes; check host + both android targets when touching audio or FFI code).
+  `builtin_sfx_assets_all_parse` in lib.rs is intentionally red until the over-length builtin
+  SFX assets (kinds 31–35, > 2 s) are fixed.
 - Keep all code and comments in English.
 - i18n: all UI strings go through `AppLocalizations` (gen-l10n). After editing
   `lib/l10n/*.arb`, run `flutter gen-l10n` — generated files in `lib/l10n/generated/`

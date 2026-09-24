@@ -1067,3 +1067,124 @@ fn panic_msg(payload: &(dyn std::any::Any + Send)) -> String {
         "unknown panic".into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── Sample conversion ──────────────────────────────────────────
+
+    #[test]
+    fn f32_to_i16_saturates() {
+        assert_eq!(f32_to_i16(0.0), 0);
+        assert_eq!(f32_to_i16(0.5), 16383);
+        assert_eq!(f32_to_i16(-0.5), -16383);
+        assert_eq!(f32_to_i16(1.0), 32767);
+        assert_eq!(f32_to_i16(-1.0), -32767);
+        // Beyond ±1 clamps instead of wrapping. The input is clamped to
+        // [-1, 1] BEFORE scaling, so the negative side tops out at -32767.
+        assert_eq!(f32_to_i16(2.0), 32767);
+        assert_eq!(f32_to_i16(-2.0), -32767);
+    }
+
+    // ─── Names ──────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_filename_replaces_forbidden_chars() {
+        assert_eq!(
+            sanitize_filename("a/b\\c:d*e?f\"g<h>i|j", 7),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+        // Control characters are replaced too.
+        assert_eq!(sanitize_filename("a\u{1}b", 7), "a_b");
+        // Surrounding whitespace and dots are trimmed.
+        assert_eq!(sanitize_filename("  ..name..  ", 7), "name");
+        // Names are capped at 60 characters.
+        let long = "x".repeat(100);
+        assert_eq!(sanitize_filename(&long, 7), "x".repeat(60));
+        // Unicode passes through untouched.
+        assert_eq!(sanitize_filename(" Andrés ", 7), "Andrés");
+    }
+
+    #[test]
+    fn sanitize_filename_empty_falls_back_to_user_id() {
+        // Dots-only names trim down to nothing.
+        assert_eq!(sanitize_filename("...   ", 7), "user_7");
+        assert_eq!(sanitize_filename("", 42), "user_42");
+    }
+
+    #[test]
+    fn unique_name_appends_numeric_suffixes() {
+        let mut used = vec!["Alice".to_string()];
+        assert_eq!(unique_name("Bob", &mut used), "Bob");
+        assert_eq!(unique_name("Alice", &mut used), "Alice (2)");
+        assert_eq!(unique_name("Alice", &mut used), "Alice (3)");
+        // Suffixed names count as taken themselves.
+        assert_eq!(unique_name("Alice (2)", &mut used), "Alice (2) (2)");
+    }
+
+    // ─── WAV output ─────────────────────────────────────────────────
+
+    #[test]
+    fn wav_writer_output_parses_back() {
+        let dir = std::env::temp_dir().join(format!("nek0_wav_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("roundtrip.wav");
+
+        // One sample per frame exercises the streaming write path the same
+        // way the slot-by-slot saver does.
+        let samples: Vec<i16> = (0..960i32)
+            .map(|i| (i.wrapping_mul(37) % 2001) as i16 - 1000)
+            .collect();
+        let mut w = WavWriter::create(&path, 1).unwrap();
+        for s in &samples {
+            w.write_frame(&[*s]).unwrap();
+        }
+        w.finish().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let pcm = crate::parse_wav_pcm(&bytes).expect("WavWriter output must parse");
+        assert_eq!(pcm.len(), samples.len());
+        for (got, want) in pcm.iter().zip(samples.iter()) {
+            let want = *want as f32 / 32768.0;
+            assert!(
+                (got - want).abs() < 1e-6,
+                "sample mismatch: {} vs {}",
+                got,
+                want
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn wav_writer_stereo_downmixes_on_parse() {
+        let dir = std::env::temp_dir().join(format!("nek0_wav_stereo_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stereo.wav");
+
+        // 100 interleaved L/R frames; parse_wav_pcm averages the pair.
+        let mut w = WavWriter::create(&path, 2).unwrap();
+        for f in 0..100i32 {
+            let l = (f * 7 % 16001) as i16 - 8000;
+            let r = (f * 11 % 16001) as i16 - 8000;
+            w.write_frame(&[l, r]).unwrap();
+        }
+        w.finish().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let pcm = crate::parse_wav_pcm(&bytes).expect("stereo WavWriter output must parse");
+        assert_eq!(pcm.len(), 100);
+        for (f, got) in pcm.iter().enumerate() {
+            let l = ((f as i32 * 7 % 16001) - 8000) as i64;
+            let r = ((f as i32 * 11 % 16001) - 8000) as i64;
+            let want = ((l + r) as f32 / 2.0) / 32768.0;
+            assert!((got - want).abs() < 1e-6);
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+}
