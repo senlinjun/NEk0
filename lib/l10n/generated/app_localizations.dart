@@ -569,7 +569,7 @@ abstract class AppLocalizations {
   /// No description provided for @sfxPackPartialLoad.
   ///
   /// In en, this message translates to:
-  /// **'Some sounds in this pack were skipped (unsupported format or longer than 2 seconds).'**
+  /// **'Some sounds in this pack were skipped (unsupported format).'**
   String get sfxPackPartialLoad;
 
   /// No description provided for @poke.

@@ -93,7 +93,7 @@
   },
   "sfxPackInvalidZip": "不是有效的语音包：缺少 pack.json 或文件不是 zip 压缩包。",
   "sfxPackInvalidManifest": "pack.json 无效：需要 name 字段，以及把事件 ID（1–37）映射到压缩包内 WAV 文件的 sounds 表。",
-  "sfxPackPartialLoad": "语音包中部分音频被跳过（格式不支持或超过 2 秒）。",
+  "sfxPackPartialLoad": "语音包中部分音频被跳过（格式不支持）。",
 
   "poke": "Poke",
   "pokeHint": "输入要发送的提示消息",

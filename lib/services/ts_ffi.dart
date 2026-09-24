@@ -774,7 +774,7 @@ class TsNative {
     _setClientPosition(clientId, x ?? 0.0, y ?? 0.0, enabled);
   }
 
-  /// Install a custom WAV sample for an SFX kind (1..=25, see SfxKind).
+  /// Install a custom WAV sample for an SFX kind (1..=37, see SfxKind).
   /// Returns 0 on success; see the typedef above for error codes.
   static int setSfxSample(int kind, Pointer<Uint8> data, int len) {
     return _setSfxSample(kind, data, len);

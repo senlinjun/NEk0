@@ -251,7 +251,7 @@ class AppLocalizationsZh extends AppLocalizations {
       'pack.json 无效：需要 name 字段，以及把事件 ID（1–37）映射到压缩包内 WAV 文件的 sounds 表。';
 
   @override
-  String get sfxPackPartialLoad => '语音包中部分音频被跳过（格式不支持或超过 2 秒）。';
+  String get sfxPackPartialLoad => '语音包中部分音频被跳过（格式不支持）。';
 
   @override
   String get poke => 'Poke';

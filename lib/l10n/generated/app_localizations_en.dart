@@ -261,7 +261,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get sfxPackPartialLoad =>
-      'Some sounds in this pack were skipped (unsupported format or longer than 2 seconds).';
+      'Some sounds in this pack were skipped (unsupported format).';
 
   @override
   String get poke => 'Poke';

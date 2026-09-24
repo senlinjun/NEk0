@@ -98,7 +98,7 @@
   },
   "sfxPackInvalidZip": "Not a voice pack: pack.json is missing or the file is not a zip archive.",
   "sfxPackInvalidManifest": "pack.json is invalid: it needs a name and a sounds table mapping event IDs (1–37) to WAV files from the archive.",
-  "sfxPackPartialLoad": "Some sounds in this pack were skipped (unsupported format or longer than 2 seconds).",
+  "sfxPackPartialLoad": "Some sounds in this pack were skipped (unsupported format).",
 
   "poke": "Poke",
   "pokeHint": "Message to send",

@@ -1028,10 +1028,16 @@ pub fn clear_sfx_queue() {
 ///
 /// Supported: PCM 16-bit and IEEE float32, 1 or 2 channels (stereo is
 /// averaged down to mono), any sample rate (linearly resampled to 48 kHz).
-/// Rejects non-RIFF/WAVE input, other encodings, files without audio data,
-/// and files longer than 2 seconds.
+/// Rejects non-RIFF/WAVE input, other encodings, and files without audio
+/// data. There is deliberately NO content-length policy here — sounds may be
+/// as long as they are; the only bound is the allocation guard below.
 pub(crate) fn parse_wav_pcm(data: &[u8]) -> Result<Vec<f32>, String> {
-    const MAX_SECONDS: f64 = 2.0;
+    // Pure allocation guard, NOT a content policy: the resample output is
+    // duration × 48 kHz samples, so a tiny file claiming a pathological
+    // sample rate (e.g. 1 Hz) would otherwise try to allocate gigabytes.
+    // ~5 minutes ≈ 57 MB decoded — ~100× the longest real sound (2.53 s);
+    // nothing legitimate ever comes near it.
+    const MAX_SECONDS: f64 = 300.0;
     const TARGET_RATE: u32 = 48_000;
 
     if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
@@ -1477,11 +1483,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_too_long() {
-        // 48000 Hz * 2.1 s = 100_800 frames > 2 s limit.
-        let samples = vec![0i16; 100_800];
-        let wav = wav_pcm16(48_000, 1, &samples);
-        let err = parse_wav_pcm(&wav).expect_err(">2s WAV should be rejected");
+    fn rejects_pathological_expansion() {
+        // The only length bound is the allocation guard against resample
+        // expansion (output = duration × 48 kHz): a 602-byte file claiming a
+        // 1 Hz rate decodes to 301 "seconds" — ~14.4M output samples — and
+        // must be rejected instead of allocating ~57 MB.
+        let err = parse_wav_pcm(&wav_pcm16(1, 1, &[0; 301]))
+            .expect_err("pathological duration should be rejected");
         assert!(err.contains("too long"), "got: {}", err);
     }
 
@@ -1906,11 +1914,6 @@ mod tests {
 
     // ─── Built-in SFX assets ────────────────────────────────────────
 
-    // KNOWN BUG, left failing on purpose until fixed: five builtin assets
-    // exceed the 2 s parse limit and load as None (silent playback at
-    // runtime) — kinds 31-35 (neutral_kicked_channel_awayfromcurrentchannel,
-    // neutral_kicked_server_currentchannel, neutral_banned_server_currentchannel,
-    // neutral_recording_started_currentchannel, neutral_recording_stopped_currentchannel).
     #[test]
     fn builtin_sfx_assets_all_parse() {
         assert_eq!(SFX_BUILTIN.len(), 37);

@@ -108,7 +108,9 @@ class SfxService {
 
   /// Replace the active sample for a channel-event kind with [bytes]
   /// (a WAV file). Returns 0 on success, otherwise an [SfxError] code; on
-  /// failure the previously active sample stays in place.
+  /// failure the previously active sample stays in place. There is no
+  /// duration policy — only parse_wav_pcm's allocation guard bounds the
+  /// input.
   static int setSample(int kind, Uint8List bytes) {
     final ptr = malloc<Uint8>(bytes.length);
     try {

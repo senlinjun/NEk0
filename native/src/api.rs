@@ -5863,8 +5863,9 @@ pub extern "C" fn ts_ft_cancel(task_id: u32) -> u8 {
 
 /// Install a custom SFX sample. `kind` is 1..=37 (see the SFX_* consts);
 /// `data` points to `len` bytes of a RIFF/WAVE file (PCM 16-bit or IEEE
-/// float32, 1/2 channels, ≤2s — anything else is rejected without touching
-/// the currently active sample).
+/// float32, 1/2 channels — anything else is rejected without touching the
+/// currently active sample; only parse_wav_pcm's allocation guard bounds the
+/// length, there is no content-duration policy).
 ///
 /// Returns 0 on success, 1 for an invalid kind, 2 for an unsupported format,
 /// 3 for empty/too-long input.

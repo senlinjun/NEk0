@@ -136,8 +136,6 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   (the `cdylib`-only crate type rules out a `tests/` directory). Verification is
   `dart format` + `flutter analyze` + `flutter test` (+ `cargo check` and `cargo test --lib`
   for Rust changes; check host + both android targets when touching audio or FFI code).
-  `builtin_sfx_assets_all_parse` in lib.rs is intentionally red until the over-length builtin
-  SFX assets (kinds 31–35, > 2 s) are fixed.
 - Keep all code and comments in English.
 - i18n: all UI strings go through `AppLocalizations` (gen-l10n). After editing
   `lib/l10n/*.arb`, run `flutter gen-l10n` — generated files in `lib/l10n/generated/`
