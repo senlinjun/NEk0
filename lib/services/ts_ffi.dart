@@ -113,6 +113,10 @@ typedef _SetMicCaptureDart = int Function(int);
 typedef _GetMicRmsNative = Float Function();
 typedef _GetMicRmsDart = double Function();
 
+// ts_get_last_audio_error() -> *mut c_char ("" when capture is healthy)
+typedef _GetLastAudioErrorNative = Pointer<Utf8> Function();
+typedef _GetLastAudioErrorDart = Pointer<Utf8> Function();
+
 // ts_get_audio_devices() -> *char (JSON {outputs:[{name,is_default}], inputs:[...]})
 typedef _GetAudioDevicesNative = Pointer<Utf8> Function();
 typedef _GetAudioDevicesDart = Pointer<Utf8> Function();
@@ -393,6 +397,10 @@ final _setMicCapture = _lib
 final _getMicRms = _lib.lookupFunction<_GetMicRmsNative, _GetMicRmsDart>(
   'ts_get_mic_rms',
 );
+final _getLastAudioError = _lib
+    .lookupFunction<_GetLastAudioErrorNative, _GetLastAudioErrorDart>(
+      'ts_get_last_audio_error',
+    );
 final _getAudioDevices = _lib
     .lookupFunction<_GetAudioDevicesNative, _GetAudioDevicesDart>(
       'ts_get_audio_devices',
@@ -725,6 +733,12 @@ class TsNative {
   /// reports levels from its own EventChannel data instead.
   static double getMicRms() {
     return _getMicRms();
+  }
+
+  /// Last mic-capture failure message ('' when capture is healthy). The
+  /// raw cpal/WASAPI text — classify with mic_error.dart for display.
+  static String getLastAudioError() {
+    return _ptrToString(_getLastAudioError());
   }
 
   /// Host audio devices for the picker UI (desktop). Shape:

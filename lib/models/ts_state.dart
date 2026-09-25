@@ -85,6 +85,11 @@ class TsConnectionState {
   final double micGain;
   final double micRms;
 
+  /// Raw native mic-capture failure text (see record_mic_error in api.rs),
+  /// surfaced so "no mic input" is no longer silent on desktop. The UI
+  /// classifies known WASAPI HRESULTs into a localized hint.
+  final String? micError;
+
   const TsConnectionState({
     this.connected = false,
     this.connecting = false,
@@ -116,6 +121,7 @@ class TsConnectionState {
     this.vadThreshold = 0.005,
     this.micGain = 1.0,
     this.micRms = 0.0,
+    this.micError,
   });
 
   TsConnectionState copyWith({
@@ -149,6 +155,7 @@ class TsConnectionState {
     double? vadThreshold,
     double? micGain,
     double? micRms,
+    Object? micError = _sentinel,
   }) => TsConnectionState(
     connected: connected ?? this.connected,
     connecting: connecting ?? this.connecting,
@@ -186,6 +193,7 @@ class TsConnectionState {
     vadThreshold: vadThreshold ?? this.vadThreshold,
     micGain: micGain ?? this.micGain,
     micRms: micRms ?? this.micRms,
+    micError: micError == _sentinel ? this.micError : micError as String?,
   );
 }
 
@@ -290,6 +298,12 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   bool _micEnabled = false;
   bool _micGranted =
       false; // true only after enableMic() successfully completes
+  // Capture start is async and can legitimately fail (Windows mic privacy,
+  // unplugged device): the retry timer keeps re-attempting while the mic is
+  // wanted, and _micStarting prevents overlapping attempts while one is in
+  // flight.
+  Timer? _micRetryTimer;
+  bool _micStarting = false;
   bool _inputMutedBeforeAway = false; // input mute to restore when leaving away
   SharedPreferences? _prefs; // cached for synchronous saves
   // UIDs whose saved 2D position has been applied this session (see
@@ -560,6 +574,11 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         _audioService = AudioService();
         _audioService!.onMicLevel = (double rms) {
           state = state.copyWith(micRms: rms);
+        };
+        // Raw native capture failures — the UI classifies the well-known
+        // WASAPI cases into a localized hint (mic_error.dart).
+        _audioService!.onMicError = (String raw) {
+          state = state.copyWith(micError: raw);
         };
         _audioService!.start();
         // Init VAD defaults and start mic via control flow
@@ -881,6 +900,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     _disconnectFallbackTimer?.cancel();
     _disconnectFallbackTimer = null;
     _pollTimer?.cancel();
+    _micRetryTimer?.cancel();
+    _micRetryTimer = null;
+    _micStarting = false;
     _audioService?.stop();
     _audioService = null;
     ForegroundService.stop();
@@ -905,6 +927,9 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     _audioService?.stop();
     _audioService = null;
     _micEnabled = false;
+    _micStarting = false;
+    _micRetryTimer?.cancel();
+    _micRetryTimer = null;
     ForegroundService.stop();
     // Let the real 'disconnected' event from the event loop drive cleanup.
     // The poll timer keeps running — _handleEvent('disconnected') will
@@ -1172,20 +1197,54 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   void _updateMicState() {
     if (_audioService == null) return;
     final should = _shouldMicBeActive;
-    if (should && !_micEnabled) {
-      _audioService!.enableMic().then((granted) {
-        if (granted) {
-          _micGranted = true;
-          _refreshNotification(mic: true);
-        }
-      });
-      _micEnabled = true;
-    } else if (!should && _micEnabled) {
+    if (should && !_micEnabled && !_micStarting) {
+      _startMic();
+    } else if (!should && (_micEnabled || _micStarting)) {
+      _micRetryTimer?.cancel();
+      _micRetryTimer = null;
+      _micStarting = false;
       _audioService!.disableMic();
       _micEnabled = false;
       _micGranted = false;
+      state = state.copyWith(micError: null);
       _refreshNotification(mic: false);
     }
+  }
+
+  /// Starts capture; on failure schedules a 2s retry for as long as the mic
+  /// is wanted. The old code set _micEnabled optimistically before the
+  /// result arrived, which made the first failed start (e.g. Windows mic
+  /// privacy) permanent for the whole session.
+  void _startMic() {
+    final service = _audioService;
+    if (service == null) return;
+    _micStarting = true;
+    service.enableMic().then((granted) {
+      _micStarting = false;
+      if (!identical(service, _audioService)) return; // disconnect raced
+      if (granted) {
+        if (_shouldMicBeActive) {
+          _micEnabled = true;
+          _micGranted = true;
+          state = state.copyWith(micError: null);
+          _refreshNotification(mic: true);
+        } else {
+          // The user muted (or went away) while the start was in flight —
+          // drop the just-started capture instead of leaving it running.
+          service.disableMic();
+          _micGranted = false;
+        }
+      } else if (_shouldMicBeActive) {
+        _micRetryTimer?.cancel();
+        _micRetryTimer = Timer(const Duration(seconds: 2), () {
+          if (identical(service, _audioService) &&
+              _shouldMicBeActive &&
+              !_micEnabled) {
+            _updateMicState();
+          }
+        });
+      }
+    });
   }
 
   void togglePttMode() {

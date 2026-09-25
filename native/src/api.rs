@@ -1,9 +1,9 @@
 use crate::{
     Command, TsChannel, TsClient, TsEvent, TsFtEntry, TsServerGroup, TsChannelGroup, TsPerm,
-    AUDIO_DECODERS, AUDIO_DECODERS_STEREO, AUDIO_STREAM, CB_STATS, CLIENT_BUFFERS,
+    AUDIO_DECODERS, AUDIO_DECODERS_STEREO, AUDIO_LAST_ERROR, AUDIO_STREAM, CB_STATS, CLIENT_BUFFERS,
     COMMAND_TX, FRAME_SIZE, FT_CLIENT_FT, FT_KIND_DOWNLOAD, FT_KIND_UPLOAD, FT_LISTS, FT_OPS,
-    FT_TASK_BY_RC, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, PERM_OPS, PLAYED_SAMPLES,
-    ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
+    FT_TASK_BY_RC, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, MIC_RESTART_REQUESTED, PERM_OPS,
+    PLAYED_SAMPLES, ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
     SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
     PendingFtList, recording,
     JITTER_STATS, MIN_SURPLUS_FRAMES, OUTPUT_PERIOD_MS, OUTPUT_RATE,
@@ -1484,6 +1484,14 @@ fn pick_device(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
             "audio: chosen {} device \"{}\" not available, falling back",
             kind, want
         );
+        if input {
+            // A successful start clears this again; if the fallback also
+            // fails, its own error overwrites this one.
+            record_mic_error(format!(
+                "chosen input device \"{}\" not available, using default",
+                want
+            ));
+        }
     } else {
         #[cfg(target_os = "linux")]
         {
@@ -1789,6 +1797,17 @@ fn spawn_maintenance_task() {
                         eprintln!("[cpal] restarting output stream (device change / stream error)");
                         restart_output_stream();
                         OUTPUT_RESTART_REQUESTED.store(false, Ordering::Relaxed);
+                    }
+
+                    // Same for the capture stream: rebuild it after an input
+                    // error killed it (device replug, WASAPI glitch). A
+                    // user-driven stop clears the flag in stop_mic_capture,
+                    // so only genuinely dead streams restart here.
+                    if MIC_RESTART_REQUESTED.swap(false, Ordering::Relaxed)
+                        && crate::MIC_STREAM.lock().unwrap().0.is_none()
+                    {
+                        eprintln!("[cpal] restarting mic capture stream (stream error)");
+                        start_mic_capture();
                     }
                 }
                 _ = stats_tick.tick() => {
@@ -4817,6 +4836,21 @@ pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
 
 // ─── Mic capture (desktop; Android uses the Kotlin EventChannel path) ──
 
+/// Records a mic-capture failure for the UI: stderr (dev console) plus
+/// AUDIO_LAST_ERROR, which ts_get_last_audio_error exposes to Dart. Known
+/// WASAPI HRESULTs are mapped to a localized hint on the Dart side, where
+/// the l10n strings live.
+fn record_mic_error(msg: String) {
+    eprintln!("cpal mic: {}", msg);
+    *AUDIO_LAST_ERROR.lock().unwrap() = Some(msg);
+}
+
+/// Clears the last recorded mic-capture failure (called on successful start
+/// and on user-driven stop).
+fn clear_mic_error() {
+    *AUDIO_LAST_ERROR.lock().unwrap() = None;
+}
+
 /// Per-stream mic resampler: device input (interleaved f32) → 48 kHz mono.
 /// Streaming linear interpolation with state carried across callbacks.
 struct MicResampler {
@@ -4891,29 +4925,34 @@ impl MicResampler {
     }
 }
 
-/// Starts the cpal microphone input stream (desktop capture). Requests
-/// 48 kHz mono first, falling back to the device's default input
-/// sample rate and channel count (downmixed + resampled to 48 kHz mono in
-/// the callback). Idempotent: true when a capture stream already runs.
+/// Starts the cpal microphone input stream (desktop capture). Tries the
+/// device's own default input format first, then 48 kHz mono (both downmixed
+/// + resampled to 48 kHz mono in the callback). Idempotent: true when a
+/// capture stream already runs — the error callback unregisters dead streams,
+/// so a failed device cannot keep satisfying this check.
 pub fn start_mic_capture() -> bool {
     if crate::MIC_STREAM.lock().unwrap().0.is_some() {
         return true;
     }
     let host = cpal::default_host();
     let Some(device) = pick_device(&host, true) else {
-        eprintln!("cpal mic: no input device");
+        record_mic_error("no input device".into());
         return false;
     };
-    eprintln!(
-        "cpal mic: input device \"{}\"",
-        device.name().unwrap_or_default()
-    );
-    let mut candidates = vec![cpal::StreamConfig {
-        channels: 1,
-        sample_rate: cpal::SampleRate(48000),
-        buffer_size: cpal::BufferSize::Default,
-    }];
+    let dev_name = device.name().unwrap_or_default();
+    eprintln!("cpal mic: input device \"{}\"", dev_name);
+    // cpal's WASAPI backend treats every IsFormatSupported S_FALSE as
+    // unsupported (no AUTOCONVERTPCM), so the device's own mix format must
+    // be the first candidate — 48 kHz mono only succeeds on devices natively
+    // running at 48 kHz mono. MicResampler normalizes everything to 48 kHz
+    // mono afterwards, so trying the native format first costs nothing.
+    let mut candidates: Vec<cpal::StreamConfig> = Vec::new();
     if let Ok(default) = device.default_input_config() {
+        candidates.push(cpal::StreamConfig {
+            channels: default.channels(),
+            sample_rate: default.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        });
         if default.sample_rate().0 != 48000 {
             candidates.push(cpal::StreamConfig {
                 channels: 1,
@@ -4921,14 +4960,12 @@ pub fn start_mic_capture() -> bool {
                 buffer_size: cpal::BufferSize::Default,
             });
         }
-        if default.channels() > 1 {
-            candidates.push(cpal::StreamConfig {
-                channels: default.channels(),
-                sample_rate: default.sample_rate(),
-                buffer_size: cpal::BufferSize::Default,
-            });
-        }
     }
+    candidates.push(cpal::StreamConfig {
+        channels: 1,
+        sample_rate: cpal::SampleRate(48000),
+        buffer_size: cpal::BufferSize::Default,
+    });
 
     for config in candidates {
         let mut resampler = MicResampler::new(config.channels as usize, config.sample_rate.0);
@@ -4945,36 +4982,59 @@ pub fn start_mic_capture() -> bool {
                 crate::MIC_RMS.store(f32::to_bits(rms), Ordering::Relaxed);
                 queue_mic_samples(std::mem::take(&mut resampler.out));
             },
-            |err| eprintln!("cpal mic input error: {}", err),
+            |err| {
+                record_mic_error(format!("input stream error: {}", err));
+                // Unregister the dead stream so ts_set_mic_capture no longer
+                // reports success, and ask the maintenance task to rebuild.
+                crate::MIC_STREAM.lock().unwrap().0 = None;
+                crate::MIC_RESTART_REQUESTED.store(true, Ordering::Relaxed);
+            },
             None,
         );
         match stream {
             Ok(stream) => {
                 crate::MIC_STREAM.lock().unwrap().0 = Some(stream);
+                clear_mic_error();
                 eprintln!(
                     "cpal mic: input stream started ({} Hz, {} ch)",
                     config.sample_rate.0, config.channels
                 );
                 return true;
             }
-            Err(e) => eprintln!(
-                "cpal mic: build_input_stream failed ({} Hz, {} ch): {}",
+            Err(e) => record_mic_error(format!(
+                "build_input_stream failed ({} Hz, {} ch): {}",
                 config.sample_rate.0, config.channels, e
-            ),
+            )),
         }
     }
-    eprintln!("cpal mic: all input configurations failed");
+    record_mic_error(format!(
+        "all input configurations failed for device \"{}\"",
+        dev_name
+    ));
     false
 }
 
-/// Stops the microphone input stream (Dart-driven lifecycle).
+/// Stops the microphone input stream (Dart-driven lifecycle). Also cancels
+/// a pending auto-restart — a deliberate stop must win over the maintenance
+/// task's rebuild request — and clears the recorded failure.
 pub fn stop_mic_capture() {
+    crate::MIC_RESTART_REQUESTED.store(false, Ordering::Relaxed);
     let mut guard = crate::MIC_STREAM.lock().unwrap();
     if guard.0.take().is_some() {
         eprintln!("cpal mic: input stream stopped");
     }
     drop(guard);
     crate::MIC_RMS.store(0, Ordering::Relaxed);
+    clear_mic_error();
+}
+
+/// Last mic-capture failure message (desktop path, see record_mic_error),
+/// "" while capture is healthy. Dart maps known WASAPI HRESULTs in the raw
+/// cpal error text to a localized hint.
+#[no_mangle]
+pub extern "C" fn ts_get_last_audio_error() -> *mut c_char {
+    let msg = AUDIO_LAST_ERROR.lock().unwrap().clone().unwrap_or_default();
+    to_c_str(msg)
 }
 
 /// Desktop mic capture toggle. Returns 1 on success (or when already in the
@@ -5073,20 +5133,31 @@ pub extern "C" fn ts_set_audio_output_device(name: *const c_char) -> u8 {
 }
 
 /// Selects the input (mic) device by name ("" = system default). A running
-/// capture stream is restarted on the new device immediately; returns 0
-/// when that restart failed.
+/// capture stream is restarted on the new device immediately; if that device
+/// refuses to open, the system default is retried so capture stays up
+/// instead of dying with the old stream already stopped. Returns 0 only
+/// when even the default device failed.
 #[no_mangle]
 pub extern "C" fn ts_set_audio_input_device(name: *const c_char) -> u8 {
     let name = unsafe { cstr_to_string(name) };
     let was_running = crate::MIC_STREAM.lock().unwrap().0.is_some();
-    *INPUT_DEVICE_NAME.lock().unwrap() = if name.is_empty() { None } else { Some(name) };
-    if was_running {
-        stop_mic_capture();
-        if !start_mic_capture() {
-            return 0;
-        }
+    *INPUT_DEVICE_NAME.lock().unwrap() = if name.is_empty() { None } else { Some(name.clone()) };
+    if !was_running {
+        return 1;
     }
-    1
+    stop_mic_capture();
+    if start_mic_capture() {
+        return 1;
+    }
+    record_mic_error(format!(
+        "input device \"{}\" unavailable; falling back to system default",
+        name
+    ));
+    *INPUT_DEVICE_NAME.lock().unwrap() = None;
+    if start_mic_capture() {
+        return 1;
+    }
+    0
 }
 
 // ─── SFX (custom samples / preview / local triggers) ─────────────────
@@ -6231,6 +6302,31 @@ pub extern "C" fn ts_discard_recording() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Mic error record ───────────────────────────────────────────
+
+    #[test]
+    fn last_audio_error_roundtrip_via_ffi() {
+        clear_mic_error();
+        assert_eq!(unsafe { cstr_to_string(ts_get_last_audio_error()) }, "");
+        record_mic_error("build_input_stream failed: boom".into());
+        assert_eq!(
+            unsafe { cstr_to_string(ts_get_last_audio_error()) },
+            "build_input_stream failed: boom"
+        );
+        clear_mic_error();
+        assert_eq!(unsafe { cstr_to_string(ts_get_last_audio_error()) }, "");
+    }
+
+    #[test]
+    fn mic_restart_flag_survives_until_cleared() {
+        MIC_RESTART_REQUESTED.store(false, Ordering::Relaxed);
+        assert!(!MIC_RESTART_REQUESTED.swap(true, Ordering::Relaxed));
+        // The maintenance task's swap(false) must be the only reader that
+        // observes the pending request.
+        assert!(MIC_RESTART_REQUESTED.swap(false, Ordering::Relaxed));
+        assert!(!MIC_RESTART_REQUESTED.load(Ordering::Relaxed));
+    }
 
     // ─── Return code / path parsing ─────────────────────────────────
 

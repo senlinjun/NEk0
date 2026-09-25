@@ -155,6 +155,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get micPermissionDenied => 'Microphone permission denied';
 
   @override
+  String get micPrivacyHint =>
+      'Windows blocked microphone access. Open Settings → Privacy & security → Microphone and allow desktop apps to access it (also check apps that may be using the mic).';
+
+  @override
   String get audioDevicesSection => 'Audio devices';
 
   @override

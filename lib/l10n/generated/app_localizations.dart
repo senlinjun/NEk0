@@ -368,6 +368,12 @@ abstract class AppLocalizations {
   /// **'Microphone permission denied'**
   String get micPermissionDenied;
 
+  /// No description provided for @micPrivacyHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Windows blocked microphone access. Open Settings → Privacy & security → Microphone and allow desktop apps to access it (also check apps that may be using the mic).'**
+  String get micPrivacyHint;
+
   /// No description provided for @audioDevicesSection.
   ///
   /// In en, this message translates to:

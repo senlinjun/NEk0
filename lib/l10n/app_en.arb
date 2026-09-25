@@ -53,6 +53,7 @@
   "stopMicTest": "Stop test",
   "micInUseWhileConnected": "Mic is in use while connected \u2014 test is disabled.",
   "micPermissionDenied": "Microphone permission denied",
+  "micPrivacyHint": "Windows blocked microphone access. Open Settings → Privacy & security → Microphone and allow desktop apps to access it (also check apps that may be using the mic).",
   "audioDevicesSection": "Audio devices",
   "audioOutputDevice": "Output device",
   "audioInputDevice": "Input device",

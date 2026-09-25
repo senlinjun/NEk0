@@ -17,6 +17,7 @@ import '../models/window_settings.dart';
 import '../services/audio_service.dart';
 import '../services/background_service.dart';
 import '../services/foreground_service.dart';
+import '../services/mic_error.dart';
 import '../services/ota_service.dart';
 import '../services/sfx_pack_service.dart';
 import '../services/ts_ffi.dart';
@@ -41,6 +42,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   AudioService? _testAudio;
   bool _micTest = false;
   double _testRms = 0.0;
+  // Raw native mic error from the current/last test run (null = healthy).
+  String? _testError;
   List<SfxPack> _sfxPacks = [];
   String? _activeSfxPack;
   String? _bgName;
@@ -183,6 +186,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       setState(() {
         _micTest = false;
         _testRms = 0.0;
+        _testError = null;
       });
       return;
     }
@@ -190,16 +194,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     a.onMicLevel = (rms) {
       if (mounted) setState(() => _testRms = rms);
     };
+    // Native capture failures (start or a stream dying mid-test).
+    a.onMicError = (raw) {
+      if (mounted) setState(() => _testError = raw);
+    };
     final started = await a.start();
     final granted = started ? await a.enableMic() : false;
     if (!granted) {
       a.stop();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(AppLocalizations.of(context).micPermissionDenied),
-          ),
-        );
+        final raw = _testError;
+        final al = AppLocalizations.of(context);
+        // The generic "permission denied" text is often wrong on desktop —
+        // show the localized Windows-privacy hint or the raw native error.
+        final text =
+            raw != null && classifyMicError(raw) == MicErrorKind.privacy
+            ? al.micPrivacyHint
+            : (raw ?? al.micPermissionDenied);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(text)));
       }
       return;
     }
@@ -823,6 +837,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 // Draw the mic test level onto the threshold slider, just
                 // like the server screen's long-press-mic sheet.
                 levelOverride: _micTest ? _testRms : null,
+                // While connected, the in-call error (conn.micError) is what
+                // matters — don't let a stale test failure mask it.
+                errorOverride: connected ? null : _testError,
               ),
             ),
           ),

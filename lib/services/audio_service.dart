@@ -32,6 +32,24 @@ class AudioService {
   double get micRms => _micRms;
   void Function(double rms)? onMicLevel;
 
+  /// Fired when native capture reports a failure — a failed start or an
+  /// error on a running stream. Desktop (cpal) path only; the payload is
+  /// the raw native error text (classify with mic_error.dart for display).
+  void Function(String error)? onMicError;
+
+  /// Last error text already reported, so the 50ms poll loop only fires
+  /// onMicError on change instead of 20x per second.
+  String _lastReportedError = '';
+
+  /// Reads the native last-error and fires [onMicError] when it changed.
+  void _reportMicError() {
+    final err = TsNative.getLastAudioError();
+    if (err.isNotEmpty && err != _lastReportedError) {
+      _lastReportedError = err;
+      onMicError?.call(err);
+    }
+  }
+
   Future<bool> start() async {
     if (_running) return true;
 
@@ -67,7 +85,12 @@ class AudioService {
       }
       if (_usesNativeMic) {
         granted = TsNative.setMicCapture(true);
-        if (!granted) debugPrint('AudioService: native mic capture failed');
+        if (!granted) {
+          debugPrint('AudioService: native mic capture failed');
+          // The native side records *why* (device, format, Windows mic
+          // privacy…); stderr is invisible in a GUI session, so push it up.
+          _reportMicError();
+        }
       } else {
         _startAndroidMic();
       }
@@ -75,6 +98,12 @@ class AudioService {
         _micActive = true;
         if (_usesNativeMic) _startRmsPolling();
         debugPrint('AudioService: mic enabled');
+      } else if (_usesNativeMic) {
+        // Keep polling even on failure: it surfaces the current error to
+        // the UI and picks up a later-resolved blocker (e.g. the user
+        // flipping on the Windows microphone-privacy switch) while the
+        // caller's retry loop keeps re-attempting.
+        _startRmsPolling();
       }
       return granted;
     } catch (e) {
@@ -146,10 +175,14 @@ class AudioService {
   void _startRmsPolling() {
     _rmsTimer?.cancel();
     _rmsTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (!_micActive) return;
-      final rms = TsNative.getMicRms();
-      _micRms = rms;
-      onMicLevel?.call(rms);
+      if (_micActive) {
+        final rms = TsNative.getMicRms();
+        _micRms = rms;
+        onMicLevel?.call(rms);
+        // A stream that built fine can still die mid-session (device
+        // unplug, WASAPI glitch) — only the native error reports it.
+      }
+      _reportMicError();
     });
   }
 
@@ -164,5 +197,6 @@ class AudioService {
     _rmsTimer = null;
     _micActive = false;
     _micRms = 0.0;
+    _lastReportedError = '';
   }
 }

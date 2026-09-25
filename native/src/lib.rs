@@ -921,6 +921,16 @@ pub static AUDIO_STREAM: std::sync::Mutex<SendStream> = std::sync::Mutex::new(Se
 /// Kotlin AudioRecord → EventChannel pipeline instead — this stays None
 /// there. Dart drives the lifecycle via ts_set_mic_capture.
 pub static MIC_STREAM: std::sync::Mutex<SendStream> = std::sync::Mutex::new(SendStream(None));
+/// Last mic-capture failure message (desktop path), surfaced by
+/// ts_get_last_audio_error so the Dart UI can show why capture produced
+/// nothing — every capture failure used to go to stderr only, which is
+/// invisible in a Windows GUI session. Cleared on a successful (re)start.
+pub static AUDIO_LAST_ERROR: Lazy<std::sync::Mutex<Option<String>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+/// Set by the cpal input error callback so the maintenance task rebuilds the
+/// capture stream (same pattern as OUTPUT_RESTART_REQUESTED for the output
+/// path). A user-driven stop clears it.
+pub static MIC_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // ─── Lock-free audio globals ─────────────────────────────────────────
 

@@ -48,6 +48,7 @@
   "stopMicTest": "停止测试",
   "micInUseWhileConnected": "连接期间麦克风正在使用——测试已禁用。",
   "micPermissionDenied": "麦克风权限被拒绝",
+  "micPrivacyHint": "Windows 拦截了麦克风访问。请打开 设置 → 隐私和安全性 → 麦克风，允许桌面应用访问麦克风（并检查是否有其他应用占用麦克风）。",
   "audioDevicesSection": "音频设备",
   "audioOutputDevice": "输出设备",
   "audioInputDevice": "输入设备",

@@ -147,6 +147,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get micPermissionDenied => '麦克风权限被拒绝';
 
   @override
+  String get micPrivacyHint =>
+      'Windows 拦截了麦克风访问。请打开 设置 → 隐私和安全性 → 麦克风，允许桌面应用访问麦克风（并检查是否有其他应用占用麦克风）。';
+
+  @override
   String get audioDevicesSection => '音频设备';
 
   @override

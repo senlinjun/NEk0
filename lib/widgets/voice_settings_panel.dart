@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../l10n/generated/app_localizations.dart';
 
 import '../models/ts_state.dart';
+import '../services/mic_error.dart';
 
 /// Shared mic voice settings panel (PTT mode, VAD, threshold + level meter,
 /// mic gain). Used by the server screen's long-press-mic bottom sheet and by
@@ -14,6 +15,7 @@ class VoiceSettingsPanel extends StatefulWidget {
     required this.notifier,
     this.showTitle = true,
     this.levelOverride,
+    this.errorOverride,
   });
 
   final TsConnectionState conn;
@@ -23,6 +25,10 @@ class VoiceSettingsPanel extends StatefulWidget {
   /// External mic level (e.g. from the settings mic test). When null the
   /// panel falls back to the live [conn.micRms].
   final double? levelOverride;
+
+  /// External mic error text (e.g. from the settings mic test). When null
+  /// the panel falls back to [conn.micError].
+  final String? errorOverride;
 
   @override
   State<VoiceSettingsPanel> createState() => _VoiceSettingsPanelState();
@@ -177,6 +183,26 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
                   ),
                 ),
               ],
+            );
+          },
+        ),
+        // Mic capture failure (desktop): shows *why* the level bar is flat.
+        // The raw text comes from the native side; well-known Windows
+        // privacy/busy errors are replaced by a localized actionable hint.
+        Builder(
+          builder: (_) {
+            final raw = widget.errorOverride ?? widget.conn.micError;
+            if (raw == null || raw.isEmpty) return const SizedBox.shrink();
+            final al = AppLocalizations.of(context);
+            final text = classifyMicError(raw) == MicErrorKind.privacy
+                ? al.micPrivacyHint
+                : raw;
+            return Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                text,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 11),
+              ),
             );
           },
         ),
