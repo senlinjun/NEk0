@@ -250,6 +250,12 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       if (pw == null || pw.isEmpty) return;
       ref.read(tsConnectionProvider.notifier).selectChannel(next, password: pw);
     });
+    // Incoming poke: the in-app popup (the app's only popup). Fires on every
+    // platform, regardless of the notification settings.
+    ref.listen(tsConnectionProvider.select((s) => s.pokeInfo), (prev, next) {
+      if (next == null || !mounted) return;
+      _showPokeReceivedDialog(next);
+    });
     final connNotifier = ref.read(tsConnectionProvider.notifier);
 
     return Scaffold(
@@ -280,6 +286,42 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         ),
       ),
     );
+  }
+
+  /// Joining a locked channel: prompt for the password the first time,
+  /// reuse the session-cached one afterwards. A wrong password comes back
+  /// as a move_rejected event (handled by the listener in build()).
+  /// The incoming-poke popup: shows who poked and their message, with a
+  /// poke-back shortcut. Clears [TsConnectionState.pokeInfo] when closed.
+  Future<void> _showPokeReceivedDialog(PokeInfo poke) async {
+    final al = AppLocalizations.of(context);
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(al.pokeDialogTitle),
+        content: Text(
+          poke.message.isEmpty
+              ? poke.from
+              : al.pokeNotificationBody(poke.from, poke.message),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('back'),
+            child: Text(al.pokeBack),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(al.ok),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    final notifier = ref.read(tsConnectionProvider.notifier);
+    if (action == 'back') {
+      notifier.sendPoke(poke.fromClientId, '');
+    }
+    notifier.clearPokeInfo();
   }
 
   /// Joining a locked channel: prompt for the password the first time,
@@ -828,6 +870,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
     // snackbar from the chat panel.
     final notifier = ref.read(tsConnectionProvider.notifier);
     if (notifier.canServerChat) notifier.openServerChat();
+    // Chat-message toasts are suppressed while the panel is up.
+    notifier.setChatOpen(true);
 
     await showModalBottomSheet(
       context: context,
@@ -841,9 +885,12 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         child: const ChatPanel(),
       ),
     );
-    // Every open conversation counts as seen once the sheet closes.
+    // Every open conversation counts as seen once the sheet closes. The
+    // captured notifier is used (not ref) so the chatOpen flag also clears
+    // when this screen was popped while the sheet was up.
+    notifier.setChatOpen(false);
     if (mounted) {
-      ref.read(tsConnectionProvider.notifier).markAllConversationsSeen();
+      notifier.markAllConversationsSeen();
       setState(() {}); // refresh the chat bar badge
     }
   }

@@ -29,7 +29,7 @@ cargo test --lib
 
 # 4. App
 flutter run / flutter build apk          # Android
-flutter build linux --release            # Linux (needs alsa-lib, gtk3, ninja, pkg-config)
+flutter build linux --release            # Linux (needs alsa-lib, gtk3, libnotify, ninja, pkg-config)
 flutter build windows --release          # Windows (needs VS C++ workload)
 ```
 
@@ -93,10 +93,16 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
     path. Dart polls `ts_get_mic_rms` (50ms timer) for the level meter.
   Both paths converge on VAD → mic gain → Opus encode in the event loop.
 - Platform gating: `ForegroundService` (foreground service, notification actions, battery
-  exemption, poke notifications, MediaStore saves) is Android-only and degrades to no-ops
-  elsewhere — except `saveToDownloads`, which on desktop writes into the system Downloads
-  directory (`getDownloadsDirectory`). OTA (`OtaService`) is Android-only
-  (`OtaService.isSupported`); settings/home screens hide it. On desktop,
+  exemption, MediaStore saves) is Android-only and degrades to no-ops elsewhere — except
+  `saveToDownloads`, which on desktop writes into the system Downloads directory
+  (`getDownloadsDirectory`), and `notify`, which on desktop shows a system toast via
+  `local_notifier` (Windows WinRT / Linux libnotify; `main()` runs
+  `localNotifier.setup`). System notifications are gated per event kind by
+  `notificationSettingsProvider` (pokes and private messages on by default;
+  channel/server messages, channel enter/leave and moves off) and chat
+  messages never toast while the chat panel is open (`chatOpen`); chat-log
+  system messages and the poke in-app dialog always happen. OTA (`OtaService`)
+  is Android-only (`OtaService.isSupported`); settings/home screens hide it. On desktop,
   `save_to_downloads` collisions are resolved in Dart (`name (2).ext`).
 
 ## Android specifics

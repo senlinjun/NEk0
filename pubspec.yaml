@@ -52,6 +52,9 @@ dependencies:
   archive: ^3.6.1
   window_manager: ^0.5.2
   tray_manager: ^0.5.3
+  # Desktop system toasts (Windows WinRT / Linux libnotify). Android pokes
+  # go through the platform service channel instead.
+  local_notifier: ^0.1.6
 
 dev_dependencies:
   flutter_test:

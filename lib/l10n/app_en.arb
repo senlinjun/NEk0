@@ -111,6 +111,85 @@
       "message": {"type": "String"}
     }
   },
+  "pokeDialogTitle": "You were poked",
+  "pokeBack": "Poke back",
+
+  "notificationsSection": "Notifications",
+  "notifyPoke": "Pokes",
+  "notifyPokeDesc": "System notification when someone pokes you",
+  "notifyPmMessages": "Private messages",
+  "notifyPmMessagesDesc": "System notification when a private message arrives (only while the chat panel is closed)",
+  "notifyChannelMessages": "Channel & server messages",
+  "notifyChannelMessagesDesc": "System notification when a channel or server chat message arrives (only while the chat panel is closed)",
+  "notifyChannelEvents": "Channel enter/leave",
+  "notifyChannelEventsDesc": "System notification when someone enters or leaves your channel",
+  "notifyChannelMoves": "Channel switches",
+  "notifyChannelMovesDesc": "System notification when you switch channels or get moved/kicked",
+
+  "userEnteredChannel": "{name} entered the channel",
+  "@userEnteredChannel": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "userLeftChannel": "{name} left the channel",
+  "@userLeftChannel": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "userKickedFromChannelBy": "{name} was kicked from the channel by {invoker}",
+  "@userKickedFromChannelBy": {
+    "placeholders": {
+      "name": {"type": "String"},
+      "invoker": {"type": "String"}
+    }
+  },
+  "userKickedFromServerBy": "{name} was kicked from the server by {invoker}",
+  "@userKickedFromServerBy": {
+    "placeholders": {
+      "name": {"type": "String"},
+      "invoker": {"type": "String"}
+    }
+  },
+  "userKickedFromServer": "{name} was kicked from the server",
+  "@userKickedFromServer": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "userBannedBy": "{name} was banned by {invoker}",
+  "@userBannedBy": {
+    "placeholders": {
+      "name": {"type": "String"},
+      "invoker": {"type": "String"}
+    }
+  },
+  "userBanned": "{name} was banned",
+  "@userBanned": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "youMovedToChannel": "You switched to channel {channel}",
+  "@youMovedToChannel": {
+    "placeholders": {
+      "channel": {"type": "String"}
+    }
+  },
+  "youWereMovedBy": "{invoker} moved you to channel {channel}",
+  "@youWereMovedBy": {
+    "placeholders": {
+      "invoker": {"type": "String"},
+      "channel": {"type": "String"}
+    }
+  },
+  "youWereKickedFromChannelBy": "You were kicked from the channel by {invoker}",
+  "@youWereKickedFromChannelBy": {
+    "placeholders": {
+      "invoker": {"type": "String"}
+    }
+  },
   "send": "Send",
   "awayEnable": "Set away",
   "awayDisable": "Back online",

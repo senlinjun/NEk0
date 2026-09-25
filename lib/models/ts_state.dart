@@ -10,6 +10,7 @@ import '../models/app_locale.dart';
 import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/chat_message.dart';
+import '../models/notification_settings.dart';
 import '../models/perm.dart';
 import '../models/recording_settings.dart';
 import '../models/server.dart';
@@ -42,6 +43,10 @@ class TsConnectionState {
   /// The conversation the chat panel currently displays.
   final String selectedConversation;
 
+  /// True while the chat panel bottom sheet is open — chat-message toasts
+  /// are suppressed for as long as it is.
+  final bool chatOpen;
+
   /// Display names for conversations (`pm:<clid>` -> peer nickname), so a
   /// tab label survives the peer leaving the server.
   final Map<String, String> conversationTitles;
@@ -63,6 +68,10 @@ class TsConnectionState {
   /// with clientinit — the server screen should offer the privilege-key
   /// dialog. Reset once handled or on disconnect.
   final bool askForPrivilegeKey;
+
+  /// The poke the in-app dialog should surface (null = nothing pending).
+  /// Set by the 'poke' event on every platform, cleared once handled.
+  final PokeInfo? pokeInfo;
   final String? error;
   final List<String> diagMessages;
   final bool voiceActive;
@@ -88,11 +97,13 @@ class TsConnectionState {
     this.selectedChannelId,
     this.openConversations = const ['channel'],
     this.selectedConversation = 'channel',
+    this.chatOpen = false,
     this.conversationTitles = const {},
     this.unreadIds = const {},
     this.sendFailedError,
     this.failedPasswordChannelId,
     this.askForPrivilegeKey = false,
+    this.pokeInfo,
     this.error,
     this.diagMessages = const [],
     this.voiceActive = false,
@@ -118,12 +129,14 @@ class TsConnectionState {
     List<ChatMessage>? messages,
     List<String>? openConversations,
     String? selectedConversation,
+    bool? chatOpen,
     Map<String, String>? conversationTitles,
     Map<String, Set<int>>? unreadIds,
     Object? sendFailedError = _sentinel,
     Object? selectedChannelId = _sentinel,
     Object? failedPasswordChannelId = _sentinel,
     bool? askForPrivilegeKey,
+    Object? pokeInfo = _sentinel,
     String? error,
     List<String>? diagMessages,
     bool? voiceActive,
@@ -147,6 +160,7 @@ class TsConnectionState {
     messages: messages ?? this.messages,
     openConversations: openConversations ?? this.openConversations,
     selectedConversation: selectedConversation ?? this.selectedConversation,
+    chatOpen: chatOpen ?? this.chatOpen,
     conversationTitles: conversationTitles ?? this.conversationTitles,
     unreadIds: unreadIds ?? this.unreadIds,
     sendFailedError: sendFailedError == _sentinel
@@ -159,6 +173,7 @@ class TsConnectionState {
         ? this.failedPasswordChannelId
         : failedPasswordChannelId as int?,
     askForPrivilegeKey: askForPrivilegeKey ?? this.askForPrivilegeKey,
+    pokeInfo: pokeInfo == _sentinel ? this.pokeInfo : pokeInfo as PokeInfo?,
     error: error,
     diagMessages: diagMessages ?? this.diagMessages,
     voiceActive: voiceActive ?? this.voiceActive,
@@ -175,6 +190,78 @@ class TsConnectionState {
 }
 
 const _sentinel = Object();
+
+/// An incoming poke awaiting the in-app dialog (set by the 'poke' event
+/// handler on every platform; the dialog is the only popup in the app).
+class PokeInfo {
+  final String from;
+  final int fromClientId;
+  final String message;
+  const PokeInfo({
+    required this.from,
+    required this.fromClientId,
+    required this.message,
+  });
+}
+
+/// Composes the chat-log line for a chat-notice event (the Rust
+/// `client_enter_channel` / `client_leave_channel` / `self_moved` events)
+/// and for the server preset texts riding the `connected` event. Returns
+/// null when there is nothing to display. Pure so tests can drive it
+/// without touching the notifier.
+String? systemMessageText(
+  String type,
+  Map<String, dynamic> event,
+  AppLocalizations? al,
+) {
+  switch (type) {
+    case 'connected':
+      // The server's preset text: the welcome message, falling back to the
+      // host message when the server asks for it to be shown (mode >= 1).
+      final welcome = event['welcome_message'] as String? ?? '';
+      if (welcome.isNotEmpty) return welcome;
+      final hostmessage = event['hostmessage'] as String? ?? '';
+      final hostmessageMode = event['hostmessage_mode'] as int? ?? 0;
+      if (hostmessage.isNotEmpty && hostmessageMode >= 1) return hostmessage;
+      return null;
+    case 'client_enter_channel':
+      final name = event['nickname'] as String? ?? '';
+      return al?.userEnteredChannel(name) ?? '$name entered the channel';
+    case 'client_leave_channel':
+      final name = event['nickname'] as String? ?? '';
+      final kind = event['kind'] as int? ?? 0;
+      final invoker = event['invoker'] as String? ?? '';
+      return switch (kind) {
+        2 when invoker.isNotEmpty =>
+          al?.userKickedFromChannelBy(name, invoker) ??
+              '$name was kicked from the channel by $invoker',
+        4 when invoker.isNotEmpty =>
+          al?.userKickedFromServerBy(name, invoker) ??
+              '$name was kicked from the server by $invoker',
+        5 when invoker.isNotEmpty =>
+          al?.userBannedBy(name, invoker) ?? '$name was banned by $invoker',
+        4 =>
+          al?.userKickedFromServer(name) ?? '$name was kicked from the server',
+        5 => al?.userBanned(name) ?? '$name was banned',
+        _ => al?.userLeftChannel(name) ?? '$name left the channel',
+      };
+    case 'self_moved':
+      final channel = event['to_channel_name'] as String? ?? '';
+      final kind = event['kind'] as int? ?? 0;
+      final invoker = event['invoker'] as String? ?? '';
+      return switch (kind) {
+        1 when invoker.isNotEmpty =>
+          al?.youWereMovedBy(invoker, channel) ??
+              '$invoker moved you to channel $channel',
+        2 when invoker.isNotEmpty =>
+          al?.youWereKickedFromChannelBy(invoker) ??
+              'You were kicked from the channel by $invoker',
+        _ =>
+          al?.youMovedToChannel(channel) ?? 'You switched to channel $channel',
+      };
+  }
+  return null;
+}
 
 // ─── Saved Servers State ────────────────────────────────────────────
 
@@ -496,6 +583,16 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         // Pull our own directly-assigned permissions (clientpermlist answer
         // is requested by the Rust side on connect; read it back now).
         refreshOwnPerms();
+        // The server's preset text (welcome message / host message) as a
+        // system line in the server conversation.
+        final preset = systemMessageText(
+          'connected',
+          event,
+          ref.read(localeProvider.notifier).localizations,
+        );
+        if (preset != null && preset.isNotEmpty) {
+          _appendSystemMessage('server', preset);
+        }
         break;
 
       case 'disconnected':
@@ -561,6 +658,21 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           conversationTitles: titles,
           unreadIds: unread,
         );
+        // Chat-message toast: only for other people's messages, only while
+        // the chat panel is closed, and only when the per-kind setting
+        // allows it (PMs and channel/server chat are separate toggles).
+        if (fromClientId != state.ownClientId && !state.chatOpen) {
+          final settings = ref.read(notificationSettingsProvider);
+          final allowed = targetMode == 1
+              ? settings.pmMessages
+              : settings.channelMessages;
+          if (allowed) {
+            ForegroundService.notify(
+              title: event['from_client'] as String? ?? '',
+              body: event['message'] as String? ?? '',
+            );
+          }
+        }
         break;
 
       case 'send_failed':
@@ -571,16 +683,37 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         break;
 
       case 'poke':
-        // A poke is NOT a chat message — show a system notification.
         final from = event['from_client'] as String? ?? '';
         final pokeMsg = event['message'] as String? ?? '';
         final al = ref.read(localeProvider.notifier).localizations;
-        ForegroundService.notifyPoke(
-          title: al?.pokeNotificationTitle ?? 'You were poked',
-          body:
-              (al?.pokeNotificationBody(from, pokeMsg) ??
-              '$from poked you: $pokeMsg'),
+        // Chat-log record of the poke (a poke is a server event, not a text
+        // message — the line documents that it happened).
+        final line =
+            al?.pokeNotificationBody(from, pokeMsg) ??
+            '$from poked you: $pokeMsg';
+        _appendSystemMessage('channel', line);
+        // The in-app dialog is poke-only and always shows, on every
+        // platform, regardless of the notification settings.
+        state = state.copyWith(
+          pokeInfo: PokeInfo(
+            from: from,
+            fromClientId: event['from_client_id'] as int? ?? 0,
+            message: pokeMsg,
+          ),
         );
+        // System notification (Android bar / desktop toast), per settings.
+        if (ref.read(notificationSettingsProvider).poke) {
+          ForegroundService.notify(
+            title: al?.pokeNotificationTitle ?? 'You were poked',
+            body: line,
+          );
+        }
+        break;
+
+      case 'client_enter_channel':
+      case 'client_leave_channel':
+      case 'self_moved':
+        _handleChatNotice(type, event);
         break;
 
       case 'client_joined':
@@ -674,6 +807,74 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     }
   }
 
+  /// Chat-log notice for people entering/leaving our channel and our own
+  /// channel switches: always a chat line, plus a system notification when
+  /// the matching notification setting allows it. Popups are poke-only —
+  /// these events never open a dialog.
+  void _handleChatNotice(String type, Map<String, dynamic> event) {
+    final text = systemMessageText(
+      type,
+      event,
+      ref.read(localeProvider.notifier).localizations,
+    );
+    if (text == null || text.isEmpty) return;
+    _appendSystemMessage('channel', text);
+    final settings = ref.read(notificationSettingsProvider);
+    final allowed = switch (type) {
+      'client_enter_channel' ||
+      'client_leave_channel' => settings.channelEvents,
+      _ => settings.channelMoves,
+    };
+    if (allowed) {
+      ForegroundService.notify(title: state.serverName, body: text);
+    }
+  }
+
+  /// Appends a system (event-driven) chat line. Opens the conversation tab
+  /// when it does not exist yet (without stealing the selection) and always
+  /// counts as unread — system lines come from the server, never from us.
+  void _appendSystemMessage(String conversationId, String text) {
+    final msg = ChatMessage(
+      id: state.messages.length,
+      fromClient: '',
+      fromClientId: 0,
+      targetMode: 0,
+      conversationId: conversationId,
+      message: text,
+      timestamp: DateTime.now(),
+      isSystem: true,
+    );
+    var open = state.openConversations;
+    if (!open.contains(conversationId)) {
+      open = [...open, conversationId];
+    }
+    state = state.copyWith(
+      messages: [...state.messages, msg],
+      openConversations: open,
+      unreadIds: {
+        ...state.unreadIds,
+        conversationId: {
+          ...(state.unreadIds[conversationId] ?? const <int>{}),
+          msg.id,
+        },
+      },
+    );
+  }
+
+  /// Clears the poke the dialog has handled (called after the dialog
+  /// closes, whether it was confirmed or poked back).
+  void clearPokeInfo() {
+    if (state.pokeInfo != null) {
+      state = state.copyWith(pokeInfo: null);
+    }
+  }
+
+  /// Test seam: drives [_handleEvent] for the pure event kinds (chat
+  /// notices, poke state, system messages). The FFI-heavy kinds
+  /// (`connected`, `channels_updated`, ...) must not be driven through it.
+  @visibleForTesting
+  void handleEventForTest(Map<String, dynamic> event) => _handleEvent(event);
+
   /// Shared teardown for the real 'disconnected' event and for the local
   /// fallback timeout in disconnect() (fires when Rust never confirms).
   void _finalizeDisconnected() {
@@ -757,6 +958,18 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         return 'server';
       default:
         return 'channel';
+    }
+  }
+
+  /// Opens (or focuses) the private conversation with [clientId], titled
+  /// with their current nickname. Called when starting a PM from the client
+  /// sheet — switches the chat panel to it.
+  /// Tracks whether the chat panel bottom sheet is open (set by _openChat
+  /// in the server screen) — chat-message toasts are suppressed while it
+  /// is, since the messages are directly visible in the panel.
+  void setChatOpen(bool open) {
+    if (state.chatOpen != open) {
+      state = state.copyWith(chatOpen: open);
     }
   }
 

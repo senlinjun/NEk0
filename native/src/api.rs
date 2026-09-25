@@ -683,6 +683,9 @@ async fn do_connect(
             server_name: sname,
             client_id: oid,
             ask_for_privilegekey: ask_privilegekey,
+            welcome_message: book.server.welcome_message.clone(),
+            hostmessage: book.server.hostmessage.clone(),
+            hostmessage_mode: book.server.hostmessage_mode as u8,
         });
     }
 
@@ -2225,6 +2228,232 @@ fn maybe_trigger_sfx(
     }
 }
 
+// ─── Chat-log notices (client enter/leave/move) ─────────────────────
+
+/// Why a client entered our channel by appearing in the view
+/// (ClientEnterView) — mapped to the `client_enter_channel.reason` codes.
+/// `None` = not chat-worthy (initial subscription resync etc.).
+fn enter_view_reason(reason: Option<tsclientlib::Reason>) -> Option<u8> {
+    match reason {
+        Some(tsclientlib::Reason::None) => Some(0), // connected to the server
+        Some(tsclientlib::Reason::Moved) => Some(2), // moved in by someone
+        Some(tsclientlib::Reason::KickChannel) => Some(3), // kicked in
+        _ => None,
+    }
+}
+
+/// Why a client entered our channel by switching channels (clientmove) —
+/// differs from [enter_view_reason] in the self-switch case.
+fn enter_switch_reason(reason: Option<tsclientlib::Reason>) -> Option<u8> {
+    match reason {
+        Some(tsclientlib::Reason::None) => Some(1), // switched in on their own
+        Some(tsclientlib::Reason::Moved) => Some(2),
+        Some(tsclientlib::Reason::KickChannel) => Some(3),
+        _ => None,
+    }
+}
+
+/// Why a client is gone from our channel — mapped to the
+/// `client_leave_channel.kind` codes. `None` = not a real leave
+/// (subscription reshuffles, channel edits, server shutdown ...).
+fn leave_kind(reason: Option<tsclientlib::Reason>) -> Option<u8> {
+    match reason {
+        Some(tsclientlib::Reason::Moved) => Some(1),
+        Some(tsclientlib::Reason::KickChannel) => Some(2),
+        Some(tsclientlib::Reason::LostConnection)
+        | Some(tsclientlib::Reason::None)
+        | Some(tsclientlib::Reason::Clientdisconnect) => Some(3),
+        Some(tsclientlib::Reason::KickServer) => Some(4),
+        Some(tsclientlib::Reason::KickServerBan) => Some(5),
+        // Subscription / Channelupdate / Channeledit / Serverstop /
+        // ClientdisconnectServerShutdown: not a real leave, stay quiet.
+        _ => None,
+    }
+}
+
+/// `self_moved.kind`: kicked from the channel, moved by someone else, or a
+/// voluntary switch.
+fn self_move_kind(reason: Option<tsclientlib::Reason>, moved_by_other: bool) -> u8 {
+    if reason == Some(tsclientlib::Reason::KickChannel) {
+        2
+    } else if moved_by_other {
+        1
+    } else {
+        0
+    }
+}
+
+/// True when [invoker] is a genuine third party relative to [about] (not
+/// the client itself and not the pseudo client 0 the server uses for
+/// itself) — i.e. someone moved/kicked that client.
+fn is_third_party_invoker(invoker: &Option<tsproto_types::Invoker>, about: ClientId) -> bool {
+    matches!(invoker, Some(i) if i.id != about && i.id != ClientId(0))
+}
+
+/// Resolves a channel name from the book ('' when unknown, e.g. the channel
+/// vanished in the same batch).
+fn channel_name(book: &tsclientlib::data::Connection, id: ChannelId) -> String {
+    book.channels
+        .values()
+        .find(|c| c.id == id)
+        .map(|c| c.name.clone())
+        .unwrap_or_default()
+}
+
+/// The invoker name for the leave kinds that have one ('' otherwise).
+fn leave_invoker(invoker: &Option<tsproto_types::Invoker>, kind: u8) -> String {
+    match kind {
+        1 | 2 | 4 | 5 => invoker
+            .as_ref()
+            .map(|i| i.name.clone())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Classifies a book event into a chat-log notice for the Dart side (see
+/// `TsEvent::ClientEnterChannel` / `ClientLeaveChannel` / `SelfMoved`).
+/// Mirrors the classification of `maybe_trigger_sfx`: our own channel is
+/// the reference point, the initial subscription resync stays silent, and
+/// [batch_chatted] keeps a leftview+moved kick for the same client to one
+/// line (a per-batch set, deliberately separate from the SFX one so a
+/// notice can never suppress a sound or vice versa).
+fn chat_notice_for_event(
+    ev: &tsclientlib::events::Event,
+    own_client: Option<ClientId>,
+    own_channel: Option<ChannelId>,
+    book: &tsclientlib::data::Connection,
+    batch_chatted: &mut HashSet<ClientId>,
+) -> Option<TsEvent> {
+    use tsclientlib::events::{Event, PropertyId, PropertyValue};
+    use tsclientlib::Reason;
+
+    if !SFX_ARMED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let own_client = own_client?;
+    // Without a channel of our own (not in the view) there is no reference
+    // point to classify against.
+    let own_channel = own_channel?;
+
+    match ev {
+        Event::PropertyAdded { id, extra, .. } => match id {
+            PropertyId::Client(cid) => {
+                // Our own connect is covered by the connected event; the
+                // subscription resync must stay silent.
+                if *cid == own_client || extra.reason == Some(Reason::Subscription) {
+                    return None;
+                }
+                let reason = enter_view_reason(extra.reason)?;
+                // The batch snapshot already contains the new client.
+                let client = book.clients.get(cid)?;
+                if Some(client.channel) != Some(own_channel) {
+                    return None; // entered the view somewhere else
+                }
+                if !batch_chatted.insert(*cid) {
+                    return None; // movement already chatted for this client
+                }
+                Some(TsEvent::ClientEnterChannel {
+                    client_id: cid.0 as u32,
+                    nickname: client.name.clone(),
+                    reason,
+                })
+            }
+            _ => None,
+        },
+        Event::PropertyChanged { id, old, invoker, extra, .. } => match id {
+            PropertyId::ClientChannel(cid) => {
+                let old_channel = match old {
+                    PropertyValue::ChannelId(ch) => *ch,
+                    _ => return None,
+                };
+                // The batch snapshot already holds the post-move state.
+                let client = book.clients.get(cid)?;
+                let new_channel = client.channel;
+                if old_channel == new_channel {
+                    return None;
+                }
+                if *cid == own_client {
+                    let kind = self_move_kind(
+                        extra.reason,
+                        is_third_party_invoker(invoker, own_client),
+                    );
+                    Some(TsEvent::SelfMoved {
+                        to_channel_id: new_channel.0 as u32,
+                        to_channel_name: channel_name(book, new_channel),
+                        invoker: leave_invoker(invoker, kind),
+                        kind,
+                    })
+                } else if Some(old_channel) == Some(own_channel)
+                    && Some(new_channel) != Some(own_channel)
+                {
+                    let kind = leave_kind(extra.reason)?;
+                    if !batch_chatted.insert(*cid) {
+                        return None;
+                    }
+                    Some(TsEvent::ClientLeaveChannel {
+                        client_id: cid.0 as u32,
+                        nickname: client.name.clone(),
+                        kind,
+                        invoker: leave_invoker(invoker, kind),
+                    })
+                } else if Some(old_channel) != Some(own_channel)
+                    && Some(new_channel) == Some(own_channel)
+                {
+                    let reason = if is_third_party_invoker(invoker, *cid) {
+                        enter_switch_reason(extra.reason)?
+                    } else {
+                        // Self-switch or server-initiated move-in.
+                        match extra.reason {
+                            Some(Reason::KickChannel) => 3,
+                            _ => 1,
+                        }
+                    };
+                    if !batch_chatted.insert(*cid) {
+                        return None;
+                    }
+                    Some(TsEvent::ClientEnterChannel {
+                        client_id: cid.0 as u32,
+                        nickname: client.name.clone(),
+                        reason,
+                    })
+                } else {
+                    None // moved between two other channels
+                }
+            }
+            _ => None,
+        },
+        Event::PropertyRemoved { id, old, invoker, extra, .. } => match id {
+            PropertyId::Client(cid) => {
+                // Our own removal is the disconnect / kicked-from-server
+                // path — the disconnected event covers it.
+                if *cid == own_client || extra.reason == Some(Reason::Subscription) {
+                    return None;
+                }
+                let removed = match old {
+                    PropertyValue::Client(c) => c,
+                    _ => return None,
+                };
+                if Some(removed.channel) != Some(own_channel) {
+                    return None;
+                }
+                let kind = leave_kind(extra.reason)?;
+                if !batch_chatted.insert(*cid) {
+                    return None;
+                }
+                Some(TsEvent::ClientLeaveChannel {
+                    client_id: cid.0 as u32,
+                    nickname: removed.name.clone(),
+                    kind,
+                    invoker: leave_invoker(invoker, kind),
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Lets a hand-built packet ride the normal `send_with_result` path so
 /// return_code bookkeeping (and the MessageResult it produces) stays in one
 /// place. We serialize `cpw` exactly like the official client: present for
@@ -2459,10 +2688,13 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                     .and_then(|b| b.clients.get(&b.own_client))
                     .map(|c| c.channel);
                 // Per-batch dedupe mask for channel_edited / channel_moved,
-                // and per-client set so a kicked client (leftview + moved in
-                // the same batch) only ever produces one sound.
+                // and per-client sets so a kicked client (leftview + moved in
+                // the same batch) only ever produces one sound and one chat
+                // notice — the two sets are independent on purpose, a notice
+                // must never suppress a sound or vice versa.
                 let mut batch_fired: u32 = 0;
                 let mut batch_handled: HashSet<ClientId> = HashSet::new();
+                let mut batch_chatted: HashSet<ClientId> = HashSet::new();
                 for ev in events {
                     match ev {
                         tsclientlib::events::Event::Message {
@@ -2521,6 +2753,15 @@ fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64
                         }
                         _ => {
                             if let Some(b) = book.as_ref() {
+                                if let Some(notice) = chat_notice_for_event(
+                                    ev,
+                                    own_client,
+                                    own_channel,
+                                    b,
+                                    &mut batch_chatted,
+                                ) {
+                                    STATE.lock().pending_events.push_back(notice);
+                                }
                                 let (ch, cl) = refresh_from_book(b);
                                 let mut state = STATE.lock();
                                 state.channels = ch;
@@ -6186,5 +6427,56 @@ mod tests {
         // A rising ramp stays rising and inside [0, 1].
         assert!(one_shot.out.iter().all(|&s| (0.0..=1.0).contains(&s)));
         assert!(one_shot.out.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    // ─── Chat-log notice reason/kind mapping ────────────────────────
+
+    #[test]
+    fn enter_view_reason_maps_connect_moved_kicked() {
+        use tsclientlib::Reason;
+        assert_eq!(enter_view_reason(Some(Reason::None)), Some(0));
+        assert_eq!(enter_view_reason(Some(Reason::Moved)), Some(2));
+        assert_eq!(enter_view_reason(Some(Reason::KickChannel)), Some(3));
+        // The initial subscription resync and unknown reasons stay silent.
+        assert_eq!(enter_view_reason(Some(Reason::Subscription)), None);
+        assert_eq!(enter_view_reason(None), None);
+    }
+
+    #[test]
+    fn enter_switch_reason_differs_on_self_switch() {
+        use tsclientlib::Reason;
+        // A self-switch into our channel is code 1, not the connect code 0.
+        assert_eq!(enter_switch_reason(Some(Reason::None)), Some(1));
+        assert_eq!(enter_switch_reason(Some(Reason::Moved)), Some(2));
+        assert_eq!(enter_switch_reason(Some(Reason::KickChannel)), Some(3));
+        assert_eq!(enter_switch_reason(Some(Reason::Subscription)), None);
+    }
+
+    #[test]
+    fn leave_kind_maps_all_real_leaves() {
+        use tsclientlib::Reason;
+        assert_eq!(leave_kind(Some(Reason::Moved)), Some(1));
+        assert_eq!(leave_kind(Some(Reason::KickChannel)), Some(2));
+        assert_eq!(leave_kind(Some(Reason::LostConnection)), Some(3));
+        assert_eq!(leave_kind(Some(Reason::None)), Some(3));
+        assert_eq!(leave_kind(Some(Reason::Clientdisconnect)), Some(3));
+        assert_eq!(leave_kind(Some(Reason::KickServer)), Some(4));
+        assert_eq!(leave_kind(Some(Reason::KickServerBan)), Some(5));
+        // Not real leaves.
+        assert_eq!(leave_kind(Some(Reason::Subscription)), None);
+        assert_eq!(leave_kind(Some(Reason::Serverstop)), None);
+        assert_eq!(leave_kind(Some(Reason::Channelupdate)), None);
+        assert_eq!(leave_kind(None), None);
+    }
+
+    #[test]
+    fn self_move_kind_precedence_kick_beats_mover() {
+        use tsclientlib::Reason;
+        assert_eq!(self_move_kind(Some(Reason::None), false), 0);
+        assert_eq!(self_move_kind(Some(Reason::Moved), true), 1);
+        assert_eq!(self_move_kind(Some(Reason::None), true), 1);
+        // The kick code wins even if an invoker is present.
+        assert_eq!(self_move_kind(Some(Reason::KickChannel), true), 2);
+        assert_eq!(self_move_kind(Some(Reason::KickChannel), false), 2);
     }
 }

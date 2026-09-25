@@ -1,14 +1,22 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:NEk0/models/notification_settings.dart';
 import 'package:NEk0/models/ts_state.dart';
+import 'package:NEk0/services/foreground_service.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   // The notifier's build() only wires Android-only notification callbacks
   // (no-ops on the desktop test host); every method used below is pure state
   // manipulation — none of them may reach TsNative.
   late ProviderContainer container;
   setUp(() {
+    // The chat-notice/poke handlers read the locale and notification-setting
+    // providers, which lazily load from SharedPreferences.
+    SharedPreferences.setMockInitialValues({});
     container = ProviderContainer();
     addTearDown(container.dispose);
   });
@@ -93,6 +101,224 @@ void main() {
       expect(notifier().unreadCount(), 0);
       // markAll must not touch the selection either.
       expect(state().selectedConversation, 'channel');
+    });
+  });
+
+  group('system chat messages', () {
+    test('client_enter_channel appends a system line to the channel tab', () {
+      notifier().handleEventForTest({
+        'type': 'client_enter_channel',
+        'client_id': 5,
+        'nickname': 'Alice',
+        'reason': 0,
+      });
+      final messages = state().messages;
+      expect(messages, hasLength(1));
+      final msg = messages.single;
+      expect(msg.isSystem, isTrue);
+      expect(msg.conversationId, 'channel');
+      expect(msg.fromClientId, 0);
+      expect(msg.fromClient, '');
+      expect(msg.message, contains('Alice'));
+    });
+
+    test('a kicked leave line names the invoker', () {
+      notifier().handleEventForTest({
+        'type': 'client_leave_channel',
+        'client_id': 5,
+        'nickname': 'Alice',
+        'kind': 2,
+        'invoker': 'Admin',
+      });
+      final message = state().messages.single.message;
+      expect(message, contains('Alice'));
+      expect(message, contains('Admin'));
+    });
+
+    test('a self-move line names the target channel', () {
+      notifier().handleEventForTest({
+        'type': 'self_moved',
+        'to_channel_id': 4,
+        'to_channel_name': 'Lobby',
+        'invoker': '',
+        'kind': 0,
+      });
+      expect(state().messages.single.message, contains('Lobby'));
+    });
+
+    test('system lines count as unread on the channel tab', () {
+      notifier().handleEventForTest({
+        'type': 'client_enter_channel',
+        'client_id': 5,
+        'nickname': 'Alice',
+        'reason': 0,
+      });
+      expect(notifier().unreadCount(), 1);
+      expect(state().openConversations, ['channel']);
+    });
+
+    test('ids stay unique across interleaved system and text messages', () {
+      notifier().handleEventForTest({
+        'type': 'client_enter_channel',
+        'client_id': 5,
+        'nickname': 'Alice',
+        'reason': 0,
+      });
+      notifier().handleEventForTest({
+        'type': 'text_message',
+        'from_client': 'Alice',
+        'from_client_id': 5,
+        'to_client_id': 0,
+        'target_mode': 2,
+        'message': 'hi',
+      });
+      notifier().handleEventForTest({
+        'type': 'client_enter_channel',
+        'client_id': 6,
+        'nickname': 'Bob',
+        'reason': 0,
+      });
+      final ids = state().messages.map((m) => m.id).toList();
+      expect(ids, hasLength(3));
+      expect(ids.toSet().length, 3);
+    });
+
+    test('poke records a system line and sets pokeInfo', () {
+      notifier().handleEventForTest({
+        'type': 'poke',
+        'from_client': 'Alice',
+        'from_client_id': 5,
+        'message': 'boo',
+      });
+      expect(state().pokeInfo?.from, 'Alice');
+      expect(state().pokeInfo?.fromClientId, 5);
+      expect(state().pokeInfo?.message, 'boo');
+      final msg = state().messages.single;
+      expect(msg.isSystem, isTrue);
+      expect(msg.conversationId, 'channel');
+      expect(msg.message, contains('Alice'));
+      // The poke line is system-generated — never from "us".
+      expect(msg.fromClientId, 0);
+      notifier().clearPokeInfo();
+      expect(state().pokeInfo, isNull);
+    });
+  });
+
+  group('chat-message toasts', () {
+    final notifies = <(String, String)>[];
+
+    setUp(() {
+      ForegroundService.notifyOverride = (title, body) async {
+        notifies.add((title, body));
+      };
+    });
+    tearDown(() {
+      ForegroundService.notifyOverride = null;
+      notifies.clear();
+    });
+
+    test('a private message toasts by default (panel closed)', () {
+      notifier().handleEventForTest({
+        'type': 'text_message',
+        'from_client': 'Alice',
+        'from_client_id': 5,
+        'to_client_id': 0,
+        'target_mode': 1,
+        'message': 'hi there',
+      });
+      expect(notifies, hasLength(1));
+      expect(notifies.single.$1, 'Alice');
+      expect(notifies.single.$2, 'hi there');
+    });
+
+    test('a channel message does not toast while its setting is off', () {
+      notifier().handleEventForTest({
+        'type': 'text_message',
+        'from_client': 'Alice',
+        'from_client_id': 5,
+        'to_client_id': 0,
+        'target_mode': 2,
+        'message': 'hello channel',
+      });
+      expect(notifies, isEmpty);
+    });
+
+    test('a channel message toasts once its setting is on', () async {
+      await container
+          .read(notificationSettingsProvider.notifier)
+          .setChannelMessages(true);
+      notifier().handleEventForTest({
+        'type': 'text_message',
+        'from_client': 'Alice',
+        'from_client_id': 5,
+        'to_client_id': 0,
+        'target_mode': 2,
+        'message': 'hello channel',
+      });
+      expect(notifies, hasLength(1));
+      expect(notifies.single.$1, 'Alice');
+    });
+
+    test('nothing toasts while the chat panel is open', () async {
+      notifier().setChatOpen(true);
+      expect(state().chatOpen, isTrue);
+      notifier().handleEventForTest({
+        'type': 'text_message',
+        'from_client': 'Alice',
+        'from_client_id': 5,
+        'to_client_id': 0,
+        'target_mode': 1,
+        'message': 'hi',
+      });
+      expect(notifies, isEmpty);
+      // Closing the panel re-enables toasts.
+      notifier().setChatOpen(false);
+      notifier().handleEventForTest({
+        'type': 'text_message',
+        'from_client': 'Alice',
+        'from_client_id': 5,
+        'to_client_id': 0,
+        'target_mode': 1,
+        'message': 'hi again',
+      });
+      expect(notifies, hasLength(1));
+    });
+
+    test('the echo of our own message never toasts', () {
+      // ownClientId defaults to 0 in the bare state — the echo arrives
+      // attributed to us.
+      notifier().handleEventForTest({
+        'type': 'text_message',
+        'from_client': 'me',
+        'from_client_id': 0,
+        'to_client_id': 5,
+        'target_mode': 1,
+        'message': 'sent by me',
+      });
+      expect(notifies, isEmpty);
+    });
+  });
+
+  group('systemMessageText', () {
+    test('connected prefers the welcome message', () {
+      final text = systemMessageText('connected', {
+        'welcome_message': 'Welcome!',
+        'hostmessage': 'Host',
+        'hostmessage_mode': 1,
+      }, null);
+      expect(text, 'Welcome!');
+    });
+
+    test('the host message only shows when the server asks for it', () {
+      final event = {'welcome_message': '', 'hostmessage': 'Host'};
+      expect(
+        systemMessageText('connected', {...event, 'hostmessage_mode': 0}, null),
+        isNull,
+      );
+      expect(
+        systemMessageText('connected', {...event, 'hostmessage_mode': 2}, null),
+        'Host',
+      );
     });
   });
 }

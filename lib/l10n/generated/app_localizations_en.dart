@@ -281,6 +281,99 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get pokeDialogTitle => 'You were poked';
+
+  @override
+  String get pokeBack => 'Poke back';
+
+  @override
+  String get notificationsSection => 'Notifications';
+
+  @override
+  String get notifyPoke => 'Pokes';
+
+  @override
+  String get notifyPokeDesc => 'System notification when someone pokes you';
+
+  @override
+  String get notifyPmMessages => 'Private messages';
+
+  @override
+  String get notifyPmMessagesDesc =>
+      'System notification when a private message arrives (only while the chat panel is closed)';
+
+  @override
+  String get notifyChannelMessages => 'Channel & server messages';
+
+  @override
+  String get notifyChannelMessagesDesc =>
+      'System notification when a channel or server chat message arrives (only while the chat panel is closed)';
+
+  @override
+  String get notifyChannelEvents => 'Channel enter/leave';
+
+  @override
+  String get notifyChannelEventsDesc =>
+      'System notification when someone enters or leaves your channel';
+
+  @override
+  String get notifyChannelMoves => 'Channel switches';
+
+  @override
+  String get notifyChannelMovesDesc =>
+      'System notification when you switch channels or get moved/kicked';
+
+  @override
+  String userEnteredChannel(String name) {
+    return '$name entered the channel';
+  }
+
+  @override
+  String userLeftChannel(String name) {
+    return '$name left the channel';
+  }
+
+  @override
+  String userKickedFromChannelBy(String name, String invoker) {
+    return '$name was kicked from the channel by $invoker';
+  }
+
+  @override
+  String userKickedFromServerBy(String name, String invoker) {
+    return '$name was kicked from the server by $invoker';
+  }
+
+  @override
+  String userKickedFromServer(String name) {
+    return '$name was kicked from the server';
+  }
+
+  @override
+  String userBannedBy(String name, String invoker) {
+    return '$name was banned by $invoker';
+  }
+
+  @override
+  String userBanned(String name) {
+    return '$name was banned';
+  }
+
+  @override
+  String youMovedToChannel(String channel) {
+    return 'You switched to channel $channel';
+  }
+
+  @override
+  String youWereMovedBy(String invoker, String channel) {
+    return '$invoker moved you to channel $channel';
+  }
+
+  @override
+  String youWereKickedFromChannelBy(String invoker) {
+    return 'You were kicked from the channel by $invoker';
+  }
+
+  @override
   String get send => 'Send';
 
   @override

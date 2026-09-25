@@ -114,7 +114,15 @@ class MainActivity : FlutterActivity() {
                     "notify_poke" -> {
                         val title = call.argument<String>("title") ?: "Poke"
                         val body = call.argument<String>("body") ?: ""
-                        showPokeNotification(title, body)
+                        showNotification(title, body, pokeChannel = true)
+                        result.success(true)
+                    }
+                    "notify" -> {
+                        // Generic event notification (channel enter/leave,
+                        // moves) — a quieter channel than pokes.
+                        val title = call.argument<String>("title") ?: "NEk0"
+                        val body = call.argument<String>("body") ?: ""
+                        showNotification(title, body, pokeChannel = false)
                         result.success(true)
                     }
                     "save_to_downloads" -> {
@@ -157,21 +165,23 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /// Show a system notification for an incoming poke. Uses an
-    /// IMPORTANCE_HIGH channel so it pops up even in the background; falls
-    /// back to a default channel on very old platforms.
+    /// Show a system notification. Pokes use an IMPORTANCE_HIGH channel so
+    /// they pop up even in the background; other events get a
+    /// IMPORTANCE_DEFAULT channel. Falls back to a default channel on very
+    /// old platforms.
     @SuppressLint("MissingPermission")
-    private fun showPokeNotification(title: String, body: String) {
+    private fun showNotification(title: String, body: String, pokeChannel: Boolean) {
         try {
             val pm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val channelId = "teamspeak_poke"
+            val channelId = if (pokeChannel) "teamspeak_poke" else "teamspeak_events"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val channel = NotificationChannel(
                     channelId,
-                    "Pokes",
-                    NotificationManager.IMPORTANCE_HIGH
+                    if (pokeChannel) "Pokes" else "Events",
+                    if (pokeChannel) NotificationManager.IMPORTANCE_HIGH
+                    else NotificationManager.IMPORTANCE_DEFAULT
                 ).apply {
-                    description = "Incoming pokes"
+                    description = if (pokeChannel) "Incoming pokes" else "Connection events"
                 }
                 pm.createNotificationChannel(channel)
             }

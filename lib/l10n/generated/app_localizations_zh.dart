@@ -271,6 +271,95 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
+  String get pokeDialogTitle => '你被戳了一下';
+
+  @override
+  String get pokeBack => '回戳';
+
+  @override
+  String get notificationsSection => '通知';
+
+  @override
+  String get notifyPoke => '被戳';
+
+  @override
+  String get notifyPokeDesc => '有人戳你时发送系统通知';
+
+  @override
+  String get notifyPmMessages => '私聊消息';
+
+  @override
+  String get notifyPmMessagesDesc => '收到私聊消息时发送系统通知（聊天面板打开时不弹）';
+
+  @override
+  String get notifyChannelMessages => '频道/服务器消息';
+
+  @override
+  String get notifyChannelMessagesDesc => '收到频道或服务器消息时发送系统通知（聊天面板打开时不弹）';
+
+  @override
+  String get notifyChannelEvents => '进出频道';
+
+  @override
+  String get notifyChannelEventsDesc => '有人进入或离开你所在频道时发送系统通知';
+
+  @override
+  String get notifyChannelMoves => '频道切换';
+
+  @override
+  String get notifyChannelMovesDesc => '你切换频道或被移动/移出频道时发送系统通知';
+
+  @override
+  String userEnteredChannel(String name) {
+    return '$name 进入了频道';
+  }
+
+  @override
+  String userLeftChannel(String name) {
+    return '$name 离开了频道';
+  }
+
+  @override
+  String userKickedFromChannelBy(String name, String invoker) {
+    return '$name 被 $invoker 移出了频道';
+  }
+
+  @override
+  String userKickedFromServerBy(String name, String invoker) {
+    return '$name 被 $invoker 踢出了服务器';
+  }
+
+  @override
+  String userKickedFromServer(String name) {
+    return '$name 被踢出了服务器';
+  }
+
+  @override
+  String userBannedBy(String name, String invoker) {
+    return '$name 被 $invoker 封禁了';
+  }
+
+  @override
+  String userBanned(String name) {
+    return '$name 被封禁了';
+  }
+
+  @override
+  String youMovedToChannel(String channel) {
+    return '你切换到了频道 $channel';
+  }
+
+  @override
+  String youWereMovedBy(String invoker, String channel) {
+    return '$invoker 将你移动到了频道 $channel';
+  }
+
+  @override
+  String youWereKickedFromChannelBy(String invoker) {
+    return '你被 $invoker 移出了频道';
+  }
+
+  @override
   String get send => '发送';
 
   @override

@@ -106,6 +106,85 @@
       "message": {"type": "String"}
     }
   },
+  "pokeDialogTitle": "你被戳了一下",
+  "pokeBack": "回戳",
+
+  "notificationsSection": "通知",
+  "notifyPoke": "被戳",
+  "notifyPokeDesc": "有人戳你时发送系统通知",
+  "notifyPmMessages": "私聊消息",
+  "notifyPmMessagesDesc": "收到私聊消息时发送系统通知（聊天面板打开时不弹）",
+  "notifyChannelMessages": "频道/服务器消息",
+  "notifyChannelMessagesDesc": "收到频道或服务器消息时发送系统通知（聊天面板打开时不弹）",
+  "notifyChannelEvents": "进出频道",
+  "notifyChannelEventsDesc": "有人进入或离开你所在频道时发送系统通知",
+  "notifyChannelMoves": "频道切换",
+  "notifyChannelMovesDesc": "你切换频道或被移动/移出频道时发送系统通知",
+
+  "userEnteredChannel": "{name} 进入了频道",
+  "@userEnteredChannel": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "userLeftChannel": "{name} 离开了频道",
+  "@userLeftChannel": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "userKickedFromChannelBy": "{name} 被 {invoker} 移出了频道",
+  "@userKickedFromChannelBy": {
+    "placeholders": {
+      "name": {"type": "String"},
+      "invoker": {"type": "String"}
+    }
+  },
+  "userKickedFromServerBy": "{name} 被 {invoker} 踢出了服务器",
+  "@userKickedFromServerBy": {
+    "placeholders": {
+      "name": {"type": "String"},
+      "invoker": {"type": "String"}
+    }
+  },
+  "userKickedFromServer": "{name} 被踢出了服务器",
+  "@userKickedFromServer": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "userBannedBy": "{name} 被 {invoker} 封禁了",
+  "@userBannedBy": {
+    "placeholders": {
+      "name": {"type": "String"},
+      "invoker": {"type": "String"}
+    }
+  },
+  "userBanned": "{name} 被封禁了",
+  "@userBanned": {
+    "placeholders": {
+      "name": {"type": "String"}
+    }
+  },
+  "youMovedToChannel": "你切换到了频道 {channel}",
+  "@youMovedToChannel": {
+    "placeholders": {
+      "channel": {"type": "String"}
+    }
+  },
+  "youWereMovedBy": "{invoker} 将你移动到了频道 {channel}",
+  "@youWereMovedBy": {
+    "placeholders": {
+      "invoker": {"type": "String"},
+      "channel": {"type": "String"}
+    }
+  },
+  "youWereKickedFromChannelBy": "你被 {invoker} 移出了频道",
+  "@youWereKickedFromChannelBy": {
+    "placeholders": {
+      "invoker": {"type": "String"}
+    }
+  },
   "send": "发送",
   "awayEnable": "标记离开",
   "awayDisable": "恢复在线",

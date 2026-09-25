@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:local_notifier/local_notifier.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'l10n/generated/app_localizations.dart';
@@ -23,6 +24,17 @@ Future<void> main() async {
   if (!Platform.isAndroid) {
     await windowManager.ensureInitialized();
     await windowManager.setPreventClose(true);
+    // System toasts (e.g. pokes). On Windows requireCreate registers the
+    // Start-Menu shortcut / AUMID the toast API needs. Best-effort: a
+    // desktop session without a notification service must not block startup.
+    try {
+      await localNotifier.setup(
+        appName: 'NEk0',
+        shortcutPolicy: ShortcutPolicy.requireCreate,
+      );
+    } catch (e) {
+      // Toasts stay unavailable; in-app surfacing still works.
+    }
   }
   runApp(const ProviderScope(child: TeamSpeakApp()));
 }

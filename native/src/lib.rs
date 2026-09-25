@@ -257,8 +257,19 @@ pub static IDENTITY_STASH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum TsEvent {
+    /// `welcome_message` / `hostmessage` are the server's preset texts from
+    /// initserver; `hostmessage_mode` mirrors the server's hostmessage
+    /// setting (0 = don't display, 1 = log/chat, 2 = modal, 3 = modal +
+    /// quit) so Dart can decide whether the host message deserves a line.
     #[serde(rename = "connected")]
-    Connected { server_name: String, client_id: u32, ask_for_privilegekey: bool },
+    Connected {
+        server_name: String,
+        client_id: u32,
+        ask_for_privilegekey: bool,
+        welcome_message: String,
+        hostmessage: String,
+        hostmessage_mode: u8,
+    },
     #[serde(rename = "disconnected")]
     Disconnected { reason: String },
     /// `to_client_id` is the PM target (0 for channel/server messages): our
@@ -283,6 +294,33 @@ pub enum TsEvent {
     ClientJoined { client_id: u32, nickname: String, channel_id: u32 },
     #[serde(rename = "client_left")]
     ClientLeft { client_id: u32, nickname: String },
+    /// Chat-log notice: a client entered OUR current channel. `reason`:
+    /// 0 = connected to the server, 1 = switched in on their own,
+    /// 2 = moved in by someone else, 3 = kicked into the channel.
+    #[serde(rename = "client_enter_channel")]
+    ClientEnterChannel { client_id: u32, nickname: String, reason: u8 },
+    /// Chat-log notice: a client left OUR current channel. `kind`:
+    /// 0 = left to another channel on their own, 1 = moved away by someone,
+    /// 2 = kicked from the channel, 3 = disconnected / left the server,
+    /// 4 = kicked from the server, 5 = banned. `invoker` names the admin
+    /// for the kinds where one exists ('' otherwise).
+    #[serde(rename = "client_leave_channel")]
+    ClientLeaveChannel {
+        client_id: u32,
+        nickname: String,
+        kind: u8,
+        invoker: String,
+    },
+    /// Chat-log notice: our own client changed channel. `kind`:
+    /// 0 = moved on our own, 1 = moved by someone else, 2 = kicked from
+    /// the channel. `invoker` names the mover for kinds 1/2 ('' otherwise).
+    #[serde(rename = "self_moved")]
+    SelfMoved {
+        to_channel_id: u32,
+        to_channel_name: String,
+        invoker: String,
+        kind: u8,
+    },
     #[serde(rename = "channels_updated")]
     ChannelsUpdated {},
     #[serde(rename = "diag")]
@@ -1734,12 +1772,55 @@ mod tests {
             server_name: "The Nest".into(),
             client_id: 1,
             ask_for_privilegekey: false,
+            welcome_message: "Welcome!".into(),
+            hostmessage: "".into(),
+            hostmessage_mode: 1,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "connected");
         assert_eq!(json["server_name"], "The Nest");
         assert_eq!(json["client_id"], 1);
         assert_eq!(json["ask_for_privilegekey"], false);
+        assert_eq!(json["welcome_message"], "Welcome!");
+        assert_eq!(json["hostmessage"], "");
+        assert_eq!(json["hostmessage_mode"], 1);
+
+        // Chat-log notices carry the classification codes the Dart side
+        // turns into localized lines.
+        let event = TsEvent::ClientLeaveChannel {
+            client_id: 7,
+            nickname: "Bob".into(),
+            kind: 2,
+            invoker: "Admin".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "client_leave_channel");
+        assert_eq!(json["client_id"], 7);
+        assert_eq!(json["nickname"], "Bob");
+        assert_eq!(json["kind"], 2);
+        assert_eq!(json["invoker"], "Admin");
+
+        let event = TsEvent::ClientEnterChannel {
+            client_id: 8,
+            nickname: "Carol".into(),
+            reason: 1,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "client_enter_channel");
+        assert_eq!(json["reason"], 1);
+
+        let event = TsEvent::SelfMoved {
+            to_channel_id: 4,
+            to_channel_name: "Lobby".into(),
+            invoker: "".into(),
+            kind: 0,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "self_moved");
+        assert_eq!(json["to_channel_id"], 4);
+        assert_eq!(json["to_channel_name"], "Lobby");
+        assert_eq!(json["invoker"], "");
+        assert_eq!(json["kind"], 0);
     }
 
     #[test]

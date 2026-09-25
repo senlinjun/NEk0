@@ -2,12 +2,14 @@ import 'dart:io' show Directory, File, Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:local_notifier/local_notifier.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:window_manager/window_manager.dart';
 
-/// Android platform-channel facade (foreground service, notification
-/// actions, MediaStore downloads). On iOS / desktop every method degrades to
-/// a no-op except [saveToDownloads], which has real per-platform
-/// implementations below.
+/// Platform-channel facade (Android foreground service, notification
+/// actions, MediaStore downloads). On iOS every method degrades to a no-op;
+/// desktop gets [saveToDownloads] (system Downloads directory) and
+/// [notify] (system toasts), everything else is a no-op.
 class ForegroundService {
   static const _channel = MethodChannel('com.senlinjun.nek0/service');
 
@@ -123,18 +125,36 @@ class ForegroundService {
     }
   }
 
-  /// Show a system notification for an incoming poke. Android-only (other
-  /// platforms surface pokes inside the app).
-  static Future<void> notifyPoke({
+  /// Test seam — set to intercept the platform launch.
+  @visibleForTesting
+  static Future<void> Function(String title, String body)? notifyOverride;
+
+  /// Show a system notification. Android posts it through the platform
+  /// service channel; desktop apps show a system toast via local_notifier
+  /// (Windows WinRT / Linux libnotify). Best-effort — failures are
+  /// swallowed so the poll loop never crashes (e.g. a Linux session
+  /// without a notification daemon).
+  static Future<void> notify({
     required String title,
     required String body,
   }) async {
-    if (!_isAndroid) return;
+    final override = notifyOverride;
+    if (override != null) {
+      await override(title, body);
+      return;
+    }
     try {
-      await _channel.invokeMethod('notify_poke', {
-        'title': title,
-        'body': body,
-      });
+      if (_isAndroid) {
+        await _channel.invokeMethod('notify', {'title': title, 'body': body});
+      } else {
+        final notification = LocalNotification(title: title, body: body);
+        // Clicking the toast brings the app window back up.
+        notification.onClick = () {
+          windowManager.show();
+          windowManager.focus();
+        };
+        await notification.show();
+      }
     } catch (e) {
       // Notifications are best-effort; never crash the poll loop.
     }

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/chat_message.dart';
 import '../models/ts_state.dart';
+import 'ts_rich_text.dart';
 
 /// The chat bottom-sheet body: a conversation tab row (channel / server /
 /// per-peer private chats), the message list of the selected conversation
@@ -317,26 +318,35 @@ class _ChatPanelState extends ConsumerState<ChatPanel> {
     ChatMessage msg,
     TsConnectionState conn,
   ) {
+    // Event-driven lines (welcome message, channel enter/leave, moves,
+    // pokes): dimmed, centered, no sender prefix — still rich text, the
+    // welcome message often carries links.
+    if (msg.isSystem) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: TsRichText(
+          text: msg.message,
+          textAlign: TextAlign.center,
+          baseStyle: const TextStyle(
+            color: Colors.white60,
+            fontSize: 12,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      );
+    }
     final isOwn = msg.fromClientId == conn.ownClientId;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
-      child: RichText(
-        text: TextSpan(
-          children: [
-            TextSpan(
-              text: '${msg.fromClient}: ',
-              style: TextStyle(
-                color: isOwn ? Colors.blue : Colors.tealAccent,
-                fontWeight: FontWeight.bold,
-                fontSize: 13,
-              ),
-            ),
-            TextSpan(
-              text: msg.message,
-              style: const TextStyle(color: Colors.white, fontSize: 13),
-            ),
-          ],
+      child: TsRichText(
+        text: msg.message,
+        prefix: '${msg.fromClient}: ',
+        prefixStyle: TextStyle(
+          color: isOwn ? Colors.blue : Colors.tealAccent,
+          fontWeight: FontWeight.bold,
+          fontSize: 13,
         ),
+        baseStyle: const TextStyle(color: Colors.white, fontSize: 13),
       ),
     );
   }

@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../l10n/generated/app_localizations.dart';
 import '../models/app_locale.dart';
 import '../models/background_settings.dart';
+import '../models/notification_settings.dart';
 import '../models/recording_settings.dart';
 import '../models/ts_state.dart';
 import '../models/window_settings.dart';
@@ -593,6 +594,95 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// Recording: size of the always-on backtrack buffer. Sessions record
   /// per-user tracks continuously; this setting only bounds how far back a
   /// on-demand replay save can reach.
+  /// Which event kinds may surface as system notifications (Android
+  /// notification bar / desktop toasts). Chat-log messages and the poke
+  /// in-app dialog are not affected by these.
+  Widget _buildNotificationsSection(BuildContext context) {
+    final al = AppLocalizations.of(context);
+    final settings = ref.watch(notificationSettingsProvider);
+    final notifier = ref.read(notificationSettingsProvider.notifier);
+    final toggles = [
+      (settings.poke, notifier.setPoke, al.notifyPoke, al.notifyPokeDesc),
+      (
+        settings.pmMessages,
+        notifier.setPmMessages,
+        al.notifyPmMessages,
+        al.notifyPmMessagesDesc,
+      ),
+      (
+        settings.channelMessages,
+        notifier.setChannelMessages,
+        al.notifyChannelMessages,
+        al.notifyChannelMessagesDesc,
+      ),
+      (
+        settings.channelEvents,
+        notifier.setChannelEvents,
+        al.notifyChannelEvents,
+        al.notifyChannelEventsDesc,
+      ),
+      (
+        settings.channelMoves,
+        notifier.setChannelMoves,
+        al.notifyChannelMoves,
+        al.notifyChannelMovesDesc,
+      ),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionHeader(al.notificationsSection),
+        const SizedBox(height: 8),
+        Card(
+          color: const Color(0xFF1A1A2E),
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                for (final (index, toggle) in toggles.indexed) ...[
+                  if (index > 0)
+                    const Divider(height: 16, color: Color(0xFF2A2A4A)),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              toggle.$3,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              toggle.$4,
+                              style: const TextStyle(
+                                color: Colors.grey,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Switch(
+                        value: toggle.$1,
+                        activeTrackColor: Colors.blue,
+                        onChanged: (v) => toggle.$2(v),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildRecordingSection(BuildContext context) {
     final al = AppLocalizations.of(context);
     final recording = ref.watch(recordingSettingsProvider);
@@ -811,6 +901,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             _buildAudioSection(context),
             const SizedBox(height: 24),
             _buildBackgroundSection(context),
+            const SizedBox(height: 24),
+            _buildNotificationsSection(context),
             const SizedBox(height: 24),
             _SectionHeader(AppLocalizations.of(context).language),
             const SizedBox(height: 8),

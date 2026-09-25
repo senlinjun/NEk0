@@ -602,6 +602,144 @@ abstract class AppLocalizations {
   /// **'{name} poked you: {message}'**
   String pokeNotificationBody(String name, String message);
 
+  /// No description provided for @pokeDialogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'You were poked'**
+  String get pokeDialogTitle;
+
+  /// No description provided for @pokeBack.
+  ///
+  /// In en, this message translates to:
+  /// **'Poke back'**
+  String get pokeBack;
+
+  /// No description provided for @notificationsSection.
+  ///
+  /// In en, this message translates to:
+  /// **'Notifications'**
+  String get notificationsSection;
+
+  /// No description provided for @notifyPoke.
+  ///
+  /// In en, this message translates to:
+  /// **'Pokes'**
+  String get notifyPoke;
+
+  /// No description provided for @notifyPokeDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'System notification when someone pokes you'**
+  String get notifyPokeDesc;
+
+  /// No description provided for @notifyPmMessages.
+  ///
+  /// In en, this message translates to:
+  /// **'Private messages'**
+  String get notifyPmMessages;
+
+  /// No description provided for @notifyPmMessagesDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'System notification when a private message arrives (only while the chat panel is closed)'**
+  String get notifyPmMessagesDesc;
+
+  /// No description provided for @notifyChannelMessages.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel & server messages'**
+  String get notifyChannelMessages;
+
+  /// No description provided for @notifyChannelMessagesDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'System notification when a channel or server chat message arrives (only while the chat panel is closed)'**
+  String get notifyChannelMessagesDesc;
+
+  /// No description provided for @notifyChannelEvents.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel enter/leave'**
+  String get notifyChannelEvents;
+
+  /// No description provided for @notifyChannelEventsDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'System notification when someone enters or leaves your channel'**
+  String get notifyChannelEventsDesc;
+
+  /// No description provided for @notifyChannelMoves.
+  ///
+  /// In en, this message translates to:
+  /// **'Channel switches'**
+  String get notifyChannelMoves;
+
+  /// No description provided for @notifyChannelMovesDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'System notification when you switch channels or get moved/kicked'**
+  String get notifyChannelMovesDesc;
+
+  /// No description provided for @userEnteredChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} entered the channel'**
+  String userEnteredChannel(String name);
+
+  /// No description provided for @userLeftChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} left the channel'**
+  String userLeftChannel(String name);
+
+  /// No description provided for @userKickedFromChannelBy.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} was kicked from the channel by {invoker}'**
+  String userKickedFromChannelBy(String name, String invoker);
+
+  /// No description provided for @userKickedFromServerBy.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} was kicked from the server by {invoker}'**
+  String userKickedFromServerBy(String name, String invoker);
+
+  /// No description provided for @userKickedFromServer.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} was kicked from the server'**
+  String userKickedFromServer(String name);
+
+  /// No description provided for @userBannedBy.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} was banned by {invoker}'**
+  String userBannedBy(String name, String invoker);
+
+  /// No description provided for @userBanned.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} was banned'**
+  String userBanned(String name);
+
+  /// No description provided for @youMovedToChannel.
+  ///
+  /// In en, this message translates to:
+  /// **'You switched to channel {channel}'**
+  String youMovedToChannel(String channel);
+
+  /// No description provided for @youWereMovedBy.
+  ///
+  /// In en, this message translates to:
+  /// **'{invoker} moved you to channel {channel}'**
+  String youWereMovedBy(String invoker, String channel);
+
+  /// No description provided for @youWereKickedFromChannelBy.
+  ///
+  /// In en, this message translates to:
+  /// **'You were kicked from the channel by {invoker}'**
+  String youWereKickedFromChannelBy(String invoker);
+
   /// No description provided for @send.
   ///
   /// In en, this message translates to:

@@ -12,6 +12,11 @@ class ChatMessage {
   final String message;
   final DateTime timestamp;
 
+  /// Event-driven system line (welcome message, channel enter/leave,
+  /// channel switch, poke record). Rendered without a sender prefix in a
+  /// dimmed style; [fromClient] is '' and [fromClientId] is 0 for these.
+  final bool isSystem;
+
   const ChatMessage({
     required this.id,
     required this.fromClient,
@@ -20,5 +25,6 @@ class ChatMessage {
     required this.conversationId,
     required this.message,
     required this.timestamp,
+    this.isSystem = false,
   });
 }
