@@ -118,7 +118,7 @@ jobs:
         flutter gen-l10n
         flutter analyze
     - name: Build Windows bundle
-      run: flutter build windows --release
+      run: flutter build windows --release --build-name="${GITHUB_REF_NAME#v}" --build-number="$GITHUB_RUN_NUMBER"
     - name: Package Windows bundle
       shell: pwsh
       run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath Nek0_${{github.ref_name}}_windows_x64.zip
