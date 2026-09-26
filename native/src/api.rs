@@ -4992,15 +4992,31 @@ pub fn start_mic_capture() -> bool {
             None,
         );
         match stream {
-            Ok(stream) => {
-                crate::MIC_STREAM.lock().unwrap().0 = Some(stream);
-                clear_mic_error();
-                eprintln!(
-                    "cpal mic: input stream started ({} Hz, {} ch)",
-                    config.sample_rate.0, config.channels
-                );
-                return true;
-            }
+            // cpal only CREATES the stream here — on WASAPI nothing starts
+            // until play() posts Command::PlayStream, whose handler calls
+            // IAudioClient::Start(). Without it the stream silently never
+            // delivers a single callback (no error either) and Windows'
+            // mic-in-use indicator stays off; ALSA starts on creation, which
+            // is why the missing play() only broke Windows.
+            Ok(stream) => match stream.play() {
+                Ok(()) => {
+                    crate::MIC_STREAM.lock().unwrap().0 = Some(stream);
+                    clear_mic_error();
+                    eprintln!(
+                        "cpal mic: input stream started ({} Hz, {} ch)",
+                        config.sample_rate.0, config.channels
+                    );
+                    return true;
+                }
+                Err(e) => {
+                    // stream drops here: the worker thread terminates and the
+                    // loop tries the next candidate format.
+                    record_mic_error(format!(
+                        "input stream play() failed ({} Hz, {} ch): {}",
+                        config.sample_rate.0, config.channels, e
+                    ));
+                }
+            },
             Err(e) => record_mic_error(format!(
                 "build_input_stream failed ({} Hz, {} ch): {}",
                 config.sample_rate.0, config.channels, e
