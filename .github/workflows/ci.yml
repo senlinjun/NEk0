@@ -21,7 +21,7 @@ jobs:
     - name: Flutter action
       uses: subosito/flutter-action@v2.23.0
       with:
-        flutter-version: 3.47.0
+        flutter-version: 3.47.3
     - name: Setup Python
       uses: actions/setup-python@v7.0.0
     - name: Set target for rust
@@ -57,7 +57,7 @@ jobs:
         flutter test
     - name: Build Linux bundle
       if: startsWith(github.ref, 'refs/tags/')
-      run: flutter build linux --release
+      run: flutter build linux --release --build-name="${GITHUB_REF_NAME#v}" --build-number="$GITHUB_RUN_NUMBER"
     - name: Package Linux bundle
       if: startsWith(github.ref, 'refs/tags/')
       run: |
@@ -107,7 +107,7 @@ jobs:
     - name: Flutter action
       uses: subosito/flutter-action@v2.23.0
       with:
-        flutter-version: 3.47.0
+        flutter-version: 3.47.3
     - name: Setup Python
       uses: actions/setup-python@v7.0.0
     - name: Prebuild (Windows)
