@@ -85,13 +85,25 @@ typedef _SetMutedDart = int Function(int, int);
 typedef _IsConnectedNative = Uint8 Function();
 typedef _IsConnectedDart = int Function();
 
-// ts_set_vad_threshold(threshold: f32)
+// ts_set_vad_threshold(threshold: f32)  (legacy alias → activation_db)
 typedef _SetVadThresholdNative = Void Function(Float);
 typedef _SetVadThresholdDart = void Function(double);
 
 // ts_set_vad_enabled(enabled: bool) -> bool
 typedef _SetVadEnabledNative = Uint8 Function(Uint8);
 typedef _SetVadEnabledDart = int Function(int);
+
+// ts_set_vad_config(json: *const c_char) -> bool
+typedef _SetVadConfigNative = Uint8 Function(Pointer<Utf8>);
+typedef _SetVadConfigDart = int Function(Pointer<Utf8>);
+
+// ts_get_vad_status() -> *mut c_char (JSON, freed via ts_free_string)
+typedef _GetVadStatusNative = Pointer<Utf8> Function();
+typedef _GetVadStatusDart = Pointer<Utf8> Function();
+
+// ts_reset_vad()
+typedef _ResetVadNative = Void Function();
+typedef _ResetVadDart = void Function();
 
 // ts_start_audio() -> bool
 typedef _StartAudioNative = Uint8 Function();
@@ -379,6 +391,17 @@ final _setVadEnabled = _lib
     .lookupFunction<_SetVadEnabledNative, _SetVadEnabledDart>(
       'ts_set_vad_enabled',
     );
+final _setVadConfig = _lib
+    .lookupFunction<_SetVadConfigNative, _SetVadConfigDart>(
+      'ts_set_vad_config',
+    );
+final _getVadStatus = _lib
+    .lookupFunction<_GetVadStatusNative, _GetVadStatusDart>(
+      'ts_get_vad_status',
+    );
+final _resetVad = _lib.lookupFunction<_ResetVadNative, _ResetVadDart>(
+  'ts_reset_vad',
+);
 final _isVoiceActive = _lib
     .lookupFunction<_IsConnectedNative, _IsConnectedDart>('ts_is_voice_active');
 final _startAudio = _lib.lookupFunction<_StartAudioNative, _StartAudioDart>(
@@ -704,6 +727,29 @@ class TsNative {
     return _setVadEnabled(enabled ? 1 : 0) != 0;
   }
 
+  /// Pushes a full or partial VAD/AGC config JSON to the native pipeline
+  /// (see VadSettings.toJson / mic_pipeline::PipelineConfigPatch).
+  static bool setVadConfig(String json) {
+    final ptr = _strToPtr(json);
+    try {
+      return _setVadConfig(ptr) != 0;
+    } finally {
+      malloc.free(ptr);
+    }
+  }
+
+  /// Snapshot of the last processed mic frame as JSON (level, noise floor,
+  /// speech probability, AGC gain, gate state).
+  static String getVadStatus() {
+    return _ptrToString(_getVadStatus());
+  }
+
+  /// Drops everything learned (noise floor, RNNoise warm-up, AGC gain) —
+  /// used by the calibration flow.
+  static void resetVad() {
+    _resetVad();
+  }
+
   static bool isVoiceActive() {
     return _isVoiceActive() != 0;
   }
@@ -742,7 +788,9 @@ class TsNative {
   }
 
   /// Host audio devices for the picker UI (desktop). Shape:
-  /// `{"outputs":[{"name","is_default"}],"inputs":[...]}` — empty arrays
+  /// `{"outputs":[{"name","label","is_default"}],"inputs":[...]}` — `name`
+  /// is the selection/persistence key, `label` the display name (on Linux
+  /// the ALSA card description; elsewhere the same as `name`). Empty arrays
   /// where enumeration is unsupported (Android).
   static Map<String, dynamic> getAudioDevices() {
     final str = _ptrToString(_getAudioDevices());

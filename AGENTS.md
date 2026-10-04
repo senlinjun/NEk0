@@ -91,7 +91,50 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   - Windows/Linux: `ts_set_mic_capture` builds a cpal input stream inside the Rust core;
     its callback resamples to 48 kHz mono and feeds the same `Command::SendAudio` encode
     path. Dart polls `ts_get_mic_rms` (50ms timer) for the level meter.
-  Both paths converge on VAD → mic gain → Opus encode in the event loop.
+  Both paths converge on the mic pipeline (`native/src/mic_pipeline.rs`, global
+  `MIC_PIPELINE` on its OWN mutex — never take `STATE.lock()` for it): per 20 ms frame
+  RNNoise speech probability (via pure-Rust `nnnoiseless`; two 10 ms sub-frames, max;
+  first frame after reset is a bypass warm-up) → optional RNNoise denoise → speech-gated
+  AGC (`native/src/agc.rs`, gain frozen in silence, persisted per input device in
+  `AGC_MEMORY`) → mic gain + whole-frame peak limiter (0.99, no per-sample clipping) →
+  VAD gate (`native/src/vad.rs`) → Opus encode. While NOT connected the frames still
+  feed the pipeline's analysis stage (level meter / noise floor / probability for the
+  settings mic test and calibration), but are never encoded or sent. The settings
+  panel (`VoiceSettingsPanel`) polls `ts_get_vad_status` itself on a 200ms timer while
+  no connection exists — the notifier's poll timer only runs between connect and
+  disconnect, so without the panel-local poll the mic test meter would stay dead.
+- Linux device lists (`ts_get_audio_devices`) come from the stable ALSA name hints
+  (`snd_device_name_hint` via a Linux-only `alsa` crate dep), NOT from cpal's
+  enumeration: cpal probe-opens every PCM and silently drops the ones the sound
+  server holds at that moment, so the list would grow/shrink with PipeWire/WirePlumber
+  activity. The Rust side filters converter/junk PCMs (`null`, rate converters,
+  `jack`/`oss`, `usbstream:`), hides alias duplicates (`front:`/`surround*:`;
+  `sysdefault:CARD=x` when `default:CARD=x` exists; `hdmi:`/`iec958:` input-side) and
+  sets `label` from the hint description ("HyperX Cloud III USB") — `name` stays the
+  ALSA PCM selection/persistence key, Dart displays `label`. Openability is enforced
+  when the device is opened: a chosen-but-busy device falls back to the sound-server
+  PCM / default on both the input (error recorded) and output (one retry) paths; with
+  no stored choice `pick_device` prefers the sound-server PCMs (`pipewire`, `pulse`)
+  because bare ALSA `default` bypasses PipeWire when `pipewire-alsa` is not installed.
+- The VAD is TeamSpeak-style: three modes (`auto` = ML probability only, `gate` = dB
+  volume only, `hybrid` = both, default), dB activation level (default −46 dBFS ≈ the
+  old linear 0.005), two-threshold hysteresis, 2-frame onset confirmation that does NOT
+  evict the preroll ring (confirmation costs decision latency only), preroll flush on
+  open (`preroll_frames`, 0–8, default 3 — covers the measured RNNoise onset latency,
+  see the `rnnoise_onset_latency_is_covered_by_default_preroll` test) and a `hold_ms`
+  tail (default 200). Silence frames are dropped WITHOUT consuming sequence numbers.
+  The recording tap back-fills slots across a preroll burst (`slot − (n−1−i)`), skipped
+  when the back-fill would underflow. Dart owns the settings (`lib/models/vad_settings.dart`,
+  persisted under `vad_*` SharedPreferences keys) and pushes the full config JSON via
+  `ts_set_vad_config`; `ts_get_vad_status` returns the per-frame snapshot (level, noise
+  floor, probability, AGC gain) consumed by the poll loop into `state.vadStatus` and
+  rendered by `VoiceSettingsPanel` (mode segments, dB meter with noise/gate ticks,
+  calibration flow, AGC/denoise toggles, response-speed preset). Legacy scalar FFI
+  (`ts_set_vad_enabled`, `ts_set_vad_threshold`, `ts_set_mic_gain`) stays as a
+  compatibility shim. The `[vad]` line in the 5 s maintenance log reports mode, level,
+  noise, probability and gain; the old `vad_*`/`pcm_in`/encoder fields are gone from
+  `STATE` (`voice_active` is the `VOICE_ACTIVE` atomic, read-and-clear via
+  `ts_is_voice_active`).
 - Platform gating: `ForegroundService` (foreground service, notification actions, battery
   exemption, MediaStore saves) is Android-only and degrades to no-ops elsewhere — except
   `saveToDownloads`, which on desktop writes into the system Downloads directory
@@ -137,8 +180,12 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   the test isolate — and only public, FFI-free notifier/service methods are driven. Run with
   `flutter test`. Rust has in-file `#[cfg(test)] mod tests` blocks in `lib.rs` (WAV parsing,
   the adaptive playout-lead state machine, the Dart-facing serde JSON contract), `api.rs`
-  (sequence unwrap, positional gains, OutRing, compression_eps, the mic resampler) and
-  `recording.rs` (filenames, f32_to_i16, WavWriter) — run `cargo test --lib` in `native/`
+  (sequence unwrap, positional gains, OutRing, compression_eps, the mic resampler),
+  `vad.rs` (three-mode gate semantics, hysteresis/tail, the zero-loss preroll invariant,
+  the measured RNNoise onset latency, noise floor, config clamps), `agc.rs` (closed-loop
+  convergence, silence freeze, limiter shapes) and `mic_pipeline.rs` (patch contract,
+  gated end-to-end, AGC memory) plus `recording.rs` (filenames, f32_to_i16, WavWriter) —
+  run `cargo test --lib` in `native/`
   (the `cdylib`-only crate type rules out a `tests/` directory). Verification is
   `dart format` + `flutter analyze` + `flutter test` (+ `cargo check` and `cargo test --lib`
   for Rust changes; check host + both android targets when touching audio or FFI code).

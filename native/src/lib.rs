@@ -1,5 +1,8 @@
+mod agc;
 mod api;
+mod mic_pipeline;
 mod recording;
+mod vad;
 
 use crossbeam::queue::SegQueue;
 use crossbeam::atomic::AtomicCell;
@@ -848,16 +851,11 @@ pub struct TsConnection {
     /// hint for UI affordances (e.g. showing the permission-management entry).
     pub own_perms: Vec<TsPerm>,
     pub pending_events: VecDeque<TsEvent>,
-    // Audio send state
-    pub pcm_in: Vec<f32>,
-    pub audio_encoder: Option<opus_rs::OpusEncoder>,
-    pub audio_seq: u16,
-    pub vad_threshold: f32,
-    pub vad_enabled: bool,
-    pub vad_hold: u32,
-    pub voice_active: bool,
+    // Audio send DSP (VAD/AGC/gain/encode) lives in mic_pipeline::MIC_PIPELINE,
+    // on its own mutex — this STATE lock is held by Dart's 200 ms poll while
+    // serializing the roster, and the ~50× higher-rate frame path must not
+    // queue behind it.
     pub disconnect_requested: bool,
-    pub mic_gain: f32,
     // Audio receive state. "Is talking" lives in TALKING_CLIENTS (a global
     // DashMap) instead of here: the receive path updates it per voice packet
     // and must not queue behind the state lock that Dart's polling holds.
@@ -894,15 +892,7 @@ impl TsConnection {
             channel_groups: Vec::new(),
             own_perms: Vec::new(),
             pending_events: VecDeque::new(),
-            pcm_in: Vec::new(),
-            audio_encoder: None,
-            audio_seq: 0,
-            vad_threshold: 0.0,
-            vad_enabled: false,
-            vad_hold: 0,
-            voice_active: false,
             disconnect_requested: false,
-            mic_gain: 1.0,
             pending_move: None,
             client_volumes: HashMap::new(),
             client_positions: HashMap::new(),
@@ -952,6 +942,11 @@ pub static ACTIVE_CLIENT_IDS: Lazy<arc_swap::ArcSwap<Vec<u16>>> =
 /// Published by the cpal input callback (desktop / iOS), read by
 /// ts_get_mic_rms for the UI level meter. 0 = silence / capture inactive.
 pub static MIC_RMS: AtomicU32 = AtomicU32::new(0);
+/// "We transmitted a voice packet recently" latch for the UI speaking
+/// indicator. Set by the send path on every successful send; read-and-clear
+/// by ts_is_voice_active from Dart's 200 ms poll. Atomic so the send path
+/// never touches STATE.
+pub static VOICE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ─── Playback clock reference ───────────────────────────────────────
 

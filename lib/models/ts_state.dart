@@ -14,6 +14,7 @@ import '../models/notification_settings.dart';
 import '../models/perm.dart';
 import '../models/recording_settings.dart';
 import '../models/server.dart';
+import '../models/vad_settings.dart';
 import '../l10n/generated/app_localizations.dart';
 import '../services/ts_ffi.dart';
 import '../services/audio_service.dart';
@@ -80,8 +81,16 @@ class TsConnectionState {
   final bool away;
   final bool pttMode;
   final bool pttPressed;
-  final bool vadEnabled;
-  final double vadThreshold;
+
+  /// Voice activation settings (mode, dB activation level, AGC, denoise).
+  /// Source of truth lives here in Dart (persisted to SharedPreferences);
+  /// every change is pushed to the native pipeline as a config JSON.
+  final VadSettings vadSettings;
+
+  /// Last snapshot of the native mic pipeline (level, noise floor, speech
+  /// probability, AGC gain) — polled with the event loop, consumed by the
+  /// voice settings panel.
+  final VadStatusData vadStatus;
   final double micGain;
   final double micRms;
 
@@ -117,8 +126,8 @@ class TsConnectionState {
     this.away = false,
     this.pttMode = false,
     this.pttPressed = false,
-    this.vadEnabled = true,
-    this.vadThreshold = 0.005,
+    this.vadSettings = const VadSettings(),
+    this.vadStatus = const VadStatusData(),
     this.micGain = 1.0,
     this.micRms = 0.0,
     this.micError,
@@ -151,8 +160,8 @@ class TsConnectionState {
     bool? away,
     bool? pttMode,
     bool? pttPressed,
-    bool? vadEnabled,
-    double? vadThreshold,
+    VadSettings? vadSettings,
+    VadStatusData? vadStatus,
     double? micGain,
     double? micRms,
     Object? micError = _sentinel,
@@ -189,8 +198,8 @@ class TsConnectionState {
     away: away ?? this.away,
     pttMode: pttMode ?? this.pttMode,
     pttPressed: pttPressed ?? this.pttPressed,
-    vadEnabled: vadEnabled ?? this.vadEnabled,
-    vadThreshold: vadThreshold ?? this.vadThreshold,
+    vadSettings: vadSettings ?? this.vadSettings,
+    vadStatus: vadStatus ?? this.vadStatus,
     micGain: micGain ?? this.micGain,
     micRms: micRms ?? this.micRms,
     micError: micError == _sentinel ? this.micError : micError as String?,
@@ -423,6 +432,10 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
       TsNative.setMicGain(savedMicGain);
       state = state.copyWith(micGain: savedMicGain);
     }
+    // Load the persisted VAD settings and push them (with the mic gain) to
+    // the native pipeline before any capture can start.
+    state = state.copyWith(vadSettings: _loadVadSettings(prefs));
+    _pushVadConfig();
     // Arm the multi-track recorder: backtrack window + auto-save dir used
     // when the connection drops mid-recording. Discard first so a stale
     // buffer from a previous session can never bleed into this one.
@@ -493,6 +506,20 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         state = state.copyWith(voiceActive: va);
         _refreshNotification();
       }
+      // Poll the mic pipeline snapshot for the voice settings panel (level,
+      // noise floor, speech probability, AGC gain). Only update state when
+      // the JSON actually changed — the pipeline is idle most of the time.
+      try {
+        final statusJson = TsNative.getVadStatus();
+        if (statusJson != _lastVadStatusJson) {
+          _lastVadStatusJson = statusJson;
+          state = state.copyWith(
+            vadStatus: VadStatusData.fromJson(
+              jsonDecode(statusJson) as Map<String, dynamic>,
+            ),
+          );
+        }
+      } catch (_) {} // status is cosmetic — never break the poll loop
       // Refresh client talking indicators from live Rust data
       try {
         final clientsJson = TsNative.getClients();
@@ -581,9 +608,8 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           state = state.copyWith(micError: raw);
         };
         _audioService!.start();
-        // Init VAD defaults and start mic via control flow
-        TsNative.setVadEnabled(true);
-        TsNative.setVadThreshold(state.vadThreshold);
+        // Config was pushed from prefs in connect(); just start the mic via
+        // control flow.
         _updateMicState();
         ForegroundService.start(
           title: state.serverName,
@@ -1253,8 +1279,8 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     if (newPtt) {
       TsNative.setVadEnabled(false);
     } else {
-      TsNative.setVadEnabled(state.vadEnabled);
-      TsNative.setVadThreshold(state.vadThreshold);
+      // Restore the user's VAD settings (legacy scalar FFI is enough here).
+      TsNative.setVadEnabled(state.vadSettings.enabled);
     }
     _updateMicState();
   }
@@ -1596,15 +1622,86 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
   Future<String?> revokeServerPerm(int dbid, String permsid) =>
       _permOp((t) => TsNative.serverPermRevoke(dbid, permsid, t));
 
-  void setVadThreshold(double threshold) {
-    state = state.copyWith(vadThreshold: threshold);
-    TsNative.setVadThreshold(threshold);
+  // ─── VAD settings ─────────────────────────────────────────────────
+
+  /// Last raw status JSON, to skip no-change state rebuilds in the poll.
+  String? _lastVadStatusJson;
+
+  VadSettings _loadVadSettings(SharedPreferences prefs) {
+    final def = const VadSettings();
+    return def.copyWith(
+      enabled: prefs.getBool(VadSettings.prefEnabled) ?? def.enabled,
+      mode: VadMode.fromJson(prefs.getString(VadSettings.prefMode) ?? 'hybrid'),
+      activationDb:
+          prefs.getDouble(VadSettings.prefActivationDb) ?? def.activationDb,
+      preset: VadPreset.fromJson(
+        prefs.getString(VadSettings.prefPreset) ?? 'standard',
+      ),
+      agcEnabled: prefs.getBool(VadSettings.prefAgc) ?? def.agcEnabled,
+      denoiseEnabled:
+          prefs.getBool(VadSettings.prefDenoise) ?? def.denoiseEnabled,
+    );
+  }
+
+  /// Pushes the current settings (plus mic gain) to the native pipeline and
+  /// persists them. Called on every settings change and at connect.
+  void _pushVadConfig() {
+    final cfg = state.vadSettings.toJson();
+    cfg['mic_gain'] = state.micGain;
+    TsNative.setVadConfig(jsonEncode(cfg));
+    final prefs = _prefs;
+    if (prefs == null) return;
+    final s = state.vadSettings;
+    prefs.setBool(VadSettings.prefEnabled, s.enabled);
+    prefs.setString(VadSettings.prefMode, s.mode.jsonName);
+    prefs.setDouble(VadSettings.prefActivationDb, s.activationDb);
+    prefs.setString(VadSettings.prefPreset, s.preset.name);
+    prefs.setBool(VadSettings.prefAgc, s.agcEnabled);
+    prefs.setBool(VadSettings.prefDenoise, s.denoiseEnabled);
   }
 
   void setVadEnabled(bool enabled) {
-    state = state.copyWith(vadEnabled: enabled);
-    TsNative.setVadEnabled(enabled);
+    state = state.copyWith(
+      vadSettings: state.vadSettings.copyWith(enabled: enabled),
+    );
+    _pushVadConfig();
   }
+
+  void setVadMode(VadMode mode) {
+    state = state.copyWith(vadSettings: state.vadSettings.copyWith(mode: mode));
+    _pushVadConfig();
+  }
+
+  void setVadActivationDb(double db) {
+    state = state.copyWith(
+      vadSettings: state.vadSettings.copyWith(activationDb: db),
+    );
+    _pushVadConfig();
+  }
+
+  void setVadPreset(VadPreset preset) {
+    state = state.copyWith(
+      vadSettings: state.vadSettings.copyWith(preset: preset),
+    );
+    _pushVadConfig();
+  }
+
+  void setAgcEnabled(bool enabled) {
+    state = state.copyWith(
+      vadSettings: state.vadSettings.copyWith(agcEnabled: enabled),
+    );
+    _pushVadConfig();
+  }
+
+  void setDenoiseEnabled(bool enabled) {
+    state = state.copyWith(
+      vadSettings: state.vadSettings.copyWith(denoiseEnabled: enabled),
+    );
+    _pushVadConfig();
+  }
+
+  /// Applies the calibration result to the activation level.
+  void applyCalibratedActivation(double db) => setVadActivationDb(db);
 
   void setMicGain(double gain) {
     state = state.copyWith(micGain: gain);

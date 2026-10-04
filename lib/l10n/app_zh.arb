@@ -71,6 +71,34 @@
   "level": "电平",
   "micGain": "麦克风增益",
 
+  "vadModeAuto": "自动",
+  "vadModeGate": "音量门限",
+  "vadModeHybrid": "混合",
+  "vadSensitivity": "灵敏度",
+  "vadResponseSpeed": "响应速度",
+  "vadPresetFast": "快速",
+  "vadPresetStandard": "标准",
+  "vadPresetRobust": "稳健",
+  "agcLabel": "自动增益（AGC）",
+  "agcGainNow": "增益 {gain} dB",
+  "@agcGainNow": {
+    "placeholders": {
+      "gain": { "type": "String" }
+    }
+  },
+  "denoiseLabel": "降噪",
+  "vadCalibrate": "测量背景噪声",
+  "vadCalibrateQuiet": "请保持安静，正在测量背景噪声…",
+  "vadCalibrateSpeak": "现在请正常说话几秒钟",
+  "vadCalibrateResult": "噪声 {noise} dB · 语音 {speech} dB",
+  "@vadCalibrateResult": {
+    "placeholders": {
+      "noise": { "type": "String" },
+      "speech": { "type": "String" }
+    }
+  },
+  "vadCalibrateApply": "应用",
+
   "channelSounds": "频道提示音",
   "sfxDefault": "默认",
   "sfxPackNone": "内置音效",

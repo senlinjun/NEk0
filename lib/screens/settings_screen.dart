@@ -41,7 +41,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   AudioService? _testAudio;
   bool _micTest = false;
-  double _testRms = 0.0;
   // Raw native mic error from the current/last test run (null = healthy).
   String? _testError;
   List<SfxPack> _sfxPacks = [];
@@ -117,10 +116,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final al = AppLocalizations.of(context);
     final items = <DropdownMenuItem<String>>[
       DropdownMenuItem(value: '', child: Text(al.audioSystemDefault)),
+      // `name` is the selection/persistence key (an ALSA PCM name on Linux);
+      // `label` is the display name (card longname there, cpal's friendly
+      // name elsewhere — falls back to `name` when absent).
       for (final d in devices)
         DropdownMenuItem(
           value: d['name'] as String,
-          child: Text(d['name'] as String, overflow: TextOverflow.ellipsis),
+          child: Text(
+            (d['label'] as String?) ?? (d['name'] as String),
+            overflow: TextOverflow.ellipsis,
+          ),
         ),
     ];
     return Row(
@@ -185,16 +190,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _testAudio = null;
       setState(() {
         _micTest = false;
-        _testRms = 0.0;
         _testError = null;
       });
       return;
     }
     final a = AudioService();
-    a.onMicLevel = (rms) {
-      if (mounted) setState(() => _testRms = rms);
-    };
-    // Native capture failures (start or a stream dying mid-test).
+    // Native capture failures (start or a stream dying mid-test). The level
+    // itself is shown by the panel via the native pipeline's status — no
+    // local RMS tracking needed.
     a.onMicError = (raw) {
       if (mounted) setState(() => _testError = raw);
     };
@@ -221,7 +224,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     setState(() {
       _testAudio = a;
       _micTest = true;
-      _testRms = 0.0;
     });
   }
 
@@ -834,9 +836,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 conn: conn,
                 notifier: notifier,
                 showTitle: false,
-                // Draw the mic test level onto the threshold slider, just
-                // like the server screen's long-press-mic sheet.
-                levelOverride: _micTest ? _testRms : null,
                 // While connected, the in-call error (conn.micError) is what
                 // matters — don't let a stale test failure mask it.
                 errorOverride: connected ? null : _testError,
@@ -844,8 +843,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          // Mic test capture control (level is drawn on the threshold
-          // slider in the VoiceSettingsPanel above, like the server screen)
+          // Mic test capture control (the level shows up on the panel's
+          // meter above via the native pipeline's status)
           Card(
             color: const Color(0xFF1A1A2E),
             margin: EdgeInsets.zero,

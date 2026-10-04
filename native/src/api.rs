@@ -6,6 +6,7 @@ use crate::{
     PLAYED_SAMPLES, ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
     SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
     PendingFtList, recording,
+    mic_pipeline::MIC_PIPELINE,
     JITTER_STATS, MIN_SURPLUS_FRAMES, OUTPUT_PERIOD_MS, OUTPUT_RATE,
     TALKING_CLIENTS, TARGET_FRAMES_CEIL, TARGET_FRAMES_FLOOR, CLOCK_REF,
     play_time_ms, publish_clock_ref,
@@ -1462,11 +1463,32 @@ fn find_device_by_name(mut devs: Vec<cpal::Device>, names: &[&str]) -> Option<cp
     None
 }
 
+/// Resolves the device to open without consulting the user's stored choice:
+/// 1. Linux only: the sound server's PCM ("pipewire"/"pulse") — see
+///    [SOUND_SERVER_PCMS],
+/// 2. the host's default device.
+///
+/// Used as the fallback when no choice is made, when the stored choice is no
+/// longer enumerable, and when the chosen device fails to open (input falls
+/// back in [ts_set_audio_input_device], output in restart_output_stream_inner).
+fn pick_device_fallback(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
+    #[cfg(target_os = "linux")]
+    {
+        let devs = enumerate_devices(host, input);
+        if let Some(dev) = find_device_by_name(devs, &SOUND_SERVER_PCMS) {
+            return Some(dev);
+        }
+    }
+    if input {
+        host.default_input_device()
+    } else {
+        host.default_output_device()
+    }
+}
+
 /// Resolves the device to open, in priority order:
 /// 1. the user's explicit choice (exact name match),
-/// 2. Linux only, no explicit choice: the sound server's PCM
-///    ("pipewire"/"pulse") — see [SOUND_SERVER_PCMS],
-/// 3. the host's default device.
+/// 2. [pick_device_fallback] (sound-server PCM, then host default).
 fn pick_device(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
     let kind = if input { "input" } else { "output" };
 
@@ -1492,20 +1514,8 @@ fn pick_device(host: &cpal::Host, input: bool) -> Option<cpal::Device> {
                 want
             ));
         }
-    } else {
-        #[cfg(target_os = "linux")]
-        {
-            let devs = enumerate_devices(host, input);
-            if let Some(dev) = find_device_by_name(devs, &SOUND_SERVER_PCMS) {
-                return Some(dev);
-            }
-        }
     }
-    if input {
-        host.default_input_device()
-    } else {
-        host.default_output_device()
-    }
+    pick_device_fallback(host, input)
 }
 
 /// Rebuilds the cpal output stream on the selected device (see pick_device).
@@ -1553,15 +1563,32 @@ fn restart_output_stream_inner() {
     MIN_SURPLUS_FRAMES.store(0, Ordering::Relaxed);
 
     let host = cpal::default_host();
-    let Some(device) = pick_device(&host, false) else {
-        eprintln!("cpal: no output device");
-        return;
-    };
-    eprintln!(
-        "cpal: output device \"{}\"",
-        device.name().unwrap_or_default()
-    );
+    // Try the user's chosen device first; if it can't be opened or
+    // configured (e.g. an ALSA hw PCM the sound server currently holds),
+    // retry once on the system-default route so playback survives — mirrors
+    // the input side's fallback in ts_set_audio_input_device. The stored
+    // choice itself is kept for future reconnects.
+    match pick_device(&host, false) {
+        Some(device) => {
+            eprintln!("cpal: output device \"{}\"", device.name().unwrap_or_default());
+            if try_start_output(device) {
+                return;
+            }
+        }
+        None => eprintln!("cpal: no output device"),
+    }
+    if OUTPUT_DEVICE_NAME.lock().unwrap().is_some() {
+        eprintln!("audio: chosen output device failed, trying the system default");
+        if let Some(device) = pick_device_fallback(&host, false) {
+            try_start_output(device);
+        }
+    }
+}
 
+/// Builds and starts the output stream on `device` through the config
+/// fallback chain. Stores the stream in AUDIO_STREAM and the device rate in
+/// OUTPUT_RATE on success; returns false when every configuration failed.
+fn try_start_output(device: cpal::Device) -> bool {
     // Stereo is preferred — panning/positional audio needs distinct L/R;
     // mono output plays the centered (L+R)/2 downmix. The fallback chain
     // negotiates buffer size, channel count and finally the device's own
@@ -1705,7 +1732,7 @@ fn restart_output_stream_inner() {
                         "cpal: output stream started ({} Hz, {} ch, mix resample ratio {:.4}, requested buffer {:?})",
                         config.sample_rate.0, config.channels, ratio, config.buffer_size
                     );
-                    return;
+                    return true;
                 }
                 Err(e) => eprintln!("cpal: play() failed ({} Hz): {}", config.sample_rate.0, e),
             },
@@ -1716,6 +1743,7 @@ fn restart_output_stream_inner() {
         }
     }
     eprintln!("cpal: all output stream configurations failed");
+    false
 }
 
 /// Background task: periodically cleans up stale clients and refreshes the
@@ -1837,6 +1865,15 @@ fn spawn_maintenance_task() {
                             target * crate::FRAME_MS, late, gaps
                         );
                     }
+                    // Uplink VAD/AGC state next to the playback stats, same
+                    // 5 s cadence — one glance shows why the gate is (not)
+                    // transmitting.
+                    let vs = MIC_PIPELINE.lock().status.clone();
+                    eprintln!(
+                        "[vad] mode={:?} speaking={} level={:.1} noise={:.1} open={:.1} prob={:.2} agc={:+.1} clipped={} enabled={}",
+                        vs.mode, vs.speaking, vs.level_db, vs.noise_db, vs.open_db,
+                        vs.prob, vs.agc_gain_db, vs.clipped, vs.enabled
+                    );
                 }
             }
         }
@@ -4011,88 +4048,47 @@ async fn event_loop(
                     return;
                 }
                 Command::SendAudio { data } => {
-                    const FRAME: usize = 960;
-                    {
-                        let mut state = STATE.lock();
-                        state.pcm_in.extend_from_slice(&data);
-                    }
-                    loop {
-                        let encode_result = {
-                            let mut state = STATE.lock();
-                            if state.pcm_in.len() < FRAME {
+                    // The pipeline decides (VAD), gains (AGC + slider) and
+                    // encodes; only the network sends happen out here, so
+                    // `con` is never borrowed under the pipeline lock.
+                    let bursts = {
+                        let mut pipe = MIC_PIPELINE.lock();
+                        pipe.push_samples(&data);
+                        let mut bursts = Vec::new();
+                        while let Some(burst) = pipe.next_burst() {
+                            let done = burst.packets.is_empty();
+                            bursts.push(burst);
+                            if done {
                                 break;
                             }
-                            let frame: Vec<f32> = state.pcm_in.drain(..FRAME).collect();
-                            const HOLD_FRAMES: u32 = 10;
-                            let vad_drop = if state.vad_enabled {
-                                let rms = (frame.iter().map(|s| s * s).sum::<f32>() / FRAME as f32)
-                                    .sqrt();
-                                if rms >= state.vad_threshold {
-                                    state.vad_hold = HOLD_FRAMES;
-                                    false
-                                } else if state.vad_hold > 0 {
-                                    state.vad_hold -= 1;
-                                    false
-                                } else {
-                                    true
-                                }
-                            } else {
-                                false
-                            };
-                            // Read gain before dropping state (avoid split-borrow conflict)
-                            let gain = state.mic_gain;
-                            drop(state);
-                            if vad_drop {
-                                None
-                            } else {
-                                // Apply mic gain AFTER VAD so VAD sees raw mic level
-                                let gained: Vec<f32> = if (gain - 1.0).abs() > 0.001 {
-                                    frame.iter().map(|s| (s * gain).clamp(-1.0, 1.0)).collect()
-                                } else {
-                                    frame
-                                };
-                                let mut state = STATE.lock();
-                                if let Some(ref mut encoder) = state.audio_encoder {
-                                    let mut opus_out = vec![0u8; 4000];
-                                    match encoder.encode(&gained, FRAME, &mut opus_out) {
-                                        Ok(len) => {
-                                            // Recording tap: our own uplink
-                                            // packet at the current mix slot.
-                                            recording::push_mic(
-                                                PLAYED_SAMPLES.load(Ordering::Relaxed)
-                                                    / FRAME_SIZE,
-                                                &opus_out[..len],
-                                            );
-                                            let seq = state.audio_seq;
-                                            state.audio_seq = state.audio_seq.wrapping_add(1);
-                                            Some((seq, opus_out[..len].to_vec()))
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "opus encode ERROR: {} (frame_len={})",
-                                                e,
-                                                gained.len()
-                                            );
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    state.pcm_in.clear();
-                                    None
-                                }
+                        }
+                        bursts
+                    };
+                    for burst in bursts {
+                        let n = burst.packets.len();
+                        for (i, (seq, opus)) in burst.packets.into_iter().enumerate() {
+                            // Recording tap: our own uplink frames, back-filled
+                            // so keys stay strictly ascending across a preroll
+                            // burst. Skipped when the back-fill would underflow
+                            // (the very first frames of a session).
+                            let slot =
+                                PLAYED_SAMPLES.load(Ordering::Relaxed) / FRAME_SIZE;
+                            let back = (n - 1 - i) as u64;
+                            if slot >= back {
+                                recording::push_mic(slot - back, &opus);
                             }
-                        };
-                        if let Some((seq, opus_data)) = encode_result {
                             let packet = OutAudio::new(&AudioData::C2S {
                                 id: seq,
                                 codec: CodecType::OpusVoice,
-                                data: &opus_data,
+                                data: &opus,
                             });
                             match con.send_audio(packet) {
                                 Ok(_) => {
-                                    STATE.lock().voice_active = true;
+                                    crate::VOICE_ACTIVE.store(true, Ordering::Relaxed);
                                 }
-                                Err(e) => eprintln!("event_loop: send_audio error: {}", e),
+                                Err(e) => {
+                                    eprintln!("event_loop: send_audio error: {}", e)
+                                }
                             }
                         }
                     }
@@ -4669,34 +4665,75 @@ pub extern "C" fn ts_is_connected() -> u8 {
 
 // ─── VAD ────────────────────────────────────────────────────────────
 
+/// Partial VAD/AGC/mic-gain config update (JSON, all fields optional —
+/// absent fields keep their current value; see
+/// mic_pipeline::PipelineConfigPatch for the contract). Returns 1 on a
+/// valid parse, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn ts_set_vad_config(json: *const c_char) -> u8 {
+    if json.is_null() {
+        return 0;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(json) }.to_string_lossy();
+    match MIC_PIPELINE.lock().apply_patch(&s) {
+        Ok(()) => 1,
+        Err(e) => {
+            eprintln!("ts_set_vad_config: {e}");
+            0
+        }
+    }
+}
+
+/// Snapshot of the last processed mic frame (level, noise floor, speech
+/// probability, AGC gain, gate state) as JSON. Freed via ts_free_string.
+#[no_mangle]
+pub extern "C" fn ts_get_vad_status() -> *mut c_char {
+    let status = MIC_PIPELINE.lock().status.clone();
+    to_c_str(serde_json::to_string(&status).unwrap_or_else(|e| {
+        format!("{{\"error\":\"{e}\"}}")
+    }))
+}
+
+/// Drops everything learned about the current environment (noise floor,
+/// RNNoise warm-up, AGC gain). Used by the calibration flow.
+#[no_mangle]
+pub extern "C" fn ts_reset_vad() {
+    MIC_PIPELINE.lock().reset_analysis();
+}
+
+/// Legacy single-value toggles kept so an older Dart side can still drive a
+/// newer .so (and vice versa) without missing-symbol crashes. The full
+/// config lives in ts_set_vad_config.
 #[no_mangle]
 pub extern "C" fn ts_set_vad_threshold(threshold: f32) {
-    STATE.lock().vad_threshold = threshold;
+    // Old contract was a linear RMS value; the dB domain is authoritative
+    // now, so convert instead of storing an out-of-range raw number.
+    let db = crate::vad::rms_to_db(threshold.clamp(1e-6, 1.0));
+    let _ = MIC_PIPELINE
+        .lock()
+        .apply_patch(&format!("{{\"activation_db\":{db}}}"));
 }
 
 #[no_mangle]
 pub extern "C" fn ts_set_vad_enabled(enabled: u8) -> u8 {
-    STATE.lock().vad_enabled = enabled != 0;
+    let _ = MIC_PIPELINE
+        .lock()
+        .apply_patch(&format!("{{\"enabled\":{}}}", enabled != 0));
     1
 }
 
 #[no_mangle]
 pub extern "C" fn ts_is_voice_active() -> u8 {
-    let mut state = STATE.lock();
-    let active = state.voice_active;
-    state.voice_active = false;
-    if active {
-        1
-    } else {
-        0
-    }
+    crate::VOICE_ACTIVE.swap(false, Ordering::Relaxed) as u8
 }
 
 // ─── Mic gain ───────────────────────────────────────────────────────
 
 #[no_mangle]
 pub extern "C" fn ts_set_mic_gain(gain: f32) {
-    STATE.lock().mic_gain = gain.clamp(0.0, 3.0);
+    let _ = MIC_PIPELINE
+        .lock()
+        .apply_patch(&format!("{{\"mic_gain\":{}}}", gain.clamp(0.0, 3.0)));
 }
 
 // ─── Per-client volume ──────────────────────────────────────────────
@@ -4782,19 +4819,23 @@ pub extern "C" fn ts_start_audio() -> u8 {
             return 0;
         }
     };
-    let mut state = STATE.lock();
-    state.audio_encoder = Some(encoder);
-    state.pcm_in.clear();
-    state.audio_seq = 0;
+    let mut pipe = MIC_PIPELINE.lock();
+    pipe.encoder = Some(encoder);
+    pipe.seq = 0;
+    // Fresh DSP state for a new session; the AGC gain is re-seeded from the
+    // per-device memory so the first sentence is not quiet.
+    pipe.session_start();
     1
 }
 
 #[no_mangle]
 pub extern "C" fn ts_stop_audio() {
-    let mut state = STATE.lock();
-    state.audio_encoder = None;
-    let disconnect_pending = state.disconnect_requested;
-    drop(state);
+    let disconnect_pending = {
+        let mut pipe = MIC_PIPELINE.lock();
+        pipe.session_stop();
+        pipe.encoder = None;
+        STATE.lock().disconnect_requested
+    };
     if disconnect_pending || SFX_DEFERRED_TEARDOWN.load(Ordering::Relaxed) {
         // A disconnect is in flight (ts_disconnect set the flag before the
         // event loop queued the sfx) or a disconnect/error sound is still
@@ -4810,12 +4851,18 @@ pub extern "C" fn ts_stop_audio() {
 
 /// Routes raw mic samples into the encode/send pipeline — the shared path
 /// used by both ts_send_audio (Dart push, Android) and the cpal input
-/// callback (desktop capture). VAD, mic gain and Opus encoding happen
-/// downstream in the event loop's Command::SendAudio handler. No-op when not
-/// connected.
+/// callback (desktop capture). Frame VAD/AGC/gain/encode happen downstream
+/// in the event loop's Command::SendAudio handler. While NOT connected the
+/// samples still feed the pipeline's analysis stage (level meter, noise
+/// floor, speech probability) so the settings mic test and calibration work
+/// without a server; nothing is encoded or sent in that mode.
 fn queue_mic_samples(samples: Vec<f32>) -> bool {
-    if samples.is_empty() || !STATE.lock().connected {
+    if samples.is_empty() {
         return false;
+    }
+    if !STATE.lock().connected {
+        MIC_PIPELINE.lock().analyze_only(&samples);
+        return true;
     }
     let tx = COMMAND_TX.lock();
     match tx.as_ref() {
@@ -4830,7 +4877,7 @@ pub extern "C" fn ts_send_audio(data: *const f32, data_len: u32) -> u8 {
         return 0;
     }
     let raw = unsafe { std::slice::from_raw_parts(data, data_len as usize) };
-    let samples: Vec<f32> = raw.to_vec(); // raw samples — gain applied after VAD
+    let samples: Vec<f32> = raw.to_vec(); // raw samples — VAD/gain happen in the pipeline
     queue_mic_samples(samples) as u8
 }
 
@@ -4941,6 +4988,9 @@ pub fn start_mic_capture() -> bool {
     };
     let dev_name = device.name().unwrap_or_default();
     eprintln!("cpal mic: input device \"{}\"", dev_name);
+    // AGC gain memory is keyed per input device: switching devices switches
+    // to that device's learned gain.
+    *crate::mic_pipeline::MIC_DEVICE_KEY.lock() = dev_name.clone();
     // cpal's WASAPI backend treats every IsFormatSupported S_FALSE as
     // unsupported (no AUTOCONVERTPCM), so the device's own mix format must
     // be the first candidate — 48 kHz mono only succeeds on devices natively
@@ -5077,54 +5127,177 @@ pub extern "C" fn ts_get_mic_rms() -> f32 {
 #[derive(serde::Serialize)]
 struct AudioDeviceInfo {
     name: String,
+    /// Human-readable display name; `name` stays the value/persistence key.
+    /// Linux fills this from the ALSA hint description (card longname), other
+    /// platforms echo `name` (cpal/WASAPI/oboe names are already friendly).
+    label: String,
     is_default: bool,
 }
 
 /// Lists host output/input devices for the picker UI as JSON:
-/// `{"outputs":[{"name","is_default"}],"inputs":[...]}`. The host default
-/// is marked; on Linux sound-server PCMs and hw devices sort first (alsa
-/// exposes many alias PCMs — de-duplicated here). Platforms without
-/// enumeration support (Android/oboe) return empty arrays.
+/// `{"outputs":[{"name","label","is_default"}],"inputs":[...]}`. On Linux the
+/// list comes from the stable ALSA name hints (see list_audio_devices_linux);
+/// platforms without enumeration support (Android/oboe) return empty arrays.
 fn list_audio_devices(host: &cpal::Host, input: bool) -> Vec<AudioDeviceInfo> {
-    let default_name = if input {
-        host.default_input_device()
-    } else {
-        host.default_output_device()
-    }
-    .and_then(|d| d.name().ok());
-    let mut seen = HashSet::new();
-    let mut out: Vec<AudioDeviceInfo> = Vec::new();
-    for d in enumerate_devices(host, input) {
-        if let Ok(name) = d.name() {
-            if seen.insert(name.clone()) {
-                out.push(AudioDeviceInfo {
-                    is_default: default_name.as_deref() == Some(name.as_str()),
-                    name,
-                });
-            }
-        }
-    }
     #[cfg(target_os = "linux")]
     {
-        let rank = |n: &str| {
-            if SOUND_SERVER_PCMS.contains(&n) {
-                0
-            } else if n.starts_with("hw:") {
-                1
-            } else {
-                2
-            }
-        };
-        out.sort_by(|a, b| {
-            rank(&a.name)
-                .cmp(&rank(&b.name))
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        let _ = host; // the hint list does not go through cpal
+        return list_audio_devices_linux(input);
     }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let default_name = if input {
+            host.default_input_device()
+        } else {
+            host.default_output_device()
+        }
+        .and_then(|d| d.name().ok());
+        let mut seen = HashSet::new();
+        let mut out: Vec<AudioDeviceInfo> = Vec::new();
+        for d in enumerate_devices(host, input) {
+            if let Ok(name) = d.name() {
+                if seen.insert(name.clone()) {
+                    out.push(AudioDeviceInfo {
+                        is_default: default_name.as_deref() == Some(name.as_str()),
+                        label: name.clone(),
+                        name,
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_devices {
+    use std::collections::HashSet;
+
+    /// ALSA PCM names that are plugins/converters rather than routable
+    /// devices — never a useful mic or speaker choice. `jack`/`oss` fail to
+    /// open unless that subsystem is actually running.
+    pub(super) const JUNK_PCMS: [&str; 9] = [
+        "null", "lavrate", "samplerate", "speexrate", "speex", "upmix", "vdownmix", "jack", "oss",
+    ];
+
+    /// Card id embedded in an ALSA PCM alias ("default:CARD=III" → "III",
+    /// "hdmi:CARD=NVidia,DEV=1" → "NVidia"), None for plain plugin names.
+    pub(super) fn card_of(pcm: &str) -> Option<&str> {
+        let rest = &pcm[pcm.find("CARD=")? + "CARD=".len()..];
+        Some(&rest[..rest.find(',').unwrap_or(rest.len())])
+    }
+
+    /// Whether `name` belongs in the picker for `input`. `cards_with_default`
+    /// holds the cards that already have a `default:CARD=` entry, which makes
+    /// their `sysdefault:CARD=` twin redundant. `front:`/`surround*:` are
+    /// channel-layout aliases of `default:CARD=` (hidden everywhere);
+    /// `iec958:`/`hdmi:` are genuinely separate digital outputs (kept for
+    /// output only — as capture targets they are useless).
+    pub(super) fn visible(name: &str, input: bool, cards_with_default: &HashSet<String>) -> bool {
+        if JUNK_PCMS.contains(&name) || name.starts_with("usbstream:") {
+            return false;
+        }
+        if name.starts_with("front:") || name.starts_with("surround") {
+            return false;
+        }
+        if name.starts_with("sysdefault:") {
+            if let Some(card) = card_of(name) {
+                if cards_with_default.contains(card) {
+                    return false;
+                }
+            }
+        }
+        if input && (name.starts_with("iec958:") || name.starts_with("hdmi:")) {
+            return false;
+        }
+        true
+    }
+
+    /// Display label: friendly names for the sound-server PCMs, else the
+    /// hint's DESC (its first line is the card longname, e.g. "HyperX Cloud
+    /// III USB"), falling back to the PCM name itself.
+    pub(super) fn label(name: &str, desc: Option<&str>) -> String {
+        match name {
+            "pipewire" => return "PipeWire".to_string(),
+            "pulse" => return "PulseAudio".to_string(),
+            _ => {}
+        }
+        desc.and_then(|d| d.lines().next())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .unwrap_or(name)
+            .to_string()
+    }
+}
+
+/// Linux device list from the stable ALSA name hints (`snd_device_name_hint`,
+/// the same source arecord -L shows). Unlike cpal's enumeration — which
+/// probe-opens every PCM and silently drops the ones the sound server holds
+/// at that moment — the hint list is static config, so entries no longer
+/// appear/disappear with PipeWire/WirePlumber activity. Openability is
+/// enforced when the device is actually opened (pick_device), with a
+/// graceful fallback.
+#[cfg(target_os = "linux")]
+fn list_audio_devices_linux(input: bool) -> Vec<AudioDeviceInfo> {
+    use alsa::device_name::HintIter;
+
+    let hints = match HintIter::new_str(None, "pcm") {
+        Ok(it) => it,
+        Err(e) => {
+            eprintln!("audio: alsa device hint enumeration failed: {}", e);
+            return Vec::new();
+        }
+    };
+    let all: Vec<_> = hints
+        .filter_map(|h| Some((h.name?, h.desc, h.direction)))
+        .collect();
+    let cards_with_default: HashSet<String> = all
+        .iter()
+        .filter_map(|(n, _, _)| linux_devices::card_of(n).filter(|_| n.starts_with("default:")))
+        .map(str::to_string)
+        .collect();
+
+    let mut out: Vec<AudioDeviceInfo> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut marked_default = false;
+    for (name, desc, direction) in all {
+        let wanted = match direction {
+            None => true, // IOID absent — the PCM serves both directions
+            Some(alsa::Direction::Capture) => input,
+            Some(alsa::Direction::Playback) => !input,
+        };
+        if !wanted || !linux_devices::visible(&name, input, &cards_with_default) {
+            continue;
+        }
+        if seen.insert(name.clone()) {
+            // 系统默认 ('' in the UI) resolves to the sound-server PCM via
+            // pick_device, so that entry is the effective default.
+            let is_default = !marked_default && SOUND_SERVER_PCMS.contains(&name.as_str());
+            marked_default |= is_default;
+            out.push(AudioDeviceInfo {
+                is_default,
+                label: linux_devices::label(&name, desc.as_deref()),
+                name,
+            });
+        }
+    }
+    let rank = |n: &str| {
+        if SOUND_SERVER_PCMS.contains(&n) {
+            0
+        } else {
+            1
+        }
+    };
+    out.sort_by(|a, b| {
+        rank(&a.name)
+            .cmp(&rank(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     out
 }
 
-/// Desktop audio device list (see list_audio_devices for the JSON shape).
+/// Desktop audio device list (see list_audio_devices for the JSON shape;
+/// `name` is the selection/persistence key, `label` the display name).
 #[no_mangle]
 pub extern "C" fn ts_get_audio_devices() -> *mut c_char {
     let host = cpal::default_host();
@@ -6318,6 +6491,90 @@ pub extern "C" fn ts_discard_recording() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Linux device list (hint enumeration helpers) ────────────────
+
+    #[cfg(target_os = "linux")]
+    mod linux_list {
+        use std::collections::HashSet;
+
+        use super::super::linux_devices;
+
+        fn defaults(cards: &[&str]) -> HashSet<String> {
+            cards.iter().map(|c| c.to_string()).collect()
+        }
+
+        #[test]
+        fn card_of_parses_alias_names() {
+            assert_eq!(linux_devices::card_of("default:CARD=III"), Some("III"));
+            assert_eq!(linux_devices::card_of("sysdefault:CARD=PCH"), Some("PCH"));
+            assert_eq!(
+                linux_devices::card_of("hdmi:CARD=NVidia,DEV=1"),
+                Some("NVidia")
+            );
+            assert_eq!(linux_devices::card_of("pipewire"), None);
+        }
+
+        #[test]
+        fn junk_and_converter_plugins_are_hidden() {
+            for name in ["null", "lavrate", "samplerate", "speexrate", "jack", "oss"] {
+                assert!(
+                    !linux_devices::visible(name, true, &defaults(&[])),
+                    "{} should be hidden",
+                    name
+                );
+            }
+            assert!(!linux_devices::visible("usbstream:CARD=III", false, &defaults(&[])));
+        }
+
+        #[test]
+        fn sysdefault_hidden_only_when_default_exists_for_same_card() {
+            let cards = defaults(&["III"]);
+            assert!(!linux_devices::visible("sysdefault:CARD=III", true, &cards));
+            assert!(
+                linux_devices::visible("sysdefault:CARD=PCH", true, &cards),
+                "other cards keep sysdefault when no default:CARD entry exists"
+            );
+        }
+
+        #[test]
+        fn channel_layout_aliases_hidden_but_digital_outputs_kept_for_output() {
+            let none = defaults(&[]);
+            for name in [
+                "front:CARD=PCH,DEV=0",
+                "surround51:CARD=PCH,DEV=0",
+                "surround71:CARD=PCH,DEV=0",
+            ] {
+                assert!(!linux_devices::visible(name, true, &none));
+                assert!(!linux_devices::visible(name, false, &none));
+            }
+            assert!(linux_devices::visible("hdmi:CARD=NVidia,DEV=0", false, &none));
+            assert!(linux_devices::visible("iec958:CARD=PCH,DEV=0", false, &none));
+            assert!(!linux_devices::visible("hdmi:CARD=NVidia,DEV=0", true, &none));
+            assert!(!linux_devices::visible("iec958:CARD=PCH,DEV=0", true, &none));
+            assert!(linux_devices::visible("default:CARD=III", true, &none));
+            assert!(linux_devices::visible("default:CARD=III", false, &none));
+        }
+
+        #[test]
+        fn label_prefers_desc_first_line_and_names_sound_servers() {
+            assert_eq!(linux_devices::label("pipewire", None), "PipeWire");
+            assert_eq!(linux_devices::label("pulse", None), "PulseAudio");
+            assert_eq!(
+                linux_devices::label(
+                    "default:CARD=III",
+                    Some("HyperX Cloud III USB\nDefault Audio Device")
+                ),
+                "HyperX Cloud III USB"
+            );
+            assert_eq!(linux_devices::label("default:CARD=X", None), "default:CARD=X");
+            assert_eq!(
+                linux_devices::label("default:CARD=X", Some("  \nmore")),
+                "default:CARD=X",
+                "blank DESC falls back to the PCM name"
+            );
+        }
+    }
 
     // ─── Mic error record ───────────────────────────────────────────
 

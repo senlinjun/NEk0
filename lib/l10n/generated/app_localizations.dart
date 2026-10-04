@@ -494,6 +494,102 @@ abstract class AppLocalizations {
   /// **'Mic Gain'**
   String get micGain;
 
+  /// No description provided for @vadModeAuto.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto'**
+  String get vadModeAuto;
+
+  /// No description provided for @vadModeGate.
+  ///
+  /// In en, this message translates to:
+  /// **'Volume gate'**
+  String get vadModeGate;
+
+  /// No description provided for @vadModeHybrid.
+  ///
+  /// In en, this message translates to:
+  /// **'Hybrid'**
+  String get vadModeHybrid;
+
+  /// No description provided for @vadSensitivity.
+  ///
+  /// In en, this message translates to:
+  /// **'Sensitivity'**
+  String get vadSensitivity;
+
+  /// No description provided for @vadResponseSpeed.
+  ///
+  /// In en, this message translates to:
+  /// **'Response speed'**
+  String get vadResponseSpeed;
+
+  /// No description provided for @vadPresetFast.
+  ///
+  /// In en, this message translates to:
+  /// **'Fast'**
+  String get vadPresetFast;
+
+  /// No description provided for @vadPresetStandard.
+  ///
+  /// In en, this message translates to:
+  /// **'Standard'**
+  String get vadPresetStandard;
+
+  /// No description provided for @vadPresetRobust.
+  ///
+  /// In en, this message translates to:
+  /// **'Robust'**
+  String get vadPresetRobust;
+
+  /// No description provided for @agcLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Auto gain (AGC)'**
+  String get agcLabel;
+
+  /// No description provided for @agcGainNow.
+  ///
+  /// In en, this message translates to:
+  /// **'Gain {gain} dB'**
+  String agcGainNow(String gain);
+
+  /// No description provided for @denoiseLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Noise suppression'**
+  String get denoiseLabel;
+
+  /// No description provided for @vadCalibrate.
+  ///
+  /// In en, this message translates to:
+  /// **'Measure noise floor'**
+  String get vadCalibrate;
+
+  /// No description provided for @vadCalibrateQuiet.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep quiet — measuring the noise floor…'**
+  String get vadCalibrateQuiet;
+
+  /// No description provided for @vadCalibrateSpeak.
+  ///
+  /// In en, this message translates to:
+  /// **'Now speak normally for a few seconds'**
+  String get vadCalibrateSpeak;
+
+  /// No description provided for @vadCalibrateResult.
+  ///
+  /// In en, this message translates to:
+  /// **'Noise {noise} dB · Speech {speech} dB'**
+  String vadCalibrateResult(String noise, String speech);
+
+  /// No description provided for @vadCalibrateApply.
+  ///
+  /// In en, this message translates to:
+  /// **'Apply'**
+  String get vadCalibrateApply;
+
   /// No description provided for @channelSounds.
   ///
   /// In en, this message translates to:

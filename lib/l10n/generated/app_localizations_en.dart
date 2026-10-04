@@ -219,6 +219,58 @@ class AppLocalizationsEn extends AppLocalizations {
   String get micGain => 'Mic Gain';
 
   @override
+  String get vadModeAuto => 'Auto';
+
+  @override
+  String get vadModeGate => 'Volume gate';
+
+  @override
+  String get vadModeHybrid => 'Hybrid';
+
+  @override
+  String get vadSensitivity => 'Sensitivity';
+
+  @override
+  String get vadResponseSpeed => 'Response speed';
+
+  @override
+  String get vadPresetFast => 'Fast';
+
+  @override
+  String get vadPresetStandard => 'Standard';
+
+  @override
+  String get vadPresetRobust => 'Robust';
+
+  @override
+  String get agcLabel => 'Auto gain (AGC)';
+
+  @override
+  String agcGainNow(String gain) {
+    return 'Gain $gain dB';
+  }
+
+  @override
+  String get denoiseLabel => 'Noise suppression';
+
+  @override
+  String get vadCalibrate => 'Measure noise floor';
+
+  @override
+  String get vadCalibrateQuiet => 'Keep quiet — measuring the noise floor…';
+
+  @override
+  String get vadCalibrateSpeak => 'Now speak normally for a few seconds';
+
+  @override
+  String vadCalibrateResult(String noise, String speech) {
+    return 'Noise $noise dB · Speech $speech dB';
+  }
+
+  @override
+  String get vadCalibrateApply => 'Apply';
+
+  @override
   String get channelSounds => 'Channel sounds';
 
   @override

@@ -76,6 +76,34 @@
   "level": "Level",
   "micGain": "Mic Gain",
 
+  "vadModeAuto": "Auto",
+  "vadModeGate": "Volume gate",
+  "vadModeHybrid": "Hybrid",
+  "vadSensitivity": "Sensitivity",
+  "vadResponseSpeed": "Response speed",
+  "vadPresetFast": "Fast",
+  "vadPresetStandard": "Standard",
+  "vadPresetRobust": "Robust",
+  "agcLabel": "Auto gain (AGC)",
+  "agcGainNow": "Gain {gain} dB",
+  "@agcGainNow": {
+    "placeholders": {
+      "gain": { "type": "String" }
+    }
+  },
+  "denoiseLabel": "Noise suppression",
+  "vadCalibrate": "Measure noise floor",
+  "vadCalibrateQuiet": "Keep quiet — measuring the noise floor…",
+  "vadCalibrateSpeak": "Now speak normally for a few seconds",
+  "vadCalibrateResult": "Noise {noise} dB · Speech {speech} dB",
+  "@vadCalibrateResult": {
+    "placeholders": {
+      "noise": { "type": "String" },
+      "speech": { "type": "String" }
+    }
+  },
+  "vadCalibrateApply": "Apply",
+
   "channelSounds": "Channel sounds",
   "sfxDefault": "Default",
   "sfxPackNone": "Built-in sounds",

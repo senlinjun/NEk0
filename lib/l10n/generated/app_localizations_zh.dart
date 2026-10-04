@@ -211,6 +211,58 @@ class AppLocalizationsZh extends AppLocalizations {
   String get micGain => '麦克风增益';
 
   @override
+  String get vadModeAuto => '自动';
+
+  @override
+  String get vadModeGate => '音量门限';
+
+  @override
+  String get vadModeHybrid => '混合';
+
+  @override
+  String get vadSensitivity => '灵敏度';
+
+  @override
+  String get vadResponseSpeed => '响应速度';
+
+  @override
+  String get vadPresetFast => '快速';
+
+  @override
+  String get vadPresetStandard => '标准';
+
+  @override
+  String get vadPresetRobust => '稳健';
+
+  @override
+  String get agcLabel => '自动增益（AGC）';
+
+  @override
+  String agcGainNow(String gain) {
+    return '增益 $gain dB';
+  }
+
+  @override
+  String get denoiseLabel => '降噪';
+
+  @override
+  String get vadCalibrate => '测量背景噪声';
+
+  @override
+  String get vadCalibrateQuiet => '请保持安静，正在测量背景噪声…';
+
+  @override
+  String get vadCalibrateSpeak => '现在请正常说话几秒钟';
+
+  @override
+  String vadCalibrateResult(String noise, String speech) {
+    return '噪声 $noise dB · 语音 $speech dB';
+  }
+
+  @override
+  String get vadCalibrateApply => '应用';
+
+  @override
   String get channelSounds => '频道提示音';
 
   @override

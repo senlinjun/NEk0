@@ -38,6 +38,10 @@ base64 = "0.22"
 # MD5 of the uploaded avatar file — the value sent as client_flag_avatar in
 # the clientupdate that makes the new avatar visible to everyone.
 md-5 = "0.10"
+# Pure-Rust RNNoise port: speech-probability VAD + optional denoise for the
+# mic uplink. 48 kHz / 480-sample frames, i16-range f32 input, returns the
+# frame voice probability (see native/src/vad.rs).
+nnnoiseless = "0.5"
 
 # Android-only: cpal/oboe resolve the JVM through ndk-context and query
 # AudioTrack buffer sizes via JNI when building streams. The context is
@@ -45,6 +49,14 @@ md-5 = "0.10"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk-context = "0.1"
+
+# Linux-only: stable ALSA device enumeration for the picker UI. cpal's
+# probe-open enumeration drops any PCM the sound server currently holds, so
+# the list would grow/shrink with PipeWire activity; snd_device_name_hint
+# (via HintIter) is static config and never changes under load. Same version
+# cpal depends on (0.9.1) so both share one compilation.
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa = "0.9"
 
 [patch."https://github.com/ReSpeak/tsclientlib.git"]
 tsclientlib = { path = "local_tsclientlib/tsclientlib" }
