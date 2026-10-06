@@ -542,6 +542,12 @@ abstract class AppLocalizations {
   /// **'Robust'**
   String get vadPresetRobust;
 
+  /// No description provided for @vadPresetHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Fast: no added onset delay. Standard: about +40 ms onset delay (TeamSpeak\'s default trade-off). Robust: about +140 ms, maximum protection.'**
+  String get vadPresetHint;
+
   /// No description provided for @agcLabel.
   ///
   /// In en, this message translates to:

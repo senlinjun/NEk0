@@ -235,6 +235,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get vadPresetRobust => '稳健';
 
   @override
+  String get vadPresetHint =>
+      '快速：无额外起音延迟。标准：起音约多 40ms（TeamSpeak 默认取舍）。稳健：起音约多 140ms，保护最强。';
+
+  @override
   String get agcLabel => '自动增益（AGC）';
 
   @override

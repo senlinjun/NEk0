@@ -19,10 +19,11 @@ void main() {
 
     test('presets map to the documented timing knobs', () {
       expect(const VadSettings(preset: VadPreset.fast).timings, (120, 0, 1));
+      // Standard aligns with TS3's defaults: preroll 2, no confirmation.
       expect(const VadSettings(preset: VadPreset.standard).timings, (
         200,
-        3,
         2,
+        1,
       ));
       expect(const VadSettings(preset: VadPreset.robust).timings, (300, 5, 3));
     });
