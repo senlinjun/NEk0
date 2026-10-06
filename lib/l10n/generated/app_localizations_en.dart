@@ -243,6 +243,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get vadPresetRobust => 'Robust';
 
   @override
+  String get vadPresetHint =>
+      'Fast: no added onset delay. Standard: about +40 ms onset delay (TeamSpeak\'s default trade-off). Robust: about +140 ms, maximum protection.';
+
+  @override
   String get agcLabel => 'Auto gain (AGC)';
 
   @override

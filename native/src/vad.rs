@@ -66,11 +66,15 @@ pub struct VadConfig {
     /// Tail: how long the gate stays open after the conditions drop.
     pub hold_ms: u32,
     /// Frames of pre-speech audio flushed when the gate opens
-    /// (TS `vad_extrabuffersize` semantics, 0..8).
+    /// (TS `vad_extrabuffersize` semantics, 0..8). The default 2 matches
+    /// TS3's default; deeper prerolls trade latency for onset coverage
+    /// (robust preset).
     pub preroll_frames: u32,
     /// Consecutive open-condition frames required before opening
     /// (single-frame click rejection). Costs decision latency only — the
-    /// confirmed frames stay in the preroll ring, see [Vad::decide].
+    /// confirmed frames stay in the preroll ring, see [Vad::decide]. The
+    /// default 1 is TS3 behavior (per-frame decision, no confirmation);
+    /// raise it to reject clicks.
     pub onset_frames: u32,
 }
 
@@ -84,8 +88,8 @@ impl Default for VadConfig {
             hold_prob: 0.3,
             hysteresis_db: 3.0,
             hold_ms: 200,
-            preroll_frames: 3,
-            onset_frames: 2,
+            preroll_frames: 2,
+            onset_frames: 1,
         }
     }
 }
@@ -282,7 +286,8 @@ impl NoiseFloor {
 pub struct RnnVad {
     state: Box<DenoiseState<'static>>,
     warmed_up: bool,
-    /// Denoised output of the last [RnnVad::process] call, −1..1. Only
+    /// Denoised output of the last [RnnVad::process] call in −1..1
+    /// (nnnoiseless's 16-bit-domain output scaled back down). Only
     /// meaningful when the call returned `Some`; when denoising is not
     /// wanted the caller keeps its original frame.
     pub out: [f32; FRAME],
@@ -322,6 +327,13 @@ impl RnnVad {
             }
             let out_half = &mut self.out[h * HALF..(h + 1) * HALF];
             let p = self.state.process_frame(out_half, &self.buf);
+            // nnnoiseless is 16-bit-PCM domain on BOTH ends: what comes out
+            // is ±32768-scale and must be brought back to ±1 before it
+            // re-enters the pipeline. Missing this divide once made denoise
+            // sound like full-scale electrical buzz.
+            for s in out_half.iter_mut() {
+                *s /= 32768.0;
+            }
             prob = prob.max(p);
         }
         Some(prob.clamp(0.0, 1.0))
@@ -446,6 +458,27 @@ mod tests {
         let opened = step(&mut v, 6, -30.0, None);
         // depth 3 ([2,3,4]) + 2 confirmation frames (5,6), contiguous.
         assert_eq!(opened, vec![2, 3, 4, 5, 6], "click frame 0 must be evicted");
+    }
+
+    /// The TS3-aligned default (onset_frames = 1, preroll_frames = 2): a
+    /// single over-threshold frame opens the gate immediately — the same
+    /// click sensitivity TS3 ships with, in exchange for no confirmation
+    /// latency. The confirmation mechanism itself stays available (see
+    /// single_frame_pulse_does_not_open, which pins onset_frames = 2).
+    #[test]
+    fn ts3_aligned_default_opens_on_first_over_threshold_frame() {
+        let mut v = Vad::new(VadConfig {
+            mode: VadMode::Gate,
+            activation_db: -40.0,
+            ..VadConfig::default()
+        });
+        for t in 0..4 {
+            assert!(step(&mut v, t, -70.0, None).is_empty());
+        }
+        // First over-threshold frame opens at once; the flush carries the
+        // preroll ring (newest 2 quiet frames) plus the current frame.
+        assert_eq!(step(&mut v, 4, -30.0, None), vec![2, 3, 4]);
+        assert!(v.speaking());
     }
 
     #[test]
@@ -583,9 +616,12 @@ mod tests {
 
     /// Measures the actual RNNoise onset latency L (frames from speech
     /// starting until prob > 0.5) on a synthetic speech-like burst in
-    /// noise. Calibrates the preroll default (3) instead of guessing it.
+    /// noise, and pins the preset contract: the TYPICAL ramp must fit the
+    /// TS3-aligned standard preroll (2 frames — beyond it, the softest
+    /// onset may lose up to 20 ms, the same trade TS3 makes), while even
+    /// the WORST measured ramp must fit the robust preroll (5).
     #[test]
-    fn rnnoise_onset_latency_is_covered_by_default_preroll() {
+    fn rnnoise_onset_latency_fits_preset_prerolls() {
         // Deterministic LCG so the measurement is reproducible.
         let mut seed: u32 = 0x1234_5678;
         let mut noise = move || {
@@ -622,12 +658,62 @@ mod tests {
                 l
             })
             .collect();
-        let worst = *latencies.iter().max().unwrap();
         eprintln!("[vad-test] rnnoise onset latency frames: {latencies:?}");
+        let mut sorted = latencies.clone();
+        sorted.sort_unstable();
+        let typical = sorted[sorted.len() / 2];
+        let worst = *sorted.last().unwrap();
+        // Keep in sync with the Dart presetTimings (standard, robust).
         assert!(
-            worst <= VadConfig::default().preroll_frames as usize,
-            "measured onset latency {latencies:?} exceeds the default preroll"
+            typical <= 2,
+            "typical onset latency {latencies:?} exceeds the standard preroll (2)"
         );
+        assert!(
+            worst <= 5,
+            "measured onset latency {latencies:?} exceeds even the robust preroll (5)"
+        );
+    }
+
+    /// Regression guard: nnnoiseless works in the 16-bit PCM domain on BOTH
+    /// input and output. The denoised output must be scaled back to ±1 — an
+    /// unscaled output once made denoise sound like full-scale electrical
+    /// buzz (the whole-frame limiter renormalized every frame).
+    #[test]
+    fn denoised_output_stays_in_unit_domain() {
+        let mut rnn = RnnVad::new();
+        assert_eq!(rnn.process(&[0.0; FRAME]), None, "first frame is warm-up");
+        // Digital silence from a fresh state stays silent. (Checked first:
+        // after loud speech the pitch post-filter carries output history
+        // over a few frames, so mid-stream digital silence — which no real
+        // mic ever produces — would show a decaying tail.)
+        rnn.process(&[0.0; FRAME]);
+        let rms = (rnn.out.iter().map(|s| s * s).sum::<f32>() / FRAME as f32).sqrt();
+        assert!(rms < 1e-3, "silence in → denoised rms {rms} out");
+        // Loud speech-like signal in noise.
+        let mut seed: u32 = 0x8765_4321;
+        let mut noise = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / 8_388_608.0 - 1.0
+        };
+        for t in 0..10 {
+            let mut f = [0.0_f32; FRAME];
+            for i in 0..FRAME {
+                let s = 0.9 * (2.0
+                    * std::f32::consts::PI
+                    * 220.0
+                    * (t * FRAME + i) as f32
+                    / 48_000.0)
+                    .sin();
+                f[i] = (s + 0.05 * noise()).clamp(-1.0, 1.0);
+            }
+            rnn.process(&f);
+            // The 16-bit domain maps to ±1; the tiny tolerance absorbs
+            // synthesis overshoot, it cannot hide a missing /32768.
+            assert!(
+                rnn.out.iter().all(|s| s.abs() <= 1.0 + 1e-3),
+                "frame {t}: denoised output left the unit domain"
+            );
+        }
     }
 
     #[test]

@@ -439,6 +439,34 @@ mod tests {
         assert_eq!(p.pcm_in.len(), 0, "buffer drained in full frames");
     }
 
+    /// Regression guard for the denoise output scale: nnnoiseless writes
+    /// the 16-bit-PCM domain; if the pipeline consumed it unscaled, the
+    /// whole-frame limiter would engage on every frame (full-scale buzz)
+    /// and the level meter would peg near 0 dBFS with the gate wide open.
+    #[test]
+    fn denoise_end_to_end_stays_unclipped() {
+        let _state = TEST_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = pipeline_with(VadConfig {
+            enabled: false, // every frame is sent — the audio path is the point
+            ..VadConfig::default()
+        });
+        p.apply_patch(r#"{"agc_enabled":false,"denoise_enabled":true}"#).unwrap();
+        for t in 0..30 {
+            p.push_samples(&sine_frame(440.0, t, 0.2));
+            let burst = p.next_burst().unwrap();
+            assert_eq!(burst.packets.len(), 1, "frame {t} must be sent");
+            assert!(
+                !p.status.clipped,
+                "frame {t}: limiter engaged — denoise output is over-scaled"
+            );
+            assert!(
+                p.status.level_db < -6.0,
+                "frame {t}: level pegged at {} dBFS — denoise output is over-scaled",
+                p.status.level_db
+            );
+        }
+    }
+
     #[test]
     fn agc_memory_roundtrip() {
         let _state = TEST_STATE.lock().unwrap_or_else(|e| e.into_inner());

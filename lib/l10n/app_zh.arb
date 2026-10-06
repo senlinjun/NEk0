@@ -79,6 +79,7 @@
   "vadPresetFast": "快速",
   "vadPresetStandard": "标准",
   "vadPresetRobust": "稳健",
+  "vadPresetHint": "快速：无额外起音延迟。标准：起音约多 40ms（TeamSpeak 默认取舍）。稳健：起音约多 140ms，保护最强。",
   "agcLabel": "自动增益（AGC）",
   "agcGainNow": "增益 {gain} dB",
   "@agcGainNow": {

@@ -84,6 +84,7 @@
   "vadPresetFast": "Fast",
   "vadPresetStandard": "Standard",
   "vadPresetRobust": "Robust",
+  "vadPresetHint": "Fast: no added onset delay. Standard: about +40 ms onset delay (TeamSpeak's default trade-off). Robust: about +140 ms, maximum protection.",
   "agcLabel": "Auto gain (AGC)",
   "agcGainNow": "Gain {gain} dB",
   "@agcGainNow": {

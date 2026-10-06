@@ -44,7 +44,9 @@ typedef PresetTimings = (int holdMs, int prerollFrames, int onsetFrames);
 
 const presetTimings = <VadPreset, PresetTimings>{
   VadPreset.fast: (120, 0, 1),
-  VadPreset.standard: (200, 3, 2),
+  // Standard aligns with TS3's defaults (vad_extrabuffersize = 2, per-frame
+  // decision): onset delay (preroll + onset − 1) × 20 ms ≈ 40 ms.
+  VadPreset.standard: (200, 2, 1),
   VadPreset.robust: (300, 5, 3),
 };
 

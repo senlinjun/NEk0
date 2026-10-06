@@ -322,6 +322,11 @@ class _VoiceSettingsPanelState extends State<VoiceSettingsPanel> {
             ),
           ],
         ),
+        const SizedBox(height: 4),
+        Text(
+          al.vadPresetHint,
+          style: const TextStyle(color: Colors.grey, fontSize: 11),
+        ),
         const SizedBox(height: 12),
         // Mic capture failure (desktop): shows *why* the level bar is flat.
         _buildMicError(context),
