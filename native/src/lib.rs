@@ -9,8 +9,8 @@ use crossbeam::atomic::AtomicCell;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
@@ -125,15 +125,6 @@ pub enum Command {
     /// protocol transfer id happens here once the request was sent out.
     FtDownload { cid: u64, path: String, password: Option<String>, task_id: u32 },
     FtUpload { cid: u64, path: String, password: Option<String>, task_id: u32 },
-    /// Announce our new avatar (clientupdate `client_flag_avatar` = MD5 of the
-    /// uploaded file). Queued by the transfer machinery after a successful
-    /// avatar upload — the server does not infer the hash from the upload.
-    SetAvatarHash { hash: String },
-    /// Clear our own avatar: announce an EMPTY `client_flag_avatar` (tracked
-    /// via `token` → PermOp so Dart gets the server's real answer) and
-    /// best-effort remove the stored `/avatar_<uid>` file from the channel-0
-    /// storage.
-    DeleteAvatar { path: String, token: String },
 }
 
 // ─── File transfers (channel file management) ────────────────────────
@@ -155,69 +146,12 @@ pub struct FtTask {
     pub done: std::sync::atomic::AtomicU64,
     /// Cooperative cancel flag: set by ts_ft_cancel, polled by the worker.
     pub cancel: std::sync::Arc<AtomicBool>,
-    /// The client-side transfer id used in ftinit* commands, so a
-    /// StreamItem::FiletransferFailed can be attributed back to this task.
-    pub client_ft_id: AtomicU16,
-    /// For avatar uploads: the MD5 of the file content. Once the transfer is
-    /// confirmed, it is announced via Command::SetAvatarHash so the server
-    /// broadcasts the new avatar to every client.
-    pub avatar_md5: Option<String>,
     /// Last progress event publish time — throttles events.
     pub last_event: Mutex<Option<Instant>>,
 }
 
 pub static FT_TASK_SEQ: AtomicU32 = AtomicU32::new(1);
 pub static FT_TASKS: Lazy<DashMap<u32, std::sync::Arc<FtTask>>> = Lazy::new(DashMap::new);
-
-/// Client-chosen transfer ids for ftinitdownload/ftinitupload. The vendored
-/// library's counter is private, and its generated packets always write a
-/// (possibly bare) `cpw` argument — ours must omit it, so we build those
-/// packets ourselves. 0x4000+ keeps clear of anything the library assigns.
-pub static FT_CLIENT_FT: AtomicU16 = AtomicU16::new(0x4000);
-
-/// Maps the return_code of an ftinitdownload/ftinitupload to its task so a
-/// rejection (the plain error frame) fails the task with a real reason.
-pub static FT_TASK_BY_RC: Lazy<Mutex<HashMap<u16, u32>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// A pending directory listing: keyed by the return_code assigned when the
-/// ftgetfilelist command was sent.
-///
-/// IMPORTANT: the server answers with the terminal error frame FIRST and
-/// streams the notifyfilelist rows afterwards (observed live). The listing
-/// is therefore complete only when BOTH the result frame and the
-/// notifyfilelistfinished marker were seen.
-pub struct PendingFtList {
-    pub token: String,
-    pub entries: Vec<TsFtEntry>,
-    /// Sent time — used to prune requests the server never answered.
-    pub created: std::time::Instant,
-    /// Address of the listed directory — lets the finished marker (which
-    /// carries no return_code) be matched back to this request.
-    pub cid: u64,
-    pub path: String,
-    /// The trailing error frame arrived (result carried in `error`).
-    pub result_seen: bool,
-    pub result_ok: bool,
-    pub result_error: Option<String>,
-    /// The notifyfilelistfinished marker arrived.
-    pub finished_seen: bool,
-    /// Deferred finalize already scheduled (no duplicate timers).
-    pub finalize_scheduled: bool,
-}
-
-/// An entry awaiting its trailing error frame for ftcreatedir/ftdeletefile.
-/// Same contract as FT_LISTS: keyed by the return_code we assigned.
-#[allow(dead_code)]
-pub struct PendingFtOp {
-    pub token: String,
-}
-
-pub static FT_OPS: Lazy<Mutex<HashMap<u16, PendingFtOp>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-pub static FT_LISTS: Lazy<Mutex<HashMap<u16, PendingFtList>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TsFtEntry {
@@ -252,7 +186,8 @@ pub static SWIPE_DISCONNECT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(fal
 /// stream error, or explicit restart request from the Android side). The
 /// maintenance task performs the rebuild on its 500ms tick.
 pub static OUTPUT_RESTART_REQUESTED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-pub static CONNECTION_STASH: Lazy<Mutex<Option<tsclientlib::Connection>>> = Lazy::new(|| Mutex::new(None));
+pub static CONNECTION_STASH: Lazy<Mutex<Option<std::sync::Arc<univox_ts3::Ts3Session>>>> =
+    Lazy::new(|| Mutex::new(None));
 pub static IDENTITY_STASH: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
 // ─── Types for Dart ─────────────────────────────────────────────────
@@ -520,19 +455,6 @@ pub struct TsPerm {
     pub negated: bool,
     pub skip: bool,
 }
-
-/// Maps the return_code of a permission-management command to the token the
-/// Dart caller supplied, so the `MessageResult` handler can resolve it into a
-/// `PermOp` event (same pattern as `FT_OPS`).
-pub static PERM_OPS: Lazy<Mutex<HashMap<u16, String>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// Return_codes of in-flight text-message sends (`send_with_result`). A
-/// matching `MessageResult` with an error resolves into a `SendFailed` event
-/// so the UI can tell the user the message was rejected (e.g. missing
-/// `b_client_server_textmessage_send`) instead of it silently vanishing.
-pub static TEXT_SENDS: Lazy<Mutex<HashSet<u16>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TsClient {
@@ -859,11 +781,6 @@ pub struct TsConnection {
     // Audio receive state. "Is talking" lives in TALKING_CLIENTS (a global
     // DashMap) instead of here: the receive path updates it per voice packet
     // and must not queue behind the state lock that Dart's polling holds.
-    /// Target cid + timestamp of the most recent outgoing clientmove. Server
-    /// rejections for our commands arrive without a return_code, so this is
-    /// how an invalid-channel-password error gets attributed back to that
-    /// move (consumed with a time window in api.rs, see CommandError handling).
-    pub pending_move: Option<(u64, Instant)>,
     /// Per-client volume in decibels (dB), keyed by the client's user UID.
     /// Source of truth — NOT cleared on disconnect. The numeric client ID is
     /// only a session-scoped handle; the UID is what survives reconnects and
@@ -893,7 +810,6 @@ impl TsConnection {
             own_perms: Vec::new(),
             pending_events: VecDeque::new(),
             disconnect_requested: false,
-            pending_move: None,
             client_volumes: HashMap::new(),
             client_positions: HashMap::new(),
         }

@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="README.md">English</a> ·
-  <a href="https://github.com/ReSpeak/tsclientlib">tsclientlib</a>
+  <a href="https://github.com/senlinjun/univox">univox</a>
 </p>
 
 ---
@@ -36,7 +36,7 @@
 | 层 | 技术栈 |
 |---|---|
 | UI | Flutter (Dart) + Riverpod |
-| 协议与编解码 | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib), `opus-rs`) |
+| 协议与编解码 | Rust ([univox](https://github.com/senlinjun/univox), `opus-rs`) |
 | 播放 | Rust（`cpal` — 持续输出流，空闲时输出静音） |
 | 麦克风采集 | Android：Kotlin（`AudioRecord`）→ EventChannel → Dart → FFI → Rust<br>Windows/Linux：Rust（`cpal` 输入流）→ 编码发送管线 |
 | 后台保活 | `KeepAliveService`（前台服务 + `MediaSession`，仅 Android） |
@@ -46,7 +46,7 @@ Flutter (Dart)                  Rust (Native .so)
 ─────────────                  ─────────────────
 lib/services/ts_ffi.dart  ←FFI→  native/src/api.rs
 lib/services/audio_service.dart  native/src/lib.rs
-lib/models/ts_state.dart         (tsclientlib + opus-rs + tokio)
+lib/models/ts_state.dart         (univox + opus-rs + tokio)
 
 Kotlin（仅 Android）
 ───────────────────
@@ -233,8 +233,7 @@ Nek0/
 ├── linux/                          # Flutter Linux runner（打包 native/prebuilt/linux/）
 ├── windows/                        # Flutter Windows runner（打包 native/prebuilt/windows/）
 ├── native/                         # Rust
-│   ├── Cargo.toml                  # 将 tsclientlib/tsproto patch 到 local_tsclientlib/
-│   ├── local_tsclientlib/          # 内置的 tsclientlib/tsproto 源码
+│   ├── Cargo.toml                  # univox-core/ts3/ts3-proto(git,锁定 rev)
 │   ├── prebuilt/                   # 桌面端产物（gitignore，由 pre_build.py 构建）
 │   └── src/
 │       ├── lib.rs                  # 状态、类型、命令队列
@@ -254,4 +253,4 @@ Nek0/
 
 ## 许可证
 
-仅供学习交流使用。[tsclientlib](https://github.com/ReSpeak/tsclientlib) 有其独立许可证。
+仅供学习交流使用。[univox](https://github.com/senlinjun/univox) 及其依赖保留各自许可证。

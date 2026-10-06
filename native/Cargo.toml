@@ -7,12 +7,17 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-tsclientlib = { git = "https://github.com/ReSpeak/tsclientlib.git", branch = "master", default-features = false, features = ["unstable"] }
-tsproto = { git = "https://github.com/ReSpeak/tsclientlib.git", branch = "master", default-features = false }
-tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib.git", branch = "master" }
-# Same vendored copy the patched crates use internally (relative path), needed
-# for crypto::encode_password when joining password-protected channels.
-tsproto-types = { path = "local_tsclientlib/utils/tsproto-types" }
+# Protocol/session engine (replaces the vendored tsclientlib): unified
+# voice-platform library with a TS3 driver. Pinned rev. `default-features =
+# false` keeps out univox's `voice` feature (its audiopus codec) — Nek0 runs
+# its own Opus via opus-rs, and two static libopus builds cannot link into
+# one cdylib (and audiopus_sys wants cmake on Android).
+# DEV NOTE: while developing, these three point at the local checkout
+# (path = "/home/senlinjun/Dev/univox/crates/..."); swap to the git+rev
+# form below before committing.
+univox-core = { path = "/home/senlinjun/Dev/univox/crates/univox-core" }
+univox-ts3 = { path = "/home/senlinjun/Dev/univox/crates/univox-ts3", default-features = false }
+univox-ts3-proto = { path = "/home/senlinjun/Dev/univox/crates/univox-ts3-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,12 +34,6 @@ cpal = "0.15"
 dashmap = "6"
 crossbeam = "0.8"
 arc-swap = "1"
-# `time::Duration` for the ban command (OutBanClientPart.time). Already in the
-# lockfile via tsclientlib; only the Duration type is used, no extra features.
-time = "0.3"
-# Decoding the wire-format uid into raw bytes so `Uid::as_avatar` can build
-# the avatar file path. Already in the lockfile via tsproto-types.
-base64 = "0.22"
 # MD5 of the uploaded avatar file — the value sent as client_flag_avatar in
 # the clientupdate that makes the new avatar visible to everyone.
 md-5 = "0.10"
@@ -58,7 +57,3 @@ ndk-context = "0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 alsa = "0.9"
 
-[patch."https://github.com/ReSpeak/tsclientlib.git"]
-tsclientlib = { path = "local_tsclientlib/tsclientlib" }
-tsproto = { path = "local_tsclientlib/tsproto" }
-tsproto-packets = { path = "local_tsclientlib/utils/tsproto-packets" }

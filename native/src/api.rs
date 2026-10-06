@@ -1,21 +1,17 @@
 use crate::{
-    Command, TsChannel, TsClient, TsEvent, TsFtEntry, TsServerGroup, TsChannelGroup, TsPerm,
-    AUDIO_DECODERS, AUDIO_DECODERS_STEREO, AUDIO_LAST_ERROR, AUDIO_STREAM, CB_STATS, CLIENT_BUFFERS,
-    COMMAND_TX, FRAME_SIZE, FT_CLIENT_FT, FT_KIND_DOWNLOAD, FT_KIND_UPLOAD, FT_LISTS, FT_OPS,
-    FT_TASK_BY_RC, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, MIC_RESTART_REQUESTED, PERM_OPS,
-    PLAYED_SAMPLES, ACTIVE_CLIENT_IDS, RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
-    SFX_SUPPRESS_DISCONNECT, STATE, SWIPE_DISCONNECT, TEXT_SENDS, OUTPUT_RESTART_REQUESTED,
-    PendingFtList, recording,
+    Command, TsChannel, TsClient, TsChannelGroup, TsEvent, TsFtEntry, TsPerm, TsServerGroup,
+    ACTIVE_CLIENT_IDS, AUDIO_DECODERS, AUDIO_DECODERS_STEREO, AUDIO_LAST_ERROR, AUDIO_STREAM,
+    CB_STATS, CLIENT_BUFFERS, CLOCK_REF, COMMAND_TX, FRAME_SIZE, FT_KIND_DOWNLOAD,
+    FT_KIND_UPLOAD, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, JITTER_STATS, MIC_RESTART_REQUESTED,
+    MIN_SURPLUS_FRAMES, OUTPUT_PERIOD_MS, OUTPUT_RATE, OUTPUT_RESTART_REQUESTED, PLAYED_SAMPLES,
+    RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE, SFX_SUPPRESS_DISCONNECT, STATE,
+    SWIPE_DISCONNECT, TALKING_CLIENTS, TARGET_FRAMES_CEIL, TARGET_FRAMES_FLOOR, recording,
     mic_pipeline::MIC_PIPELINE,
-    JITTER_STATS, MIN_SURPLUS_FRAMES, OUTPUT_PERIOD_MS, OUTPUT_RATE,
-    TALKING_CLIENTS, TARGET_FRAMES_CEIL, TARGET_FRAMES_FLOOR, CLOCK_REF,
     play_time_ms, publish_clock_ref,
 };
 
-use futures::prelude::*;
-use base64::prelude::*;
+use futures::FutureExt;
 use opus_rs::OpusDecoder;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::io::{Read as _, Write as _};
@@ -23,13 +19,16 @@ use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tsclientlib::messages::c2s::*;
-use tsclientlib::{ChannelId, ClientId};
-use tsclientlib::{Connection, DisconnectOptions, Identity, OutCommandExt, StreamItem};
-use tsclientlib::messages::OutMessageTrait;
-use tsproto_packets::packets::{
-    AudioData, CodecType, Direction, Flags, InAudioBuf, OutAudio, OutCommand, PacketType,
+use univox_core::connect::{ConnectOptions, InitialChannel};
+use univox_core::event::Event as UxEvent;
+use univox_core::id::{ChannelId, MemberId};
+use univox_core::model::{
+    ChannelOptions, DisconnectReason, MemberLeftReason, MessageTarget, Permanence,
 };
+use univox_core::session::Session as _;
+use univox_ts3::session::{self_clid, Ts3ConnectOptions, Ts3Session};
+use univox_ts3::{FileDownload, FileUpload, SelfUpdate, Ts3Ext as _};
+use univox_ts3_proto::{hash_password, Command as Ts3Command, PacketType, RowExt, VoiceData};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 fn to_c_str(s: String) -> *mut c_char {
@@ -93,11 +92,6 @@ unsafe fn cstr_to_string(p: *const c_char) -> String {
     }
 }
 
-/// Parses a TeamSpeak return_code ("12" or "12:5") into its numeric handle.
-fn parse_return_code(rc: &str) -> Option<u16> {
-    rc.rsplit(':').next()?.parse().ok()
-}
-
 /// Normalizes a remote path into the leading-slash form the TS3 file API
 /// expects ("/" root, one slash per segment).
 fn normalize_remote_path(path: &str) -> String {
@@ -110,14 +104,6 @@ fn normalize_remote_path(path: &str) -> String {
         .collect::<Vec<_>>()
         .join("/");
     format!("/{}", cleaned)
-}
-
-/// Finds the task registered for a client-side transfer id.
-fn ft_task_id_by_client_id(client_ft_id: u16) -> Option<u32> {
-    FT_TASKS
-        .iter()
-        .find(|e| e.value().client_ft_id.load(Ordering::Relaxed) == client_ft_id)
-        .map(|e| *e.key())
 }
 
 /// Publishes a throttled progress event for a task: at most every 256 KiB or
@@ -142,73 +128,48 @@ fn maybe_publish_ft_progress(task_id: u32, task: &crate::FtTask, force: bool) {
     }
 }
 
-/// After a confirmed avatar upload, announce the new avatar (clientupdate
-/// `client_flag_avatar` = MD5 of the uploaded file) — the server does not
-/// infer the hash from the transfer, so without this the avatar never shows
-/// up on any client. Queued as a command so it works both from the event
-/// loop and from a transfer worker thread.
-fn publish_avatar_hash(md5: String) {
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        let _ = tx.send(Command::SetAvatarHash { hash: md5 });
-    }
-}
-
-/// MD5 of a local file as lowercase hex. Avatars are tiny; chunked anyway
-/// so a mispointed path cannot blow up memory.
-fn md5_file_hex(path: &str) -> std::io::Result<String> {
-    use md5::{Digest, Md5};
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Md5::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect())
-}
-
-/// Downloads the payload of an accepted ftinitdownload onto the local disk.
-/// Runs on its own OS thread with blocking IO — the connection event loop is
-/// untouched by the (potentially long) transfer.
-fn spawn_download_worker(task_id: u32, mut stream: std::net::TcpStream, total: u64) {
-    std::thread::spawn(move || {
+/// Streams an accepted download onto the local disk. Runs on the tokio
+/// runtime — `FileDownload::next_chunk` is async — and polls the
+/// cooperative cancel flag between chunks. Dropping the handle mid-transfer
+/// closes the TCP stream, which aborts the transfer server-side.
+fn spawn_download_task(task_id: u32, mut dl: FileDownload) {
+    RUNTIME.spawn(async move {
         let (local_path, cancel_flag) = match FT_TASKS.get(&task_id) {
             Some(t) => (t.local_path.clone(), t.cancel.clone()),
             None => return, // task vanished while starting
         };
-        let result = (|| -> std::io::Result<()> {
+        let total = dl.size();
+        if let Some(t) = FT_TASKS.get(&task_id) {
+            t.total.store(total, Ordering::Relaxed);
+        }
+        if let Some(t) = FT_TASKS.get(&task_id) {
+            maybe_publish_ft_progress(task_id, &t, true);
+        }
+        let result: Result<(), String> = async {
             if let Some(parent) = std::path::Path::new(&local_path).parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let mut file = std::fs::File::create(&local_path)?;
-            let mut buf = [0u8; 64 * 1024];
+            let mut file = std::fs::File::create(&local_path).map_err(|e| format!("{e}"))?;
             let mut received: u64 = 0;
             loop {
                 if cancel_flag.load(Ordering::Relaxed) {
                     // Keep the partial file; Dart reports the cancellation.
                     drop(file);
+                    drop(dl);
                     crate::finish_ft_task(task_id, false, Some("canceled".into()));
                     return Ok(());
                 }
-                match stream.read(&mut buf) {
-                    Ok(0) => break, // EOF — server finished sending
-                    Ok(n) => {
-                        file.write_all(&buf[..n])?;
-                        received += n as u64;
+                match dl.next_chunk().await {
+                    Ok(Some(chunk)) => {
+                        file.write_all(&chunk).map_err(|e| format!("{e}"))?;
+                        received += chunk.len() as u64;
                         FT_TASKS.get(&task_id).map(|t| {
                             t.done.store(received, Ordering::Relaxed);
                             maybe_publish_ft_progress(task_id, &t, false)
                         });
                     }
-                    Err(e) => return Err(e),
+                    Ok(None) => break, // EOF — server finished sending
+                    Err(e) => return Err(format!("{}", e)),
                 }
             }
             if total > 0 && received < total {
@@ -220,188 +181,265 @@ fn spawn_download_worker(task_id: u32, mut stream: std::net::TcpStream, total: u
                 );
                 return Ok(());
             }
+            // Graceful stop: tells the server the transfer is over and
+            // collects its final status.
+            dl.finish()
+                .await
+                .map_err(|e| format!("transfer status: {}", e))?;
             FT_TASKS.get(&task_id).map(|t| {
                 t.done.store(received, Ordering::Relaxed);
             });
             crate::finish_ft_task(task_id, true, None);
             Ok(())
-        })();
+        }
+        .await;
         if let Err(e) = result {
-            crate::finish_ft_task(task_id, false, Some(format!("{}", e)));
+            crate::finish_ft_task(task_id, false, Some(e));
         }
     });
 }
 
-/// Uploads a local file into the accepted ftinitupload stream.
-fn spawn_upload_worker(task_id: u32, mut stream: std::net::TcpStream, src: String) {
-    std::thread::spawn(move || {
+/// Streams a local file into an accepted upload slot. `FileUpload::finish`
+/// verifies the byte count and commits the file server-side; `abort`
+/// deletes the partial file.
+fn spawn_upload_task(task_id: u32, mut up: FileUpload, src: String) {
+    RUNTIME.spawn(async move {
         let cancel_flag = match FT_TASKS.get(&task_id) {
             Some(t) => t.cancel.clone(),
             None => return,
         };
-        let result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::File::open(&src)?;
-            let mut buf = [0u8; 64 * 1024];
+        let result: Result<(), String> = async {
+            let mut file = std::fs::File::open(&src).map_err(|e| format!("{e}"))?;
+            let mut buf = vec![0u8; 64 * 1024];
             loop {
                 if cancel_flag.load(Ordering::Relaxed) {
-                    drop(stream); // aborts the transfer server-side
+                    up.abort().await.ok();
                     crate::finish_ft_task(task_id, false, Some("canceled".into()));
                     return Ok(());
                 }
-                let n = file.read(&mut buf)?;
+                let n = file.read(&mut buf).map_err(|e| format!("{e}"))?;
                 if n == 0 {
                     break;
                 }
-                stream.write_all(&buf[..n])?;
+                up.write_chunk(&buf[..n])
+                    .await
+                    .map_err(|e| format!("{}", e))?;
                 FT_TASKS.get(&task_id).map(|t| {
-                    let done = t
-                        .done
-                        .fetch_add(n as u64, Ordering::Relaxed)
-                        .saturating_add(n as u64);
-                    let _ = done;
+                    t.done.fetch_add(n as u64, Ordering::Relaxed);
                     maybe_publish_ft_progress(task_id, &t, false);
                 });
             }
-            stream.flush()?;
-            // All bytes handed to the OS — wait for the final transfer status:
-            // either notifystatusfiletransfer arrives first (handled by the
-            // event loop, removes the task with ok=true), or nothing comes
-            // within the grace period and we declare success ourselves.
-            for _ in 0..32 {
-                std::thread::sleep(Duration::from_millis(250));
-                if !FT_TASKS.contains_key(&task_id) {
-                    return Ok(()); // resolved by the status handler meanwhile
-                }
-                if cancel_flag.load(Ordering::Relaxed) {
-                    drop(stream);
-                    crate::finish_ft_task(task_id, false, Some("canceled".into()));
-                    return Ok(());
-                }
-            }
-            // Avatar upload: announce the hash before the task is removed —
-            // the status handler never ran, so this is the only success path.
-            if let Some(md5) = FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone()) {
-                publish_avatar_hash(md5);
-            }
+            // Commit: verifies the byte count and waits for the server's
+            // final status (notifystatusfiletransfer is consumed inside).
+            up.finish().await.map_err(|e| format!("{}", e))?;
             crate::finish_ft_task(task_id, true, None);
             Ok(())
-        })();
+        }
+        .await;
         if let Err(e) = result {
-            crate::finish_ft_task(task_id, false, Some(format!("{}", e)));
+            crate::finish_ft_task(task_id, false, Some(e));
         }
     });
 }
 
-fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, Vec<TsClient>) {
-    let mut count: HashMap<u64, u32> = HashMap::new();
-    for c in book.clients.values() {
-        *count.entry(c.channel.0).or_insert(0) += 1;
+// ─── Permission hints (best effort) ─────────────────────────────────
+
+/// Best-effort permission-hint bits derived from OUR OWN directly-assigned
+/// permission list. tsclientlib computed these hints inside its bookkeeping
+/// layer; univox does not model them, so the same bits are approximated from
+/// the permsids we hold: a listed, non-negated, non-zero permission lights
+/// its bit. Channel-scoped grants are not considered — treat the result as
+/// the low-threshold UI hint it always was.
+const CLIENT_HINT_TABLE: &[(u64, &str)] = &[
+    (1, "i_client_kick_from_server_power"), // KICK_SERVER
+    (2, "i_client_kick_from_channel_power"), // KICK_CHANNEL
+    (4, "i_client_ban_power"),              // BAN
+    (8, "i_client_move_power"),             // MOVE_CLIENT
+    (16, "b_client_private_textmessage_send"), // PRIVATE_MESSAGE
+    (32, "i_client_poke_power"),            // POKE
+    (64, "i_client_whisper_power"),         // WHISPER
+    (128, "i_client_complain_power"),       // COMPLAIN
+    (256, "i_client_permission_modify_power"), // MODIFY_PERMISSIONS
+];
+
+const CHANNEL_HINT_TABLE: &[(u64, &str)] = &[
+    (1, "i_channel_join_power"),            // JOIN
+    (2, "i_channel_modify_power"),          // MODIFY
+    (4, "b_channel_delete_flag_force"),     // FORCE_DELETE
+    (8, "b_channel_delete_permanent"),      // DELETE (any permanence kind)
+    (8, "b_channel_delete_semi_permanent"),
+    (8, "b_channel_delete_temporary"),
+    (16, "i_channel_subscribe_power"),      // SUBSCRIBE
+    (64, "i_ft_file_upload_power"),         // FILE_UPLOAD
+    (128, "i_ft_file_download_power"),      // FILE_DOWNLOAD
+    (256, "i_ft_file_delete_power"),        // FILE_DELETE
+    (512, "i_ft_file_rename_power"),        // FILE_RENAME
+    (1024, "i_ft_file_browse_power"),       // FILE_BROWSE
+    (2048, "i_ft_directory_create_power"),  // FILE_DIRECTORY_CREATE
+    (2048, "i_ft_file_upload_power"),       // (upload power covers dirs)
+    (4096, "i_channel_permission_modify_power"), // MODIFY_PERMISSIONS
+];
+
+fn hints_from_perms(own_perms: &[TsPerm], table: &[(u64, &str)]) -> u64 {
+    let mut bits = 0u64;
+    for (bit, permsid) in table {
+        let granted = own_perms.iter().any(|p| {
+            &p.name == permsid && !p.negated && p.value != 0
+        });
+        if granted {
+            bits |= bit;
+        }
     }
-    // Refresh the group caches from the book (populated by the
-    // servergrouplist/channelgrouplist requests we send on connect).
+    bits
+}
+
+/// Rebuilds the roster JSON (channels + clients) from the univox book mirror.
+/// Field-for-field compatible with the previous tsclientlib-backed version:
+/// ts_ffi.dart parses these structs with hand-written fromJson code, so the
+/// JSON keys are API. TS3-specific values (uid, database id, avatar hash,
+/// groups, talk power, limits) arrive inside `extra` as their raw wire keys.
+fn refresh_from_book(book: &univox_core::Book) -> (Vec<TsChannel>, Vec<TsClient>) {
+    // One consistent read of the mirror: server + channels + members with
+    // their runtime states.
+    let Some((server, channels_raw, members_raw)) = book.with(|b| {
+        (
+            b.server.clone().unwrap_or_default(),
+            b.channels.values().cloned().collect::<Vec<_>>(),
+            b.members
+                .values()
+                .map(|m| {
+                    (
+                        m.clone(),
+                        b.member_states.get(&m.id).cloned().unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    }) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    // Per-channel client counts.
+    let mut count: HashMap<u64, u32> = HashMap::new();
+    for (m, _) in &members_raw {
+        if let Some(cid) = m.channel_id.as_ref().and_then(|c| c.as_u64()) {
+            *count.entry(cid).or_insert(0) += 1;
+        }
+    }
+
+    // Group caches are maintained by the servergrouplist/channelgrouplist
+    // execs (see refresh_group_lists), not by the book.
+    let cached_groups = STATE.lock().server_groups.clone();
+
     {
         let mut state = STATE.lock();
-        state.server_groups = book
-            .server_groups
-            .values()
-            .map(|g| TsServerGroup {
-                id: g.id.0,
-                name: g.name.clone(),
-                is_permanent: g.is_permanent,
-                needed_member_add_power: g.needed_member_add_power,
-                needed_member_remove_power: g.needed_member_remove_power,
-                sort_id: g.sort_id,
-            })
-            .collect();
-        state.channel_groups = book
-            .channel_groups
-            .values()
-            .map(|g| TsChannelGroup {
-                id: g.id.0,
-                name: g.name.clone(),
-                is_permanent: g.is_permanent,
-                needed_member_add_power: g.needed_member_add_power,
-                needed_member_remove_power: g.needed_member_remove_power,
-                sort_id: g.sort_id,
-            })
-            .collect();
         // Server property snapshot for the server-settings dialog prefill;
-        // `notifyserveredited` updates the book, so a successful serveredit
-        // lands here on the next book event batch.
-        state.server_name = book.server.name.clone();
-        state.server_max_clients = Some(book.server.max_clients);
-        state.server_welcome_message = book.server.welcome_message.clone();
-        state.server_has_password = book
-            .server
-            .optional_data
-            .as_ref()
-            .map(|o| o.has_password);
+        // a successful serveredit lands here on the next book event batch.
+        state.server_name = server.name.clone();
+        state.server_max_clients = if server.member_limit > 0 {
+            Some(server.member_limit as u16)
+        } else {
+            None
+        };
+        // univox maps virtualserver_welcomemessage into Server.host_message
+        // (with the host message as fallback); the raw keys are preserved in
+        // extra — prefer them.
+        state.server_welcome_message = server
+            .extra
+            .get("virtualserver_welcomemessage")
+            .or_else(|| server.extra.get("virtualserver_hostmessage"))
+            .cloned()
+            .or_else(|| server.host_message.clone())
+            .unwrap_or_default();
+        state.server_has_password = server
+            .extra
+            .get("virtualserver_flag_password")
+            .map(|v| v == "1");
     }
-    let channels = book
-        .channels
-        .values()
-        .map(|c| TsChannel {
-            id: c.id.0 as u32,
-            name: c.name.clone(),
-            parent_id: if c.parent.0 == 0 {
-                0
-            } else {
-                c.parent.0 as u32
-            },
-            topic: c.topic.clone().unwrap_or_default(),
-            has_password: c.has_password.unwrap_or(false),
-            client_count: *count.get(&c.id.0).unwrap_or(&0),
-            order: c.order.0 as u32,
-            is_default: c.is_default.unwrap_or(false),
-            permission_hints: c.permission_hints.map(|p| p.bits()).unwrap_or(0),
-            needed_talk_power: c.needed_talk_power.unwrap_or(0),
-            max_clients: match c.max_clients {
-                Some(tsclientlib::MaxClients::Limited(n)) => n as i32,
-                _ => -1, // unlimited / inherited / not yet reported
-            },
-            is_permanent: c.channel_type == tsclientlib::ChannelType::Permanent,
-            is_semi_permanent: c.channel_type == tsclientlib::ChannelType::SemiPermanent,
-            description: c
-                .optional_data
-                .as_ref()
-                .map(|d| d.description.clone())
-                .unwrap_or_default(),
-            max_family_clients: match c.max_family_clients {
-                Some(tsclientlib::MaxClients::Limited(n)) => n as i32,
-                Some(tsclientlib::MaxClients::Unlimited) => 0,
-                _ => -1, // inherited / not yet reported
-            },
-            delete_delay: c.delete_delay.map(|d| d.whole_seconds()).unwrap_or(0),
+
+    let own_perms = STATE.lock().own_perms.clone();
+    let client_hints = hints_from_perms(&own_perms, &CLIENT_HINT_TABLE);
+    let channel_hints = hints_from_perms(&own_perms, &CHANNEL_HINT_TABLE);
+
+    let channels = channels_raw
+        .iter()
+        .map(|c| {
+            let ex = |k: &str| c.extra.get(k).map(|s| s.as_str());
+            let cid = c.id.as_u64().unwrap_or(0);
+            TsChannel {
+                id: cid as u32,
+                name: c.name.clone(),
+                parent_id: c.parent_id.as_ref().and_then(|p| p.as_u64()).unwrap_or(0) as u32,
+                topic: c.topic.clone().unwrap_or_default(),
+                has_password: c.password_protected,
+                client_count: *count.get(&cid).unwrap_or(&0),
+                order: c.order as u32,
+                is_default: c.is_default,
+                permission_hints: channel_hints,
+                needed_talk_power: ex("channel_needed_talk_power")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0) as i32,
+                // -1 = unlimited / inherited / not yet reported.
+                max_clients: if ex("channel_flag_maxclients_unlimited") == Some("1") {
+                    -1
+                } else if c.user_limit > 0 {
+                    c.user_limit as i32
+                } else {
+                    -1
+                },
+                is_permanent: c.permanence == Permanence::Permanent,
+                is_semi_permanent: c.permanence == Permanence::SemiPermanent,
+                description: c.description.clone().unwrap_or_default(),
+                // -1 inherited, 0 unlimited, >0 limit.
+                max_family_clients: if ex("channel_flag_maxfamilyclients_unlimited") == Some("1") {
+                    0
+                } else if ex("channel_flag_inherited_maxfamilyclients") == Some("1") {
+                    -1
+                } else {
+                    ex("channel_maxfamilyclients")
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .map(|v| v as i32)
+                        .filter(|v| *v > 0)
+                        .unwrap_or(-1)
+                },
+                delete_delay: ex("channel_delete_delay")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0),
+            }
         })
         .collect();
-    let clients: Vec<_> = book
-        .clients
-        .values()
-        .map(|c| {
-            let uid = c.uid.as_ref().map(|u| u.to_string());
+    let clients: Vec<_> = members_raw
+        .iter()
+        .map(|(m, st)| {
+            let ex = |k: &str| m.extra.get(k).map(|s| s.as_str());
+            let id = m.id.as_u64().unwrap_or(0);
+            let uid = ex("client_unique_identifier").filter(|s| !s.is_empty()).map(String::from);
+            let cid = id as u16;
             // What WE may do to this client (raw client-permission-hint bits).
-            let database_id = c.database_id.0;
-            let permission_hints = c.permission_hints.map(|p| p.bits()).unwrap_or(0);
-            let server_groups: Vec<u64> = c.server_groups.iter().map(|g| g.0).collect();
-            let server_group_names: Vec<String> = c
-                .server_groups
-                .iter()
-                .filter_map(|g| book.server_groups.get(g).map(|sg| sg.name.clone()))
+            let permission_hints = client_hints;
+            let server_groups: Vec<u64> = ex("client_servergroups")
+                .unwrap_or("")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse::<u64>().ok())
                 .collect();
-            let client_type = match c.client_type {
-                tsclientlib::ClientType::Normal => 0u8,
-                tsclientlib::ClientType::Query { admin: false } => 1u8,
-                tsclientlib::ClientType::Query { admin: true } => 2u8,
+            let server_group_names: Vec<String> = server_groups
+                .iter()
+                .filter_map(|g| cached_groups.iter().find(|sg| sg.id == *g).map(|sg| sg.name.clone()))
+                .collect();
+            // 0 = normal client, 1 = server query (the query-admin variant
+            // tsclientlib derived is not carried by univox's mirror).
+            let client_type = match ex("client_type") {
+                Some("1") => 1u8,
+                _ => 0u8,
             };
             // Volume + 2D position — one STATE lock for both (both keyed by UID).
             let (volume, pos) = {
-                let cid = c.id.0 as u16;
                 let state = STATE.lock();
                 // Primary source: persisted dB value keyed by the user UID
-                let persisted = c
-                    .uid
+                let persisted = uid
                     .as_ref()
-                    .and_then(|uid| state.client_volumes.get(&uid.to_string()).copied());
+                    .and_then(|uid| state.client_volumes.get(uid.as_str()).copied());
                 let volume = persisted.unwrap_or_else(|| {
                     // Fallback: convert linear gain from jitter buffer → dB
                     crate::CLIENT_BUFFERS
@@ -412,39 +450,42 @@ fn refresh_from_book(book: &tsclientlib::data::Connection) -> (Vec<TsChannel>, V
                         })
                         .unwrap_or(0.0) // default: 0 dB = unity gain
                 });
-                let pos = c
-                    .uid
+                let pos = uid
                     .as_ref()
-                    .and_then(|uid| state.client_positions.get(&uid.to_string()).copied());
+                    .and_then(|uid| state.client_positions.get(uid.as_str()).copied());
                 (volume, pos)
             };
             TsClient {
-                id: c.id.0 as u32,
-                nickname: c.name.clone(),
-                channel_id: c.channel.0 as u32,
+                id: id as u32,
+                nickname: m.nickname.clone(),
+                channel_id: m.channel_id.as_ref().and_then(|c| c.as_u64()).unwrap_or(0) as u32,
                 uid,
                 // Empty hash = the server announces no avatar for this client.
-                avatar_hash: if c.avatar_hash.is_empty() {
-                    None
-                } else {
-                    Some(c.avatar_hash.clone())
-                },
-                database_id,
-                away: c.away_message.is_some(),
-                input_muted: c.input_muted,
-                output_muted: c.output_muted,
+                avatar_hash: ex("client_flag_avatar")
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+                database_id: ex("client_database_id")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0),
+                away: st.away_message.is_some(),
+                input_muted: st.input_muted,
+                output_muted: st.output_muted,
                 client_type,
-                is_channel_commander: c.is_channel_commander,
-                is_recording: c.is_recording,
-                is_priority_speaker: c.is_priority_speaker,
-                talk_power_granted: c.talk_power_granted,
-                talk_power: c.talk_power,
+                is_channel_commander: st.channel_commander,
+                is_recording: st.recording,
+                is_priority_speaker: st.priority_speaker,
+                // client_is_talker: missing on incremental rows — assume
+                // granted rather than flashing a "cannot talk" state.
+                talk_power_granted: ex("client_is_talker").map(|v| v == "1").unwrap_or(true),
+                talk_power: st.talk_power as i32,
                 permission_hints,
                 server_groups,
                 server_group_names,
-                channel_group: c.channel_group.0 as u32,
+                channel_group: ex("client_channel_group_id")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0) as u32,
                 is_talking: TALKING_CLIENTS
-                    .get(&(c.id.0 as u16))
+                    .get(&cid)
                     .map(|t| t.elapsed().as_millis() < 500)
                     .unwrap_or(false),
                 volume,
@@ -553,6 +594,83 @@ pub extern "C" fn ts_connect(
     to_c_str(r#"{"type":"connecting"}"#.to_string())
 }
 
+/// Re-fetches the server/channel group lists into STATE. The typed
+/// `Ts3Ext::server_groups` helpers don't carry the power/sort fields the UI
+/// renders, so the raw rows are parsed here.
+async fn refresh_group_lists(session: &Arc<Ts3Session>) {
+    if let Ok(rows) = session.exec(Ts3Command::new("servergrouplist")).await {
+        let groups: Vec<TsServerGroup> = rows
+            .iter()
+            .map(|r| TsServerGroup {
+                id: r.get("sgid").and_then(|v| v.parse().ok()).unwrap_or(0),
+                name: r.get("name").unwrap_or("").to_string(),
+                is_permanent: r.get("savedb").map(|v| v == "1").unwrap_or(true),
+                needed_member_add_power: r
+                    .get("n_member_addp")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                needed_member_remove_power: r
+                    .get("n_member_removep")
+                    .and_then(|v| v.parse().ok()),
+                sort_id: r.get("sortid").and_then(|v| v.parse().ok()).unwrap_or(0),
+            })
+            .collect();
+        STATE.lock().server_groups = groups;
+    }
+    if let Ok(rows) = session.exec(Ts3Command::new("channelgrouplist")).await {
+        let groups: Vec<TsChannelGroup> = rows
+            .iter()
+            .map(|r| TsChannelGroup {
+                id: r.get("cgid").and_then(|v| v.parse().ok()).unwrap_or(0),
+                name: r.get("name").unwrap_or("").to_string(),
+                is_permanent: r.get("savedb").map(|v| v == "1").unwrap_or(true),
+                needed_member_add_power: r
+                    .get("n_member_addp")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                needed_member_remove_power: r
+                    .get("n_member_removep")
+                    .and_then(|v| v.parse().ok()),
+                sort_id: r.get("sortid").and_then(|v| v.parse().ok()).unwrap_or(0),
+            })
+            .collect();
+        STATE.lock().channel_groups = groups;
+    }
+}
+
+/// Re-requests OUR OWN directly-assigned permission list (`clientpermlist`)
+/// and stores it in STATE — the low-threshold UI hint. Resolves our own
+/// database id first (the client protocol has no `whoami`).
+async fn refresh_own_perms(session: &Arc<Ts3Session>) {
+    let Ok(uid) = session.own_uid().await else {
+        return;
+    };
+    let Ok(Some(dbid)) = session.dbid_from_uid(&uid).await else {
+        return;
+    };
+    let Ok(rows) = session
+        .exec(
+            Ts3Command::new("clientpermlist")
+                .param("cldbid", dbid.as_u64().unwrap_or(0))
+                .opt("permsid"),
+        )
+        .await
+    else {
+        return;
+    };
+    let list: Vec<TsPerm> = rows
+        .iter()
+        .map(|r| TsPerm {
+            name: r.get("permsid").unwrap_or("").to_string(),
+            value: r.get("permvalue").and_then(|v| v.parse().ok()).unwrap_or(0),
+            negated: r.get("permnegated").map(|v| v == "1").unwrap_or(false),
+            skip: r.get("permskip").map(|v| v == "1").unwrap_or(false),
+        })
+        .collect();
+    push_diag(&format!("own clientpermlist: {} entries", list.len()));
+    STATE.lock().own_perms = list;
+}
+
 async fn do_connect(
     address: String,
     nickname: String,
@@ -561,112 +679,85 @@ async fn do_connect(
     token: Option<String>,
 ) -> Result<(), String> {
     crate::install_panic_hook();
-    let mut opts = Connection::build(address).name(nickname);
-    if let Some(id_json) = IDENTITY_STASH.lock().take() {
-        if let Ok(id) = serde_json::from_str::<Identity>(&id_json) {
-            opts = opts.identity(id);
-        }
-    }
-    if let Some(ch) = channel {
-        opts = opts.channel(ch);
-    }
-    if let Some(pw) = password {
-        opts = opts.password(pw);
-    }
-    if let Some(tok) = token {
-        opts = opts.token(tok);
-    }
 
-    let mut con = opts.connect().map_err(|e| format!("{}", e))?;
-    // Disarm channel-event SFX until the initial roster sync is fully
-    // consumed; the first BookEvents batch processed by the event loop
-    // re-arms it (see handle_control_item). Also reset the disconnect
-    // suppression and deferred-teardown flags from a previous connection.
+    // Address prelude (same as the univox driver): parse invite links and
+    // host[:port], resolve the port via TSDNS for bare hosts.
+    let parsed = univox_ts3::address::parse(&address)
+        .map_err(|e| format!("bad address {address}: {e}"))?;
+    let port = if parsed.port_explicit {
+        parsed.port
+    } else {
+        univox_ts3::address::resolve_port(
+            &parsed.host,
+            parsed.channel.as_deref().unwrap_or(""),
+            univox_ts3::address::DEFAULT_TSDNS_PORT,
+        )
+        .await
+        .map_err(|e| format!("port resolve failed: {e}"))?
+    };
+
+    // The Dart side persists the identity in the tsclientlib/tsproto JSON
+    // shape ({key, counter, max_counter}); univox parses and re-serializes
+    // that exact format, so the stored string round-trips unchanged.
+    let identity_json = IDENTITY_STASH.lock().take();
+    let identity = match identity_json.as_deref().filter(|s| !s.is_empty()) {
+        Some(json) => univox_ts3_proto::Identity::from_tsclientlib_json(json)
+            .map_err(|e| format!("bad stored identity: {e}"))?,
+        None => univox_ts3_proto::Identity::create(),
+    };
+
+    let mut opts = ConnectOptions::new(format!("{}:{}", parsed.host, port))
+        .nickname(nickname.clone());
+    if let Some(ch) = channel.as_deref().filter(|c| !c.is_empty()) {
+        opts = opts.initial_channel(InitialChannel::Path(ch.to_string()));
+    }
+    opts = opts.with_extension(Ts3ConnectOptions {
+        server_password: password.clone().filter(|p| !p.is_empty()),
+        privilege_key: token.clone().filter(|t| !t.is_empty()),
+        upgrade_identity_to: Some(24),
+        ..Default::default()
+    });
+
+    // Disarm channel-event SFX until the connect-time roster burst has flown
+    // by; also reset the disconnect suppression and deferred-teardown flags
+    // from a previous connection.
     SFX_ARMED.store(false, Ordering::Relaxed);
     SFX_SUPPRESS_DISCONNECT.store(false, Ordering::Relaxed);
     SFX_DEFERRED_TEARDOWN.store(false, Ordering::Relaxed);
 
-    let mut ok = false;
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(item) = con.events().next().await {
-            match item {
-                Ok(StreamItem::BookEvents(_)) => {
-                    ok = true;
-                    break;
-                }
-                Ok(StreamItem::IdentityLevelIncreasing(l)) => {
-                    STATE.lock().pending_events.push_back(TsEvent::Error {
-                        message: format!("Identity level {}...", l),
-                    });
-                }
-                Err(e) => return Err(format!("{}", e)),
-                _ => {}
-            }
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|_| "Timeout".to_string())??;
+    let session = Ts3Session::connect(opts, identity)
+        .await
+        .map_err(|e| format!("{e}"))?;
 
-    if !ok {
-        return Err("No BookEvents".into());
-    }
+    let own_id = self_clid(&session) as u32;
 
-    {
-        let sub = OutChannelSubscribeAllMessage::new();
-        let _ = sub.send(&mut con);
-    }
-    // Ask for the group lists so the book's `server_groups`/`channel_groups`
-    // maps (used by the permission-management UI) are populated. The book
-    // handles these messages itself and fills the maps, so this is
-    // fire-and-forget; the first BookEvents batch after the answer refreshes
-    // the STATE caches via refresh_from_book.
-    {
-        let _ =
-            tsclientlib::messages::c2s::OutServerGroupListRequestMessage::new().send(&mut con);
-        let _ =
-            tsclientlib::messages::c2s::OutChannelGroupListRequestMessage::new().send(&mut con);
-    }
+    // Subscribe to every channel so roster updates stream in, then fill the
+    // group caches and our own permission list (both are plain execs whose
+    // answers are parsed and stored directly — no event-driven collection).
+    let _ = session.subscribe_all().await;
+    refresh_group_lists(&session).await;
+    refresh_own_perms(&session).await;
 
-    // Own the data we need before sending more commands: `get_state()` borrows
-    // `con` immutably, and the permission-list request needs `&mut con`.
-    let (own_dbid, sname, oid, ask_privilegekey) = {
-        let book = con.get_state().map_err(|e| format!("{}", e))?;
-        let own_dbid = book
-            .clients
-            .get(&book.own_client)
-            .map(|c| c.database_id.0)
-            .unwrap_or(0);
-        (
-            own_dbid,
-            book.server.name.clone(),
-            book.own_client.0 as u32,
-            book.server.ask_for_privilegekey,
-        )
-    };
-    // Ask for our own directly-assigned permission list — a low-threshold
-    // hint used by the UI to decide whether to offer the permission-
-    // management entry (independent of the pushed hints). The answer arrives
-    // as a MessageEvent handled below (fills STATE.own_perms).
-    if own_dbid != 0 {
-        let part = tsclientlib::messages::c2s::OutClientPermListRequestPart {
-            client_db_id: tsclientlib::ClientDbId(own_dbid),
-        };
-        let _ = tsclientlib::messages::c2s::OutClientPermListRequestMessage::new(
-            &mut std::iter::once(part),
-        )
-        .send(&mut con);
-    }
-
-    let book = con.get_state().map_err(|e| format!("{}", e))?;
+    let book = session.book();
     let (channels, clients) = refresh_from_book(&book);
 
     eprintln!(
         "do_connect: OK, {} channels, {} clients, own_id={}",
         channels.len(),
         clients.len(),
-        oid
+        own_id
     );
+
+    // Server texts from initserver. The raw virtualserver_* keys are
+    // preserved in Server.extra (see the univox bookkeeping pump).
+    let server = book.server().unwrap_or_default();
+    let ex = |k: &str| server.extra.get(k).cloned().unwrap_or_default();
+    let welcome_message = ex("virtualserver_welcomemessage");
+    let hostmessage = ex("virtualserver_hostmessage");
+    let hostmessage_mode = ex("virtualserver_hostmessage_mode")
+        .parse::<u8>()
+        .unwrap_or(0);
+    let ask_for_privilegekey = ex("virtualserver_ask_for_privilegekey") == "1";
 
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let generation = crate::CONNECTION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -676,27 +767,26 @@ async fn do_connect(
         let mut state = STATE.lock();
         state.connecting = false;
         state.connected = true;
-        state.server_name = sname.clone();
-        state.own_client_id = oid;
+        state.server_name = server.name.clone();
+        state.own_client_id = own_id;
         state.channels = channels;
         state.clients = clients;
         state.pending_events.push_back(TsEvent::Connected {
-            server_name: sname,
-            client_id: oid,
-            ask_for_privilegekey: ask_privilegekey,
-            welcome_message: book.server.welcome_message.clone(),
-            hostmessage: book.server.hostmessage.clone(),
-            hostmessage_mode: book.server.hostmessage_mode as u8,
+            server_name: server.name.clone(),
+            client_id: own_id,
+            ask_for_privilegekey,
+            welcome_message,
+            hostmessage,
+            hostmessage_mode,
         });
     }
 
-    if let Some(id) = con.get_options().get_identity() {
-        if let Ok(json) = serde_json::to_string(id) {
-            *IDENTITY_STASH.lock() = Some(json);
-        }
-    }
+    // Persist the identity actually used: the hash-cash upgrade ran before
+    // the handshake and its counter/max_counter must reach Dart's storage,
+    // or the next session resumes from a stale counter.
+    *IDENTITY_STASH.lock() = Some(session.identity().to_tsclientlib_json());
 
-    *crate::CONNECTION_STASH.lock() = Some(con);
+    *crate::CONNECTION_STASH.lock() = Some(session.clone());
 
     // --- Push-mode audio output (cpal) with sample-driven mixing ---
     spawn_maintenance_task();
@@ -705,13 +795,20 @@ async fn do_connect(
     // drains the SFX queue, so pushing before it would lose the request.
     push_sfx(SFX_CONNECTED, "connected");
 
+    // Arm channel-event SFX after the connect-time burst (the subscribe-all
+    // enterview wave) has flown by; everything before that must stay silent.
     RUNTIME.spawn(async move {
-        let con = crate::CONNECTION_STASH
-            .lock()
-            .take()
-            .expect("Connection not in stash");
-        let fut = event_loop(con, cmd_rx, generation);
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if STATE.lock().connected {
+            SFX_ARMED.store(true, Ordering::Relaxed);
+            push_diag("sfx armed after connect settle");
+        }
+    });
+
+    let loop_session = session.clone();
+    RUNTIME.spawn(async move {
+        let handle = RUNTIME.spawn(event_loop(loop_session, cmd_rx, generation));
+        let result = handle.catch_unwind().await;
         match result {
             Ok(_) => push_diag("event_loop: exited normally"),
             Err(e) => {
@@ -732,13 +829,6 @@ async fn do_connect(
                     });
                     drop(s);
                     schedule_sfx_teardown(SFX_CONNECTION_LOST);
-                    // File transfer bookkeeping dies with the connection:
-                    // pending directory listings are gone, and active workers
-                    // notice via their sockets.
-                    FT_LISTS.lock().clear();
-                    FT_OPS.lock().clear();
-                    PERM_OPS.lock().clear();
-                    TEXT_SENDS.lock().clear();
                     *COMMAND_TX.lock() = None;
                 }
             }
@@ -774,22 +864,14 @@ fn unwrap_seq(seq: u16, base: u16) -> u32 {
 ///
 /// The playout lead of the stream this packet belongs to is anchored here and
 /// adapted from the arrival margins measured here (see [crate::JitterStats]).
-fn decode_to_client_buffer(audio_buf: InAudioBuf) {
+/// The payload arrives as the raw fields of univox's `VoiceData::S2C` /
+/// `S2CWhisper` — same shape the tsclientlib audio packets carried (speaker
+/// client id, voice sequence number, raw Opus bytes).
+fn decode_to_client_buffer(from_id: u16, seq_id: u16, opus_vec: Vec<u8>) {
     const FRAME: usize = 960;
     const REBASE_LEAD: u64 = 4; // reader ≥4 frames (80ms) ahead before realigning
 
-    // Extract data from the self_cell-wrapped buffer
-    let audio = audio_buf.data();
-    let audio_data = audio.data();
-
-    let (from_id, seq_id, opus_vec) = match audio_data {
-        AudioData::S2C { id, from, data, .. } => (*from, *id as u32, data.to_vec()),
-        AudioData::S2CWhisper { id, from, data, .. } => (*from, *id as u32, data.to_vec()),
-        _ => return,
-    };
-    let seq_u16 = seq_id as u16;
-    // audio_data and audio are references — they get dropped naturally
-    drop(audio_buf);
+    let seq_u16 = seq_id;
 
     // Parse the Opus TOC byte: the top 5 bits are the config, bit 2 is the
     // stereo flag, the low 2 bits the frame-count code. Decode with the
@@ -1064,6 +1146,9 @@ const SFX_CHAT_OUTBOUND: u8 = 10;
 const SFX_CONNECTED: u8 = 11;
 const SFX_DISCONNECTED: u8 = 12;
 const SFX_CONNECTION_LOST: u8 = 13;
+// Kind 14 is still reserved in the Dart-side numbering (do not renumber);
+// the stream-error paths that used it are now handled by the Closed event.
+#[allow(dead_code)]
 const SFX_ERROR: u8 = 14;
 const SFX_MIC_ACTIVATED: u8 = 15;
 const SFX_MIC_MUTED: u8 = 16;
@@ -1950,2328 +2035,1463 @@ fn schedule_teardown_after_kick_sfx() {
     });
 }
 
-/// Event-driven SFX detection: for each `BookEvents` batch we snapshot the
-/// book once via `con.get_state()` (it already reflects this batch's
-/// changes) and classify every event against our own client and channel.
-/// Triggering events push one SFX request each (deduped per batch where a
-/// single notify can produce several `PropertyChanged` events), which the
-/// cpal callback plays through the two parallel SFX slots.
-fn maybe_trigger_sfx(
-    ev: &tsclientlib::events::Event,
-    own_client: Option<ClientId>,
-    own_channel: Option<ChannelId>,
-    book: &tsclientlib::data::Connection,
-    batch_fired: &mut u32,
-    batch_handled: &mut HashSet<ClientId>,
-) {
-    use tsclientlib::events::{PropertyId, PropertyValue};
-    use tsclientlib::{MessageTarget, Reason};
+// ─── Univox event handling ──────────────────────────────────────────
 
-    if !SFX_ARMED.load(Ordering::Relaxed) {
-        return;
-    }
-    let own_client = match own_client {
-        Some(id) => id,
-        None => return,
-    };
-    // NOTE: own_channel must stay an Option — when our own client is removed
-    // from the view (kicked/banned), the batch snapshot has no entry for us,
-    // so book.clients.get(own_client) is None and own_channel is None. The
-    // own-client PropertyRemoved branch below still needs to fire the
-    // kick/ban sound; only the other-client branches require a channel.
-    let own_channel = own_channel;
+/// Deduplication across the univox event stream. One channel transition
+/// surfaces as up to three events (clientmoved + leftview + enterview can
+/// describe the same move), so per-client timestamps keep sounds and chat
+/// notices to one per movement within a short window. Sounds and notices
+/// use separate maps on purpose — a notice must never suppress a sound or
+/// vice versa.
+struct RecentClients {
+    sfx: HashMap<u64, Instant>,
+    chat: HashMap<u64, Instant>,
+}
 
-    // Per-batch dedupe helper: only channel_edited / channel_moved need it
-    // (one notify emits several PropertyChanged events).
-    let mut dedupe = |kind: u8| -> bool {
-        let bit = 1u32 << (kind - 1);
-        if *batch_fired & bit != 0 {
-            true
-        } else {
-            *batch_fired |= bit;
-            false
+impl RecentClients {
+    fn new() -> Self {
+        Self {
+            sfx: HashMap::new(),
+            chat: HashMap::new(),
         }
+    }
+
+    fn seen(map: &mut HashMap<u64, Instant>, id: u64) -> bool {
+        let now = Instant::now();
+        map.retain(|_, t| now.duration_since(*t) < Duration::from_secs(2));
+        map.insert(id, now).is_some()
+    }
+
+    /// True when this client already produced a movement sound in the window.
+    fn sfx_dedupe(&mut self, id: u64) -> bool {
+        Self::seen(&mut self.sfx, id)
+    }
+
+    /// True when this client already produced a chat notice in the window.
+    fn chat_dedupe(&mut self, id: u64) -> bool {
+        Self::seen(&mut self.chat, id)
+    }
+
+    /// Non-registering check (e.g. to suppress the auto channel-group sound
+    /// right after our own channel move).
+    fn sfx_is_recent(&self, id: u64) -> bool {
+        self.sfx
+            .get(&id)
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+    }
+}
+
+/// `client_leave_channel.kind` codes from a structured leave reason:
+/// 0 = left on their own, 1 = moved away by someone, 2 = kicked from the
+/// channel, 3 = disconnected / left the server, 4 = kicked from the server,
+/// 5 = banned. `None` = not a real leave (subscription reshuffles, server
+/// shutdown ...).
+fn leave_kind(reason: &MemberLeftReason) -> Option<u8> {
+    match reason {
+        MemberLeftReason::Moved { .. } => Some(1),
+        MemberLeftReason::ChannelKicked { .. } => Some(2),
+        MemberLeftReason::Left | MemberLeftReason::Timeout | MemberLeftReason::Quit => Some(3),
+        MemberLeftReason::ServerKicked { .. } => Some(4),
+        MemberLeftReason::Banned { .. } => Some(5),
+        MemberLeftReason::Unsubscribed | MemberLeftReason::ServerStop
+        | MemberLeftReason::Other(_) => None,
+    }
+}
+
+/// Channel-event sound for a real leave from our channel.
+fn leave_sfx(reason: &MemberLeftReason) -> Option<u8> {
+    match reason {
+        MemberLeftReason::Timeout => Some(SFX_NEUTRAL_CONN_LOST),
+        MemberLeftReason::Left | MemberLeftReason::Quit => {
+            Some(SFX_NEUTRAL_CONN_DISCONNECTED)
+        }
+        MemberLeftReason::ChannelKicked { .. } => Some(SFX_NEUTRAL_KICKED_CH_AWAY),
+        MemberLeftReason::ServerKicked { .. } => Some(SFX_NEUTRAL_KICKED_SERVER),
+        MemberLeftReason::Banned { .. } => Some(SFX_NEUTRAL_BANNED_SERVER),
+        MemberLeftReason::Moved { .. } => Some(SFX_NEUTRAL_MOVED_AWAY),
+        _ => None,
+    }
+}
+
+/// `client_enter_channel.reason` for an enterview row: 0 = connected to the
+/// server, 2 = moved in by someone, 3 = kicked into the channel. The wire
+/// `reasonid` rides in the member's extra map. `None` = not chat-worthy
+/// (subscription resync and friends).
+fn enter_view_reason(member: &univox_core::model::Member) -> Option<u8> {
+    match member.extra.get("reasonid").map(|s| s.as_str()) {
+        Some("0") => Some(0),
+        Some("1") => Some(2), // Moved
+        Some("4") => Some(3), // KickChannel
+        _ => None,
+    }
+}
+
+/// The invoker's nickname for the leave kinds that have one ('' otherwise),
+/// resolved from the book — the kicker usually stays in view.
+fn invoker_name(book: &univox_core::Book, reason: &MemberLeftReason) -> String {
+    let by = match reason {
+        MemberLeftReason::Moved { by }
+        | MemberLeftReason::ChannelKicked { by, .. }
+        | MemberLeftReason::ServerKicked { by, .. }
+        | MemberLeftReason::Banned { by, .. } => by,
+        _ => return String::new(),
     };
-
-    let trigger: Option<(u8, String)> = match ev {
-        tsclientlib::events::Event::Message { target, invoker, .. } => match target {
-            // A poke is a dedicated Message target (notifyclientpoke).
-            MessageTarget::Poke(_) => Some((SFX_YOU_WERE_POKED, invoker.name.clone())),
-            // Own messages are echoed back by the server — the outbound
-            // sound already played at send time, so skip them here.
-            _ if invoker.id != own_client => Some((SFX_CHAT_INBOUND, invoker.name.clone())),
-            _ => return,
-        },
-        tsclientlib::events::Event::PropertyAdded { id, invoker, extra, .. } => match id {
-            PropertyId::Client(cid) => {
-                // Someone entered our view. Initial subscribe/resync uses the
-                // Subscription reason and stays silent; our own client is
-                // handled by the roster sync as well.
-                if *cid == own_client || extra.reason == Some(Reason::Subscription) {
-                    return;
-                }
-                match book.clients.get(cid) {
-                    Some(c) if Some(c.channel) == own_channel => {
-                        if !batch_handled.insert(*cid) {
-                            return; // movement already accounted for this client
-                        }
-                        // Official pack: enterview with no reason = the user
-                        // connected to the server; Moved/KickChannel = they
-                        // were moved/kicked into view.
-                        match extra.reason {
-                            Some(Reason::None) => {
-                                Some((SFX_NEUTRAL_CONN_CONNECTED, c.name.clone()))
-                            }
-                            Some(Reason::Moved) => {
-                                Some((SFX_NEUTRAL_MOVED_TO_CURRENT, c.name.clone()))
-                            }
-                            Some(Reason::KickChannel) => {
-                                Some((SFX_NEUTRAL_KICKED_CH_TO_CURRENT, c.name.clone()))
-                            }
-                            _ => return,
-                        }
-                    }
-                    _ => return,
-                }
-            }
-            // A new channel appeared. Only a live creation carries an
-            // invoker (the creator); the initial channellist and the
-            // subscribe-all replay have none and must stay silent — the
-            // SFX_ARMED flag alone is not enough because the sync arrives
-            // in later BookEvents batches than the one that arms it.
-            PropertyId::Channel(_) => match invoker {
-                Some(_) => Some((SFX_CHANNEL_CREATED, "".to_string())),
-                None => return,
-            },
-            _ => return,
-        },
-        tsclientlib::events::Event::PropertyChanged { id, old, invoker, extra, .. } => match id {
-            PropertyId::ClientChannel(cid) => {
-                let old_channel = match old {
-                    PropertyValue::ChannelId(ch) => *ch,
-                    _ => return,
-                };
-                let new_client = match book.clients.get(cid) {
-                    Some(c) => c,
-                    None => return,
-                };
-                let new_channel = new_client.channel;
-                if old_channel == new_channel {
-                    return;
-                }
-                if *cid == own_client {
-                    // Kicked from our channel: the server may deliver the
-                    // kick as a clientmove (reasonid=4) instead of a
-                    // clientleftview, so handle it here too.
-                    if extra.reason == Some(Reason::KickChannel) {
-                        Some((SFX_YOU_KICKED_CHANNEL, new_client.name.clone()))
-                    } else {
-                        let sound = match invoker {
-                            // Moved by someone else plays you_were_moved;
-                            // a voluntary move plays channel_switched.
-                            Some(inv) if inv.id != own_client => SFX_YOU_WERE_MOVED,
-                            _ => SFX_CHANNEL_SWITCHED,
-                        };
-                        // Official CLIENT_RECORDING_IN_CHANNEL: entering a
-                        // channel that already has a recorder.
-                        if book.clients.values().any(|c| {
-                            c.id != own_client && c.channel == new_channel && c.is_recording
-                        }) {
-                            push_sfx(SFX_NEUTRAL_RECORDING_ACTIVE, "recorder in channel");
-                        }
-                        Some((sound, new_client.name.clone()))
-                    }
-                } else {
-                    if !batch_handled.insert(*cid) {
-                        return; // movement already accounted for this client
-                    }
-                    // Other client moved between channels: classify by reason
-                    // (None = self-switch, Moved = admin-moved, KickChannel =
-                    // kicked from channel) against our own channel.
-                    if Some(old_channel) == own_channel && Some(new_channel) != own_channel {
-                        let sound = match extra.reason {
-                            Some(Reason::KickChannel) => SFX_NEUTRAL_KICKED_CH_AWAY,
-                            Some(Reason::Moved) => SFX_NEUTRAL_MOVED_AWAY,
-                            _ => SFX_NEUTRAL_AWAY_FROM_CURRENT,
-                        };
-                        Some((sound, new_client.name.clone()))
-                    } else if Some(old_channel) != own_channel && Some(new_channel) == own_channel {
-                        let sound = match extra.reason {
-                            Some(Reason::KickChannel) => SFX_NEUTRAL_KICKED_CH_TO_CURRENT,
-                            Some(Reason::Moved) => SFX_NEUTRAL_MOVED_TO_CURRENT,
-                            _ => SFX_NEUTRAL_TO_CURRENT,
-                        };
-                        Some((sound, new_client.name.clone()))
-                    } else {
-                        return;
-                    }
-                }
-            }
-            // Recording state of a client in our channel.
-            PropertyId::ClientIsRecording(cid) => {
-                let client = match book.clients.get(cid) {
-                    Some(c) => c,
-                    None => return,
-                };
-                if *cid == own_client || Some(client.channel) != own_channel {
-                    return;
-                }
-                match old {
-                    PropertyValue::Bool(old_rec) => {
-                        if client.is_recording == *old_rec {
-                            return;
-                        }
-                        if client.is_recording {
-                            Some((SFX_NEUTRAL_RECORDING_STARTED, client.name.clone()))
-                        } else {
-                            Some((SFX_NEUTRAL_RECORDING_STOPPED, client.name.clone()))
-                        }
-                    }
-                    _ => return,
-                }
-            }
-            // A channel was moved (parent changed). Order-only changes and
-            // subscribe/bookkeeping updates are ignored.
-            PropertyId::ChannelParent(_) => {
-                if dedupe(SFX_CHANNEL_MOVED) {
-                    return;
-                }
-                Some((SFX_CHANNEL_MOVED, "".to_string()))
-            }
-            PropertyId::ChannelOrder(_)
-            | PropertyId::ChannelSubscribed(_)
-            | PropertyId::ChannelPermissionHints(_) => return,
-            // Anything else on a Channel is an edit (name, topic, codec, ...).
-            PropertyId::ChannelName(_)
-            | PropertyId::ChannelGuid(_)
-            | PropertyId::ChannelTopic(_)
-            | PropertyId::ChannelCodec(_)
-            | PropertyId::ChannelCodecQuality(_)
-            | PropertyId::ChannelMaxClients(_)
-            | PropertyId::ChannelMaxFamilyClients(_)
-            | PropertyId::ChannelChannelType(_)
-            | PropertyId::ChannelIsDefault(_)
-            | PropertyId::ChannelHasPassword(_)
-            | PropertyId::ChannelCodecLatencyFactor(_)
-            | PropertyId::ChannelIsUnencrypted(_)
-            | PropertyId::ChannelDeleteDelay(_)
-            | PropertyId::ChannelNeededTalkPower(_)
-            | PropertyId::ChannelForcedSilence(_)
-            | PropertyId::ChannelPhoneticName(_)
-            | PropertyId::ChannelIcon(_)
-            | PropertyId::ChannelIsPrivate(_)
-            | PropertyId::ChannelStorageQuota(_) => {
-                if dedupe(SFX_CHANNEL_EDITED) {
-                    return;
-                }
-                Some((SFX_CHANNEL_EDITED, "".to_string()))
-            }
-            // Own-client state echoed by the server.
-            PropertyId::ClientInputMuted(cid) if *cid == own_client => {
-                match book.clients.get(cid).map(|c| c.input_muted) {
-                    Some(true) => Some((SFX_MIC_MUTED, "".to_string())),
-                    Some(false) => Some((SFX_MIC_ACTIVATED, "".to_string())),
-                    None => return,
-                }
-            }
-            PropertyId::ClientOutputMuted(cid) if *cid == own_client => {
-                match book.clients.get(cid).map(|c| c.output_muted) {
-                    Some(true) => Some((SFX_SOUND_MUTED, "".to_string())),
-                    Some(false) => Some((SFX_SOUND_RESUMED, "".to_string())),
-                    None => return,
-                }
-            }
-            PropertyId::ClientAwayMessage(cid) if *cid == own_client => {
-                match book.clients.get(cid).and_then(|c| c.away_message.as_ref()) {
-                    Some(_) => Some((SFX_AWAY_ACTIVATED, "".to_string())),
-                    None => Some((SFX_AWAY_DEACTIVATED, "".to_string())),
-                }
-            }
-            PropertyId::ClientChannelGroup(cid) if *cid == own_client => {
-                // Joining a channel auto-assigns the channel's default
-                // channel group; the server broadcasts that as an update
-                // (notifyclientupdated with client_channel_group_id) with
-                // no real invoker. That is not a real group change — TS3
-                // plays this sound only when an admin changes the group —
-                // so require a genuine third-party invoker.
-                let real_invoker = match invoker {
-                    Some(inv) => inv.id != own_client && inv.id != ClientId(0),
-                    None => false,
-                };
-                if !real_invoker {
-                    eprintln!(
-                        "[sfx] own channel-group update skipped (invoker={:?})",
-                        invoker.as_ref().map(|i| (i.id.0, i.name.clone()))
-                    );
-                    return;
-                }
-                Some((SFX_CHANNELGROUP_CHANGED, "".to_string()))
-            }
-            _ => return,
-        },
-        tsclientlib::events::Event::PropertyRemoved { id, old, extra, .. } => match id {
-            PropertyId::Client(cid) => {
-                let removed = match old {
-                    PropertyValue::Client(c) => c,
-                    _ => return,
-                };
-                if *cid == own_client {
-                    // Our own client left the server view. Only kicks and
-                    // bans produce a sound; everything else (normal leave,
-                    // server shutdown, ...) is covered by the disconnect
-                    // sound and must not double-fire. The ban case also
-                    // suppresses the upcoming "disconnected" sound.
-                    match extra.reason {
-                        Some(Reason::KickChannel) => {
-                            Some((SFX_YOU_KICKED_CHANNEL, removed.name.clone()))
-                        }
-                        Some(Reason::KickServer) => {
-                            // Server closes the connection right after a
-                            // server kick — suppress the "disconnected" sound
-                            // so it does not stack on the kick sound.
-                            SFX_SUPPRESS_DISCONNECT.store(true, Ordering::Relaxed);
-                            Some((SFX_YOU_KICKED_SERVER, removed.name.clone()))
-                        }
-                        Some(Reason::KickServerBan) => {
-                            SFX_SUPPRESS_DISCONNECT.store(true, Ordering::Relaxed);
-                            Some((SFX_YOU_WERE_BANNED, removed.name.clone()))
-                        }
-                        _ => return,
-                    }
-                } else if Some(removed.channel) != own_channel {
-                    // Not in our channel — no sound.
-                    return;
-                } else {
-                    if !batch_handled.insert(*cid) {
-                        return; // movement already accounted for this client
-                    }
-                    // Someone in our channel left the server (reasonid 0 =
-                    // normal quit, 3 = timeout, 4/5/6 = kicked/banned,
-                    // 1 = moved away).
-                    match extra.reason {
-                        Some(Reason::LostConnection) => {
-                            Some((SFX_NEUTRAL_CONN_LOST, removed.name.clone()))
-                        }
-                        Some(Reason::KickChannel) => {
-                            Some((SFX_NEUTRAL_KICKED_CH_AWAY, removed.name.clone()))
-                        }
-                        Some(Reason::KickServer) => {
-                            Some((SFX_NEUTRAL_KICKED_SERVER, removed.name.clone()))
-                        }
-                        Some(Reason::KickServerBan) => {
-                            Some((SFX_NEUTRAL_BANNED_SERVER, removed.name.clone()))
-                        }
-                        Some(Reason::Moved) => {
-                            Some((SFX_NEUTRAL_MOVED_AWAY, removed.name.clone()))
-                        }
-                        Some(Reason::None) | Some(Reason::Clientdisconnect) => {
-                            Some((SFX_NEUTRAL_CONN_DISCONNECTED, removed.name.clone()))
-                        }
-                        // Subscription / Channelupdate / Channeledit /
-                        // Serverstop / ClientdisconnectServerShutdown: not a
-                        // real leave, stay quiet.
-                        _ => return,
-                    }
-                }
-            }
-            PropertyId::Channel(_) => Some((SFX_CHANNEL_DELETED, "".to_string())),
-            _ => return,
-        },
-    };
-
-    if let Some((kind, detail)) = trigger {
-        push_sfx(kind, &detail);
-    }
-}
-
-// ─── Chat-log notices (client enter/leave/move) ─────────────────────
-
-/// Why a client entered our channel by appearing in the view
-/// (ClientEnterView) — mapped to the `client_enter_channel.reason` codes.
-/// `None` = not chat-worthy (initial subscription resync etc.).
-fn enter_view_reason(reason: Option<tsclientlib::Reason>) -> Option<u8> {
-    match reason {
-        Some(tsclientlib::Reason::None) => Some(0), // connected to the server
-        Some(tsclientlib::Reason::Moved) => Some(2), // moved in by someone
-        Some(tsclientlib::Reason::KickChannel) => Some(3), // kicked in
-        _ => None,
-    }
-}
-
-/// Why a client entered our channel by switching channels (clientmove) —
-/// differs from [enter_view_reason] in the self-switch case.
-fn enter_switch_reason(reason: Option<tsclientlib::Reason>) -> Option<u8> {
-    match reason {
-        Some(tsclientlib::Reason::None) => Some(1), // switched in on their own
-        Some(tsclientlib::Reason::Moved) => Some(2),
-        Some(tsclientlib::Reason::KickChannel) => Some(3),
-        _ => None,
-    }
-}
-
-/// Why a client is gone from our channel — mapped to the
-/// `client_leave_channel.kind` codes. `None` = not a real leave
-/// (subscription reshuffles, channel edits, server shutdown ...).
-fn leave_kind(reason: Option<tsclientlib::Reason>) -> Option<u8> {
-    match reason {
-        Some(tsclientlib::Reason::Moved) => Some(1),
-        Some(tsclientlib::Reason::KickChannel) => Some(2),
-        Some(tsclientlib::Reason::LostConnection)
-        | Some(tsclientlib::Reason::None)
-        | Some(tsclientlib::Reason::Clientdisconnect) => Some(3),
-        Some(tsclientlib::Reason::KickServer) => Some(4),
-        Some(tsclientlib::Reason::KickServerBan) => Some(5),
-        // Subscription / Channelupdate / Channeledit / Serverstop /
-        // ClientdisconnectServerShutdown: not a real leave, stay quiet.
-        _ => None,
-    }
-}
-
-/// `self_moved.kind`: kicked from the channel, moved by someone else, or a
-/// voluntary switch.
-fn self_move_kind(reason: Option<tsclientlib::Reason>, moved_by_other: bool) -> u8 {
-    if reason == Some(tsclientlib::Reason::KickChannel) {
-        2
-    } else if moved_by_other {
-        1
-    } else {
-        0
-    }
-}
-
-/// True when [invoker] is a genuine third party relative to [about] (not
-/// the client itself and not the pseudo client 0 the server uses for
-/// itself) — i.e. someone moved/kicked that client.
-fn is_third_party_invoker(invoker: &Option<tsproto_types::Invoker>, about: ClientId) -> bool {
-    matches!(invoker, Some(i) if i.id != about && i.id != ClientId(0))
-}
-
-/// Resolves a channel name from the book ('' when unknown, e.g. the channel
-/// vanished in the same batch).
-fn channel_name(book: &tsclientlib::data::Connection, id: ChannelId) -> String {
-    book.channels
-        .values()
-        .find(|c| c.id == id)
-        .map(|c| c.name.clone())
+    book.member(by.as_ref().unwrap_or(&MemberId::from_u64(0)))
+        .map(|m| m.nickname)
         .unwrap_or_default()
 }
 
-/// The invoker name for the leave kinds that have one ('' otherwise).
-fn leave_invoker(invoker: &Option<tsproto_types::Invoker>, kind: u8) -> String {
+/// Invoker name for SelfMoved/leave notices by raw id; only the moved/kicked
+/// kinds carry one.
+fn invoker_name_by_id(
+    book: &univox_core::Book,
+    invoker_id: Option<u64>,
+    kind: u8,
+) -> String {
     match kind {
-        1 | 2 | 4 | 5 => invoker
-            .as_ref()
-            .map(|i| i.name.clone())
+        1 | 2 | 4 | 5 => invoker_id
+            .map(MemberId::from_u64)
+            .and_then(|id| book.member(&id))
+            .map(|m| m.nickname)
             .unwrap_or_default(),
         _ => String::new(),
     }
 }
 
-/// Classifies a book event into a chat-log notice for the Dart side (see
-/// `TsEvent::ClientEnterChannel` / `ClientLeaveChannel` / `SelfMoved`).
-/// Mirrors the classification of `maybe_trigger_sfx`: our own channel is
-/// the reference point, the initial subscription resync stays silent, and
-/// [batch_chatted] keeps a leftview+moved kick for the same client to one
-/// line (a per-batch set, deliberately separate from the SFX one so a
-/// notice can never suppress a sound or vice versa).
-fn chat_notice_for_event(
-    ev: &tsclientlib::events::Event,
-    own_client: Option<ClientId>,
-    own_channel: Option<ChannelId>,
-    book: &tsclientlib::data::Connection,
-    batch_chatted: &mut HashSet<ClientId>,
-) -> Option<TsEvent> {
-    use tsclientlib::events::{Event, PropertyId, PropertyValue};
-    use tsclientlib::Reason;
+fn book_channel_name(book: &univox_core::Book, id: u64) -> String {
+    book.channel(&ChannelId::from_u64(id))
+        .map(|c| c.name)
+        .unwrap_or_default()
+}
 
-    if !SFX_ARMED.load(Ordering::Relaxed) {
-        return None;
+/// True when a client other than `exclude` sits in `channel` and is
+/// recording (official CLIENT_RECORDING_IN_CHANNEL hint).
+fn channel_has_recorder(book: &univox_core::Book, channel: u64, exclude: u64) -> bool {
+    book.with(|b| {
+        b.members.values().any(|m| {
+            m.id.as_u64() != Some(exclude)
+                && m.channel_id.as_ref().and_then(|c| c.as_u64()) == Some(channel)
+                && b.member_states.get(&m.id).map(|s| s.recording).unwrap_or(false)
+        })
+    })
+    .unwrap_or(false)
+}
+
+fn disconnect_reason_text(reason: &DisconnectReason) -> String {
+    match reason {
+        DisconnectReason::Requested { message } => {
+            message.clone().unwrap_or_else(|| "User disconnected".into())
+        }
+        DisconnectReason::Timeout => "Connection timeout".into(),
+        DisconnectReason::ServerStop => "Server stopped".into(),
+        DisconnectReason::Kicked { message, .. } => {
+            message.clone().unwrap_or_else(|| "Kicked from server".into())
+        }
+        DisconnectReason::Banned { message, .. } => {
+            message.clone().unwrap_or_else(|| "Banned from server".into())
+        }
+        DisconnectReason::ServerDeleted => "Server deleted".into(),
+        DisconnectReason::Network(m) | DisconnectReason::Auth(m) | DisconnectReason::Other(m) => {
+            m.clone()
+        }
     }
-    let own_client = own_client?;
-    // Without a channel of our own (not in the view) there is no reference
-    // point to classify against.
-    let own_channel = own_channel?;
+}
 
-    match ev {
-        Event::PropertyAdded { id, extra, .. } => match id {
-            PropertyId::Client(cid) => {
-                // Our own connect is covered by the connected event; the
-                // subscription resync must stay silent.
-                if *cid == own_client || extra.reason == Some(Reason::Subscription) {
-                    return None;
-                }
-                let reason = enter_view_reason(extra.reason)?;
-                // The batch snapshot already contains the new client.
-                let client = book.clients.get(cid)?;
-                if Some(client.channel) != Some(own_channel) {
-                    return None; // entered the view somewhere else
-                }
-                if !batch_chatted.insert(*cid) {
-                    return None; // movement already chatted for this client
-                }
-                Some(TsEvent::ClientEnterChannel {
-                    client_id: cid.0 as u32,
-                    nickname: client.name.clone(),
-                    reason,
-                })
-            }
-            _ => None,
-        },
-        Event::PropertyChanged { id, old, invoker, extra, .. } => match id {
-            PropertyId::ClientChannel(cid) => {
-                let old_channel = match old {
-                    PropertyValue::ChannelId(ch) => *ch,
-                    _ => return None,
-                };
-                // The batch snapshot already holds the post-move state.
-                let client = book.clients.get(cid)?;
-                let new_channel = client.channel;
-                if old_channel == new_channel {
-                    return None;
-                }
-                if *cid == own_client {
-                    let kind = self_move_kind(
-                        extra.reason,
-                        is_third_party_invoker(invoker, own_client),
-                    );
-                    Some(TsEvent::SelfMoved {
-                        to_channel_id: new_channel.0 as u32,
-                        to_channel_name: channel_name(book, new_channel),
-                        invoker: leave_invoker(invoker, kind),
-                        kind,
-                    })
-                } else if Some(old_channel) == Some(own_channel)
-                    && Some(new_channel) != Some(own_channel)
-                {
-                    let kind = leave_kind(extra.reason)?;
-                    if !batch_chatted.insert(*cid) {
-                        return None;
-                    }
-                    Some(TsEvent::ClientLeaveChannel {
-                        client_id: cid.0 as u32,
-                        nickname: client.name.clone(),
-                        kind,
-                        invoker: leave_invoker(invoker, kind),
-                    })
-                } else if Some(old_channel) != Some(own_channel)
-                    && Some(new_channel) == Some(own_channel)
-                {
-                    let reason = if is_third_party_invoker(invoker, *cid) {
-                        enter_switch_reason(extra.reason)?
-                    } else {
-                        // Self-switch or server-initiated move-in.
-                        match extra.reason {
-                            Some(Reason::KickChannel) => 3,
-                            _ => 1,
-                        }
-                    };
-                    if !batch_chatted.insert(*cid) {
-                        return None;
-                    }
-                    Some(TsEvent::ClientEnterChannel {
-                        client_id: cid.0 as u32,
-                        nickname: client.name.clone(),
-                        reason,
-                    })
-                } else {
-                    None // moved between two other channels
-                }
-            }
-            _ => None,
-        },
-        Event::PropertyRemoved { id, old, invoker, extra, .. } => match id {
-            PropertyId::Client(cid) => {
-                // Our own removal is the disconnect / kicked-from-server
-                // path — the disconnected event covers it.
-                if *cid == own_client || extra.reason == Some(Reason::Subscription) {
-                    return None;
-                }
-                let removed = match old {
-                    PropertyValue::Client(c) => c,
-                    _ => return None,
-                };
-                if Some(removed.channel) != Some(own_channel) {
-                    return None;
-                }
-                let kind = leave_kind(extra.reason)?;
-                if !batch_chatted.insert(*cid) {
-                    return None;
-                }
-                Some(TsEvent::ClientLeaveChannel {
-                    client_id: cid.0 as u32,
-                    nickname: removed.name.clone(),
-                    kind,
-                    invoker: leave_invoker(invoker, kind),
-                })
-            }
-            _ => None,
-        },
+/// TS3 wire error id of a unified platform error (None for local errors).
+fn ts3_error_code(e: &univox_core::error::Error) -> Option<i32> {
+    match e {
+        univox_core::error::Error::Platform { code, .. } => Some(*code),
         _ => None,
     }
 }
 
-/// Lets a hand-built packet ride the normal `send_with_result` path so
-/// return_code bookkeeping (and the MessageResult it produces) stays in one
-/// place. We serialize `cpw` exactly like the official client: present for
-/// every ft command, empty (bare key) when the channel has no password.
-struct RawCmd(OutCommand);
+/// 0x030d — the clientmove rejection for a wrong channel password.
+const TS3_ERR_CHANNEL_INVALID_PASSWORD: i32 = 0x030d;
 
-impl OutMessageTrait for RawCmd {
-    fn to_packet(self) -> OutCommand {
-        self.0
+/// Human-readable text for a failed session call (PermOp / SendFailed).
+fn error_text(e: &univox_core::error::Error) -> String {
+    match e {
+        univox_core::error::Error::Permission { missing } => {
+            format!("missing permission {missing}")
+        }
+        univox_core::error::Error::Platform { code, message, .. } => {
+            format!("{message} (0x{code:04x})")
+        }
+        other => format!("{other}"),
     }
 }
 
-/// Registers a permission-management command's return_code so the
-/// `MessageResult` handler can resolve it into a `PermOp` event; on a send
-/// failure, pushes the failing event immediately.
-fn perm_op_send(
-    result: std::result::Result<tsclientlib::MessageHandle, tsclientlib::Error>,
-    token: &str,
-) {
-    match result {
-        Ok(handle) => {
-            crate::PERM_OPS.lock().insert(handle.0, token.to_string());
-            push_diag(&format!("perm op {}: sent (rc={})", token, handle.0));
-        }
-        Err(e) => {
-            push_diag(&format!("perm op {}: send failed: {}", token, e));
-            STATE.lock().pending_events.push_back(TsEvent::PermOp {
-                token: token.to_string(),
-                ok: false,
-                error: Some(format!("{}", e)),
-            });
-        }
-    }
-}
-
-/// The own client id for self-protection guards. Prefers the live book value:
-/// the cached `STATE.own_client_id` is only written at connect and goes stale
-/// after a temporary-disconnect reconnect (the server may reassign our clid).
-/// Refreshes the cache when the live value differs.
-fn own_client_id_or_cache(con: &tsclientlib::Connection) -> u32 {
-    if let Ok(book) = con.get_state() {
-        let own = book.own_client.0 as u32;
-        if own != 0 {
-            let mut state = STATE.lock();
-            if state.own_client_id != own {
-                state.own_client_id = own;
-            }
-        }
-        return own;
-    }
-    STATE.lock().own_client_id
-}
-
-/// The ft commands REQUIRE the `cpw` argument to be present even for
-/// unlocked channels (omitting it fails with 0x0603 "parameter not found").
-/// Empty is encoded as the bare key (write_arg drops a valueless `=`),
-/// matching the official client's wire format.
-fn encoded_cpw(password: &Option<String>) -> String {
-    password
-        .as_deref()
-        .map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
-        .unwrap_or_default()
-}
-
-/// Builds an ftdeletefile command — every entry is one part of the same
-/// packet, so multiple paths die with one server round-trip.
-fn ft_delete_cmd(cid: u64, names: &[String], password: &Option<String>) -> OutCommand {
-    let mut packet = OutCommand::new(
-        Direction::C2S,
-        Flags::empty(),
-        PacketType::Command,
-        "ftdeletefile",
-    );
-    let cpw = encoded_cpw(password);
-    for (i, name) in names.iter().enumerate() {
-        if i > 0 {
-            packet.start_new_part();
-        }
-        packet.write_arg("cid", &cid);
-        packet.write_arg("cpw", &cpw);
-        packet.write_arg("name", name);
-    }
-    packet
-}
-
-/// Schedules the deferred finalize of a listing. The server streams the
-/// rows after the result frame, and our event pipeline may surface those
-/// rows one or two poll ticks late — so the finalize waits long enough for
-/// every straggler to accumulate, then emits everything collected.
-fn schedule_ft_list_finish(code: u16) {
-    {
-        let mut lists = FT_LISTS.lock();
-        match lists.get_mut(&code) {
-            Some(p) => {
-                if p.finalize_scheduled {
-                    return;
-                }
-                p.finalize_scheduled = true;
-            }
-            None => return,
-        }
-    }
-    crate::RUNTIME.spawn(async move {
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        let pending = FT_LISTS.lock().remove(&code);
-        if let Some(pending) = pending {
-            push_diag(&format!(
-                "ft list {}: finalize entries={} result={}",
-                pending.token,
-                pending.entries.len(),
-                if pending.result_ok { "ok" } else { "error" }
-            ));
-            STATE
-                .lock()
-                .pending_events
-                .push_back(TsEvent::FtListing {
-                    token: pending.token,
-                    entries: pending.entries,
-                    error: pending.result_error,
-                });
-        }
+/// Publishes a PermOp answer for a tracked management command.
+fn push_perm_op(token: &str, ok: bool, error: Option<String>) {
+    push_diag(&format!(
+        "perm op {}: ok={} {}",
+        token,
+        ok,
+        error.as_deref().unwrap_or("")
+    ));
+    STATE.lock().pending_events.push_back(TsEvent::PermOp {
+        token: token.to_string(),
+        ok,
+        error,
     });
 }
 
-/// Logs the exact wire form of a request — the fastest way to diff our
-/// traffic against what the official client sends.
-fn push_wire_diag(tag: &str, packet: &OutCommand) {
-    push_diag(&format!(
-        "ft req {}: {}",
-        tag,
-        String::from_utf8_lossy(packet.0.content())
-    ));
+/// Rebuilds STATE's roster from the book mirror and tells Dart. One event =
+/// one refresh; Dart's 200 ms poll coalesces the churn.
+fn refresh_roster(book: &univox_core::Book) {
+    let (ch, cl) = refresh_from_book(book);
+    let mut state = STATE.lock();
+    state.channels = ch;
+    state.clients = cl;
+    state.pending_events.push_back(TsEvent::ChannelsUpdated {});
 }
 
-/// Drains the raw incoming-command queue the vendored lib fills (NEK0-DIAG)
-/// into the diag channel so the exact server wire order is visible.
-fn drain_raw_incoming(con: &mut Connection) {
-    // The queue lives on the inner connection state; access it through the
-    // unstable raw-client accessor is not available for Connection, so the
-    // vendored ConnectedConnection field is reached via get_state-free path:
-    // Connection::events already consumed the frames, we only need the raw
-    // strings. Use the public accessor added on ConnectionState::Connected.
-    if let Ok(raw) = con.raw_incoming() {
-        while let Some(line) = raw.lock().unwrap().pop_front() {
-            push_diag(&format!("raw in: {}", line));
-        }
-    }
-}
-
-/// Routes one event item: file-transfer payloads carry an owned TcpStream,
-/// so they are consumed here by value; everything else delegates to the
-/// catch_unwind-wrapped control handler.
-fn handle_event_item(item: StreamItem, con: &mut Connection, generation: u64) {
-    match item {
-        StreamItem::FileDownload(handle, result) => {
-            contain_panic("file download handler", || {
-                handle_file_download(handle.0, result);
+/// Voice packets from univox's raw sink: S2C (+ whisper, decoded like
+/// normal voice) are decoded per speaker; C2S echoes are ignored.
+fn on_voice_data(vd: VoiceData) {
+    match vd {
+        VoiceData::S2C { id, from, data, .. } | VoiceData::S2CWhisper { id, from, data, .. } => {
+            contain_panic("voice decode", || {
+                decode_to_client_buffer(from, id, data)
             });
         }
-        StreamItem::FileUpload(handle, result) => {
-            contain_panic("file upload handler", || {
-                handle_file_upload(handle.0, result);
-            });
-        }
-        other => handle_control_item(&other, con, generation),
+        _ => {}
     }
 }
 
-/// The server accepted a download request and handed over the raw TCP stream
-/// carrying the file bytes; spawn the blocking worker that writes it out.
-fn handle_file_download(client_ft_id: u16, result: tsclientlib::FileDownloadResult) {
-    let total = result.size;
-    match result.stream.into_std() {
-        Ok(std_stream) => {
-            let _ = std_stream.set_nonblocking(false);
-            if let Some(task_id) = ft_task_id_by_client_id(client_ft_id) {
-                if let Some(t) = FT_TASKS.get_mut(&task_id) {
-                    t.total.store(total, Ordering::Relaxed);
-                }
-                maybe_publish_ft_progress(task_id, &FT_TASKS.get(&task_id).unwrap(), true);
-                spawn_download_worker(task_id, std_stream, total);
-            }
-        }
-        Err(e) => {
-            if let Some(task_id) = ft_task_id_by_client_id(client_ft_id) {
-                crate::finish_ft_task(
-                    task_id,
-                    false,
-                    Some(format!("transfer stream failed: {}", e)),
-                );
-            }
-        }
+/// Central per-event handler: refreshes the roster from the book mirror,
+/// pushes the Dart-facing events (chat / poke / notices) and classifies the
+/// channel-event sounds. Returns true when the voice-sink subscription must
+/// be renewed (the supervisor swapped the connection on a reconnect).
+async fn handle_univox_event(
+    ev: UxEvent,
+    session: &Arc<Ts3Session>,
+    recent: &mut RecentClients,
+    generation: u64,
+) -> bool {
+    if !STATE.lock().connected {
+        return false;
     }
-}
+    let own_client = self_clid(session);
+    let own_channel = {
+        let state = STATE.lock();
+        state
+            .clients
+            .iter()
+            .find(|c| c.id as u64 == own_client)
+            .map(|c| c.channel_id as u64)
+    };
+    let book = session.book();
+    let armed = SFX_ARMED.load(Ordering::Relaxed);
 
-/// Our upload slot was accepted; stream the local file into it.
-fn handle_file_upload(client_ft_id: u16, result: tsclientlib::FileUploadResult) {
-    match result.stream.into_std() {
-        Ok(std_stream) => {
-            let _ = std_stream.set_nonblocking(false);
-            if let Some(task_id) = ft_task_id_by_client_id(client_ft_id) {
-                let src = FT_TASKS.get(&task_id).map(|t| t.local_path.clone());
-                if let Some(src) = src {
-                    spawn_upload_worker(task_id, std_stream, src);
-                }
-            }
-        }
-        Err(e) => {
-            if let Some(task_id) = ft_task_id_by_client_id(client_ft_id) {
-                crate::finish_ft_task(
-                    task_id,
-                    false,
-                    Some(format!("transfer stream failed: {}", e)),
-                );
-            }
-        }
-    }
-}
-
-fn handle_control_item(item: &StreamItem, con: &mut Connection, _generation: u64) {
-    let handle_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match item {
-            StreamItem::Audio(_) => {} // handled upstream
-            StreamItem::BookEvents(events) => {
-                // Snapshot the book once per batch — it already includes this
-                // batch's changes, so each event can be evaluated against the
-                // state that results from it.
-                let book = con.get_state().ok();
-                let own_client = book.as_ref().map(|b| b.own_client);
-                let own_channel = book
-                    .as_ref()
-                    .and_then(|b| b.clients.get(&b.own_client))
-                    .map(|c| c.channel);
-                // Per-batch dedupe mask for channel_edited / channel_moved,
-                // and per-client sets so a kicked client (leftview + moved in
-                // the same batch) only ever produces one sound and one chat
-                // notice — the two sets are independent on purpose, a notice
-                // must never suppress a sound or vice versa.
-                let mut batch_fired: u32 = 0;
-                let mut batch_handled: HashSet<ClientId> = HashSet::new();
-                let mut batch_chatted: HashSet<ClientId> = HashSet::new();
-                for ev in events {
-                    match ev {
-                        tsclientlib::events::Event::Message {
-                            target,
-                            invoker,
-                            message,
-                        } => {
-                            // A poke is a dedicated Message target
-                            // (notifyclientpoke) and must NOT show up in the
-                            // chat — it gets its own event (Dart shows a
-                            // system notification). Everything else is a text
-                            // message routed by target mode.
-                            match target {
-                                tsclientlib::MessageTarget::Poke(_) => {
-                                    STATE.lock().pending_events.push_back(TsEvent::Poke {
-                                        from_client: invoker.name.clone(),
-                                        from_client_id: invoker.id.0 as u32,
-                                        message: message.clone(),
-                                    });
-                                }
-                                tsclientlib::MessageTarget::Server => {
-                                    STATE.lock().pending_events.push_back(TsEvent::TextMessage {
-                                        from_client: invoker.name.clone(),
-                                        from_client_id: invoker.id.0 as u32,
-                                        to_client_id: 0,
-                                        target_mode: 3u8,
-                                        message: message.clone(),
-                                    });
-                                }
-                                tsclientlib::MessageTarget::Channel => {
-                                    STATE.lock().pending_events.push_back(TsEvent::TextMessage {
-                                        from_client: invoker.name.clone(),
-                                        from_client_id: invoker.id.0 as u32,
-                                        to_client_id: 0,
-                                        target_mode: 2u8,
-                                        message: message.clone(),
-                                    });
-                                }
-                                tsclientlib::MessageTarget::Client(target_id) => {
-                                    STATE.lock().pending_events.push_back(TsEvent::TextMessage {
-                                        from_client: invoker.name.clone(),
-                                        from_client_id: invoker.id.0 as u32,
-                                        // The echo of our own sent PM carries the
-                                        // OTHER party here — that is what lets
-                                        // Dart file the message under the right
-                                        // conversation.
-                                        to_client_id: target_id.0 as u32,
-                                        target_mode: 1u8,
-                                        message: message.clone(),
-                                    });
-                                }
-                            }
-                            if let Some(b) = book.as_ref() {
-                                maybe_trigger_sfx(ev, own_client, own_channel, b, &mut batch_fired, &mut batch_handled);
-                            }
-                        }
-                        _ => {
-                            if let Some(b) = book.as_ref() {
-                                if let Some(notice) = chat_notice_for_event(
-                                    ev,
-                                    own_client,
-                                    own_channel,
-                                    b,
-                                    &mut batch_chatted,
-                                ) {
-                                    STATE.lock().pending_events.push_back(notice);
-                                }
-                                let (ch, cl) = refresh_from_book(b);
-                                let mut state = STATE.lock();
-                                state.channels = ch;
-                                state.clients = cl;
-                                state.pending_events.push_back(TsEvent::ChannelsUpdated {});
-                                drop(state);
-                                maybe_trigger_sfx(ev, own_client, own_channel, b, &mut batch_fired, &mut batch_handled);
-                            }
-                        }
-                    }
-                }
-                // The first BookEvents batch processed by the event loop may
-                // still be the tail of the initial roster sync (and on a
-                // temporary-disconnect reconnect it is the full resync), so it
-                // is consumed silently; everything after it is real activity.
-                SFX_ARMED.store(true, Ordering::Relaxed);
-            }
-            StreamItem::MessageEvent(msg) => {
-                use tsclientlib::messages::s2c::InMessage;
-                if let InMessage::FileList(fl) = msg {
-                    // Directory listing frames of an ftgetfilelist request:
-                    // accumulate entries keyed by the echoed return_code; a
-                    // trailing error frame resolves as MessageResult below.
-                    if let Some(code) = fl.return_code.as_deref().and_then(parse_return_code) {
-                        let mut lists = FT_LISTS.lock();
-                        if let Some(pending) = lists.get_mut(&code) {
-                            let incoming = fl.iter().count();
-                            for part in fl.iter() {
-                                pending.entries.push(TsFtEntry {
-                                    name: part.name.clone(),
-                                    size: part.size,
-                                    datetime: part.date_time.unix_timestamp(),
-                                    is_file: part.is_file,
-                                });
-                            }
-                            push_diag(&format!(
-                                "ft list {}: frame +{} (total {})",
-                                pending.token,
-                                incoming,
-                                pending.entries.len()
-                            ));
-                        } else {
-                            push_diag("ft list frame for unknown return code");
-                        }
-                    }
-                } else if let InMessage::FileListFinished(fin) = msg {
-                    // Rows are streamed AFTER the result frame (observed
-                    // live); this marker says "no more rows for this
-                    // directory". It carries no return_code, so match via
-                    // the directory address, then finalize.
-                    let to_finalize: Vec<u16> = {
-                        let mut lists = FT_LISTS.lock();
-                        let mut found: Vec<u16> = Vec::new();
-                        for part in fin.iter() {
-                            for (code, p) in lists.iter_mut() {
-                                if p.cid == part.channel_id.0
-                                    && p.path == part.path
-                                    && !p.finished_seen
-                                {
-                                    p.finished_seen = true;
-                                    found.push(*code);
-                                }
-                            }
-                        }
-                        found
-                    };
-                    // Finalize OUTSIDE the lock: schedule_ft_list_finish
-                    // locks FT_LISTS itself, and parking_lot mutexes are
-                    // not reentrant — calling it under the lock freezes
-                    // the connection event loop for good.
-                    for code in to_finalize {
-                        schedule_ft_list_finish(code);
-                    }
-                } else if let InMessage::TextMessage(txt) = msg {
-                    for p in txt.iter() {
-                        STATE.lock().pending_events.push_back(TsEvent::TextMessage {
-                            from_client: p.invoker_name.clone(),
-                            from_client_id: p.invoker_id.0 as u32,
-                            to_client_id: p.target_client_id.map(|c| c.0 as u32).unwrap_or(0),
-                            target_mode: p.target as u8,
-                            message: p.message.clone(),
-                        });
-                    }
-                } else if let InMessage::ClientPermList(pl) = msg {
-                    // OUR OWN directly-assigned permission list, requested on
-                    // connect. Store it for the UI (permission-management
-                    // entry visibility). Only directly-assigned perms are
-                    // listed, so treat it as a hint, not authorization.
-                    let list: Vec<TsPerm> = pl
-                        .iter()
-                        .map(|p| TsPerm {
-                            name: p.permission_name_id.clone().unwrap_or_default(),
-                            value: p.permission_value,
-                            negated: p.permission_negated,
-                            skip: p.permission_skip,
-                        })
-                        .collect();
-                    STATE.lock().own_perms = list;
-                    push_diag(&format!(
-                        "own clientpermlist: {} entries",
-                        STATE.lock().own_perms.len()
-                    ));
-                } else if let InMessage::CommandError(err) = msg {
-                    // Our commands carry no return_code, so server rejections
-                    // arrive here as bare error messages instead of results.
-                    // Attribute an invalid-channel-password rejection to the
-                    // most recent clientmove within a short time window; all
-                    // other errors are logged as diagnostics.
-                    for entry in err.iter() {
-                        if entry.id == tsclientlib::TsError::ChannelInvalidPassword {
-                            const MOVE_WINDOW: Duration = Duration::from_secs(5);
-                            // Take the pending move as an owned value FIRST so
-                            // the STATE guard is dropped before pushing the
-                            // event below. A match whose scrutinee held the
-                            // guard must never re-lock STATE in its arms —
-                            // parking_lot would self-deadlock the connection
-                            // loop (and freeze the UI thread polling events).
-                            let pending = STATE.lock().pending_move.take();
-                            match pending {
-                                Some((cid, at)) if at.elapsed() <= MOVE_WINDOW => {
-                                    STATE.lock().pending_events.push_back(TsEvent::MoveRejected {
-                                        channel_id: cid as u32,
-                                    });
-                                }
-                                Some(_) => {
-                                    push_diag("channel-password rejection is stale, dropped");
-                                }
-                                None => {
-                                    push_diag(
-                                        "server rejected a command: invalid channel password",
-                                    );
-                                }
-                            }
-                        } else {
-                            push_diag(&format!("server rejected command: {:?}", entry.id));
-                        }
-                    }
-                }
-            }
-            StreamItem::MessageResult(handle, res) => {
-                // A command answer carrying one of OUR return_codes. Resolves
-                // both pending directory listings and mkdir/delete acks; the
-                // final error frame is what ends either kind of exchange.
-                let err_text = res
-                    .as_ref()
-                    .err()
-                    .map(|e| format!("{:?} ({:#06x})", e.error, e.error as i32));
-                // Permission-management commands (group add/remove, channel
-                // perm grant/revoke) resolve through PERM_OPS.
-                if let Some(token) = PERM_OPS.lock().remove(&handle.0) {
-                    push_diag(&format!(
-                        "perm op {}: server said ok={} {}",
-                        token,
-                        res.is_ok(),
-                        err_text.as_deref().unwrap_or("")
-                    ));
-                    STATE.lock().pending_events.push_back(TsEvent::PermOp {
-                        token,
-                        ok: res.is_ok(),
-                        error: err_text.clone(),
+    match ev {
+        // A poke is a dedicated message target (notifyclientpoke) and must
+        // NOT show up in the chat — it gets its own event (Dart shows a
+        // system notification). Everything else is a text message routed by
+        // target mode; our own echoes skip the inbound sound.
+        UxEvent::MessageCreated { message } => {
+            let author = message.author.as_ref().and_then(|a| a.as_u64()).unwrap_or(0);
+            let name = message.author_name.clone();
+            let inbound = armed && author != own_client;
+            match message.target {
+                Some(MessageTarget::Poke(_)) => {
+                    STATE.lock().pending_events.push_back(TsEvent::Poke {
+                        from_client: name.clone(),
+                        from_client_id: author as u32,
+                        message: message.content.clone(),
                     });
-                }
-                // A text-message send that the server refused (missing send
-                // permission etc.) — tell Dart instead of dropping the
-                // message silently.
-                if TEXT_SENDS.lock().remove(&handle.0) {
-                    if let Some(e) = res.as_ref().err() {
-                        let reason = match e.missing_permission {
-                            Some(perm) => format!("missing permission {}", perm.0),
-                            None => format!("{:?}", e.error),
-                        };
-                        push_diag(&format!("text message rejected: {}", reason));
-                        STATE.lock().pending_events.push_back(TsEvent::SendFailed {
-                            error: reason,
-                        });
+                    if armed {
+                        push_sfx(SFX_YOU_WERE_POKED, &name);
                     }
                 }
-                if let Some(op) = FT_OPS.lock().remove(&handle.0) {
-                    push_diag(&format!(
-                        "ft op {}: server said ok={} {}",
-                        op.token,
-                        res.is_ok(),
-                        err_text.as_deref().unwrap_or("")
-                    ));
-                    STATE.lock().pending_events.push_back(TsEvent::FtOp {
-                        token: op.token,
-                        ok: res.is_ok(),
-                        error: err_text.clone(),
-                    });
+                Some(MessageTarget::Server) => {
+                    STATE
+                        .lock()
+                        .pending_events
+                        .push_back(TsEvent::TextMessage {
+                            from_client: name.clone(),
+                            from_client_id: author as u32,
+                            to_client_id: 0,
+                            target_mode: 3u8,
+                            message: message.content.clone(),
+                        });
+                    if inbound {
+                        push_sfx(SFX_CHAT_INBOUND, &name);
+                    }
                 }
-                // A rejected ftinitdownload/ftinitupload answers with a plain
-                // error frame; map it back to its task so the job fails with
-                // the server's real reason instead of hanging.
-                if let Some(task_id) = FT_TASK_BY_RC.lock().remove(&handle.0) {
-                    if let Some(e) = res.as_ref().err() {
-                        push_diag(&format!("ft task {} rejected: {:?}", task_id, e.error));
-                        crate::finish_ft_task(
-                            task_id,
-                            false,
-                            Some(format!("{:?} ({:#06x})", e.error, e.error as i32)),
+                Some(MessageTarget::Direct(tid)) => {
+                    STATE
+                        .lock()
+                        .pending_events
+                        .push_back(TsEvent::TextMessage {
+                            from_client: name.clone(),
+                            from_client_id: author as u32,
+                            // The echo of our own sent PM carries the OTHER
+                            // party here — that is what lets Dart file the
+                            // message under the right conversation.
+                            to_client_id: tid.as_u64().unwrap_or(0) as u32,
+                            target_mode: 1u8,
+                            message: message.content.clone(),
+                        });
+                    if inbound {
+                        push_sfx(SFX_CHAT_INBOUND, &name);
+                    }
+                }
+                Some(MessageTarget::Channel(_)) => {
+                    STATE
+                        .lock()
+                        .pending_events
+                        .push_back(TsEvent::TextMessage {
+                            from_client: name.clone(),
+                            from_client_id: author as u32,
+                            to_client_id: 0,
+                            target_mode: 2u8,
+                            message: message.content.clone(),
+                        });
+                    if inbound {
+                        push_sfx(SFX_CHAT_INBOUND, &name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Someone entered the view. Initial dumps are silent (they never
+        // produce events); our own entry is covered by the connected event.
+        UxEvent::MemberJoined { member } => {
+            let mid = member.id.as_u64().unwrap_or(0);
+            let entered_own =
+                member.channel_id.as_ref().and_then(|c| c.as_u64()) == own_channel;
+            let reason = enter_view_reason(&member);
+            refresh_roster(&book);
+            if mid == own_client || !armed {
+                return false;
+            }
+            if entered_own {
+                if let Some(r) = reason {
+                    if !recent.sfx_dedupe(mid) {
+                        match r {
+                            0 => push_sfx(SFX_NEUTRAL_CONN_CONNECTED, &member.nickname),
+                            2 => push_sfx(SFX_NEUTRAL_MOVED_TO_CURRENT, &member.nickname),
+                            3 => push_sfx(SFX_NEUTRAL_KICKED_CH_TO_CURRENT, &member.nickname),
+                            _ => {}
+                        }
+                    }
+                    if !recent.chat_dedupe(mid) {
+                        STATE
+                            .lock()
+                            .pending_events
+                            .push_back(TsEvent::ClientEnterChannel {
+                                client_id: mid as u32,
+                                nickname: member.nickname.clone(),
+                                reason: r,
+                            });
+                    }
+                }
+            }
+        }
+        UxEvent::MemberLeft { id, reason } => {
+            let mid = id.as_u64().unwrap_or(0);
+            // The book already dropped the member; the previous roster holds
+            // the nickname and their channel.
+            let (nickname, was_channel) = {
+                let state = STATE.lock();
+                match state.clients.iter().find(|c| c.id as u64 == mid) {
+                    Some(c) => (c.nickname.clone(), Some(c.channel_id as u64)),
+                    None => (String::new(), None),
+                }
+            };
+            if mid == own_client {
+                // Our own removal: only kicks and bans produce a sound — the
+                // server closes the connection right after, and the
+                // "disconnected" sound must not stack on top.
+                match &reason {
+                    MemberLeftReason::ChannelKicked { .. } => {
+                        push_sfx(SFX_YOU_KICKED_CHANNEL, &nickname);
+                    }
+                    MemberLeftReason::ServerKicked { .. } => {
+                        SFX_SUPPRESS_DISCONNECT.store(true, Ordering::Relaxed);
+                        push_sfx(SFX_YOU_KICKED_SERVER, &nickname);
+                    }
+                    MemberLeftReason::Banned { .. } => {
+                        SFX_SUPPRESS_DISCONNECT.store(true, Ordering::Relaxed);
+                        push_sfx(SFX_YOU_WERE_BANNED, &nickname);
+                    }
+                    _ => {}
+                }
+            } else if was_channel == own_channel && armed {
+                if let Some(kind) = leave_kind(&reason) {
+                    if !recent.chat_dedupe(mid) {
+                        let invoker = invoker_name(&book, &reason);
+                        STATE
+                            .lock()
+                            .pending_events
+                            .push_back(TsEvent::ClientLeaveChannel {
+                                client_id: mid as u32,
+                                nickname: nickname.clone(),
+                                kind,
+                                invoker,
+                            });
+                    }
+                }
+                if let Some(sound) = leave_sfx(&reason) {
+                    if !recent.sfx_dedupe(mid) {
+                        push_sfx(sound, &nickname);
+                    }
+                }
+            }
+            refresh_roster(&book);
+        }
+        // Incremental client updates (mute/away/recording/talk-power
+        // echoes). The row carries only the changed fields.
+        UxEvent::MemberUpdated { member } => {
+            let mid = member.id.as_u64().unwrap_or(0);
+            let in_own =
+                member.channel_id.as_ref().and_then(|c| c.as_u64()) == own_channel;
+            refresh_roster(&book);
+            if !armed {
+                return false;
+            }
+            if mid == own_client {
+                if let Some(v) = member.extra.get("client_input_muted") {
+                    push_sfx(
+                        if v == "1" { SFX_MIC_MUTED } else { SFX_MIC_ACTIVATED },
+                        "input muted",
+                    );
+                }
+                if let Some(v) = member.extra.get("client_output_muted") {
+                    push_sfx(
+                        if v == "1" { SFX_SOUND_MUTED } else { SFX_SOUND_RESUMED },
+                        "output muted",
+                    );
+                }
+                if member.extra.contains_key("client_away_message")
+                    || member.extra.contains_key("client_away")
+                {
+                    let away = member
+                        .extra
+                        .get("client_away")
+                        .map(|v| v == "1")
+                        .unwrap_or_else(|| {
+                            member
+                                .extra
+                                .get("client_away_message")
+                                .map(|v| !v.is_empty())
+                                .unwrap_or(false)
+                        });
+                    push_sfx(
+                        if away { SFX_AWAY_ACTIVATED } else { SFX_AWAY_DEACTIVATED },
+                        "away",
+                    );
+                }
+                // Joining a channel auto-assigns its default channel group;
+                // the server broadcasts that as an update right after our
+                // own move — not a real group change, so require that no
+                // recent movement of ours is in flight.
+                if member.extra.contains_key("client_channel_group_id")
+                    && !recent.sfx_is_recent(own_client)
+                {
+                    push_sfx(SFX_CHANNELGROUP_CHANGED, "channel group");
+                }
+            } else if in_own {
+                if let Some(v) = member.extra.get("client_is_recording") {
+                    // Incremental row: the key's presence implies a change.
+                    if !recent.sfx_dedupe(mid) {
+                        push_sfx(
+                            if v == "1" {
+                                SFX_NEUTRAL_RECORDING_STARTED
+                            } else {
+                                SFX_NEUTRAL_RECORDING_STOPPED
+                            },
+                            &member.nickname,
                         );
                     }
                 }
-                // Record the result on the pending listing — but do NOT
-                // complete it here: the server streams the rows AFTER this
-                // frame (observed live), so wait for the finished marker.
-                let list_finalize_now = {
-                    let mut lists = FT_LISTS.lock();
-                    match lists.get_mut(&handle.0) {
-                        Some(pending) => {
-                            // Known TS3 server quirk: listing a channel whose
-                            // file storage row does not exist yet answers with
-                            // the database-empty-result-set error instead of an
-                            // empty-but-ok list (official clients render that as
-                            // an empty folder). Scope the tolerance to listings
-                            // only: mkdir, delete and transfers keep surfacing
-                            // this error.
-                            let empty_result_quirk = err_text
-                                .as_deref()
-                                .is_some_and(|e| {
-                                    e.to_ascii_lowercase().contains("databaseemptyresult")
-                                });
-                            pending.result_seen = true;
-                            pending.result_ok = res.is_ok() || empty_result_quirk;
-                            pending.result_error = if empty_result_quirk {
-                                None
+            }
+        }
+        UxEvent::ClientMoved { member, channel, invoker } => {
+            let mid = member.as_u64().unwrap_or(0);
+            let to_channel = channel.as_u64().unwrap_or(0);
+            let invoker_id = invoker.as_ref().and_then(|i| i.as_u64());
+            let third_party = matches!(invoker_id, Some(inv) if inv != mid && inv != 0);
+            let (from_channel, nickname) = {
+                let state = STATE.lock();
+                match state.clients.iter().find(|c| c.id as u64 == mid) {
+                    Some(c) => (Some(c.channel_id as u64), c.nickname.clone()),
+                    None => (None, String::new()),
+                }
+            };
+            refresh_roster(&book);
+            if mid == own_client {
+                // Self move: voluntary or forced by an admin (a kick from
+                // the channel is delivered as a leftview with reasonid 4 and
+                // surfaces through MemberLeft instead).
+                let kind = if third_party { 1 } else { 0 };
+                let inv = invoker_name_by_id(&book, invoker_id, kind);
+                STATE
+                    .lock()
+                    .pending_events
+                    .push_back(TsEvent::SelfMoved {
+                        to_channel_id: to_channel as u32,
+                        to_channel_name: book_channel_name(&book, to_channel),
+                        invoker: inv,
+                        kind,
+                    });
+                if armed {
+                    push_sfx(
+                        if third_party { SFX_YOU_WERE_MOVED } else { SFX_CHANNEL_SWITCHED },
+                        "",
+                    );
+                    // Official CLIENT_RECORDING_IN_CHANNEL: entering a
+                    // channel that already has a recorder.
+                    if channel_has_recorder(&book, to_channel, own_client) {
+                        push_sfx(SFX_NEUTRAL_RECORDING_ACTIVE, "recorder in channel");
+                    }
+                }
+            } else if armed {
+                let was_own = from_channel == own_channel;
+                let now_own = Some(to_channel) == own_channel;
+                if was_own && !now_own {
+                    // Left our channel: moved by an admin or on their own
+                    // (kicks arrive as leftview → MemberLeft; the dedupe
+                    // windows swallow the double report).
+                    let sound = if third_party {
+                        SFX_NEUTRAL_MOVED_AWAY
+                    } else {
+                        SFX_NEUTRAL_AWAY_FROM_CURRENT
+                    };
+                    if !recent.sfx_dedupe(mid) {
+                        push_sfx(sound, &nickname);
+                    }
+                    let kind = if third_party { 1 } else { 0 };
+                    if !recent.chat_dedupe(mid) {
+                        let inv = invoker_name_by_id(&book, invoker_id, kind);
+                        STATE
+                            .lock()
+                            .pending_events
+                            .push_back(TsEvent::ClientLeaveChannel {
+                                client_id: mid as u32,
+                                nickname: nickname.clone(),
+                                kind,
+                                invoker: inv,
+                            });
+                    }
+                } else if !was_own && now_own {
+                    let reason = if third_party { 2 } else { 1 };
+                    if !recent.chat_dedupe(mid) {
+                        STATE
+                            .lock()
+                            .pending_events
+                            .push_back(TsEvent::ClientEnterChannel {
+                                client_id: mid as u32,
+                                nickname: nickname.clone(),
+                                reason,
+                            });
+                    }
+                    if !recent.sfx_dedupe(mid) {
+                        push_sfx(
+                            if third_party {
+                                SFX_NEUTRAL_MOVED_TO_CURRENT
                             } else {
-                                err_text.clone()
-                            };
-                            // A rejected request never streams rows — the
-                            // exchange is over without a finished marker.
-                            !res.is_ok()
-                        }
-                        None => false,
-                    }
-                };
-                // Finalize OUTSIDE the lock: schedule_ft_list_finish locks
-                // FT_LISTS itself, and parking_lot mutexes are not
-                // reentrant — calling it under the lock freezes the
-                // connection event loop for good.
-                if list_finalize_now {
-                    schedule_ft_list_finish(handle.0);
-                }
-            }
-            StreamItem::FiletransferFailed(handle, err) => {
-                // Carries the transfer status from notifystatusfiletransfer.
-                // Status Ok confirms an upload; any other status (or a TCP
-                // level failure) fails the matching task. Downloads decide
-                // their own outcome in the worker — ignore Ok there so an
-                // early status cannot remove a task still transferring.
-                let ok_status = matches!(
-                    err,
-                    tsclientlib::Error::CommandError(ce)
-                        if ce.error == tsclientlib::TsError::Ok
-                );
-                let desc = match err {
-                    tsclientlib::Error::CommandError(ce) => {
-                        format!("{:?} ({:#06x})", ce.error, ce.error as i32)
-                    }
-                    other => format!("{}", other),
-                };
-                if let Some(task_id) = ft_task_id_by_client_id(handle.0) {
-                    let kind = FT_TASKS.get(&task_id).map(|t| t.kind);
-                    match kind {
-                        Some(k) if k == FT_KIND_UPLOAD && ok_status => {
-                            // Avatar upload: the status confirmation is the
-                            // success signal — announce the hash so the server
-                            // broadcasts the new avatar.
-                            if let Some(md5) =
-                                FT_TASKS.get(&task_id).and_then(|t| t.avatar_md5.clone())
-                            {
-                                publish_avatar_hash(md5);
-                            }
-                            crate::finish_ft_task(task_id, true, None);
-                        }
-                        _ => {
-                            let canceled = FT_TASKS
-                                .get(&task_id)
-                                .map(|t| t.cancel.load(Ordering::Relaxed))
-                                .unwrap_or(false);
-                            crate::finish_ft_task(
-                                task_id,
-                                false,
-                                Some(if canceled { "canceled".into() } else { desc }),
-                            );
-                        }
+                                SFX_NEUTRAL_TO_CURRENT
+                            },
+                            &nickname,
+                        );
                     }
                 }
             }
-            StreamItem::DisconnectedTemporarily(r) => {
-                // On reconnect the library replays the whole roster as fresh
-                // additions; disarm so that resync stays silent.
-                SFX_ARMED.store(false, Ordering::Relaxed);
-                // Pending directory listings will never be answered now.
-                FT_LISTS.lock().clear();
-                // Same for perm-op return codes: the server forgot them, so
-                // the awaiting UI would otherwise run into its timeout. The
-                // tokens are drained FIRST (dropping the PERM_OPS guard
-                // before locking STATE — the MessageResult arm locks in that
-                // order too), then answered with a failure.
-                let stale_perm_tokens: Vec<String> =
-                    PERM_OPS.lock().drain().map(|(_, t)| t).collect();
-                for token in stale_perm_tokens {
-                    STATE.lock().pending_events.push_back(TsEvent::PermOp {
-                        token,
-                        ok: false,
-                        error: Some("connection lost".into()),
+        }
+        UxEvent::ChannelCreated { .. } => {
+            // Only live creations land here — the initial channellist and
+            // the subscribe-all replay never emit events.
+            if armed {
+                push_sfx(SFX_CHANNEL_CREATED, "");
+            }
+            refresh_roster(&book);
+        }
+        UxEvent::ChannelUpdated { .. } => {
+            if armed {
+                push_sfx(SFX_CHANNEL_EDITED, "");
+            }
+            refresh_roster(&book);
+        }
+        UxEvent::ChannelMoved { id, parent, .. } => {
+            // Order-only moves are silent (previous behavior).
+            let cid = id.as_u64().unwrap_or(0);
+            let new_parent = parent.as_ref().and_then(|p| p.as_u64()).unwrap_or(0);
+            let prev_parent = {
+                let state = STATE.lock();
+                state
+                    .channels
+                    .iter()
+                    .find(|c| c.id as u64 == cid)
+                    .map(|c| c.parent_id as u64)
+            };
+            if armed && prev_parent != Some(new_parent) {
+                push_sfx(SFX_CHANNEL_MOVED, "");
+            }
+            refresh_roster(&book);
+        }
+        UxEvent::ChannelDeleted { .. } => {
+            if armed {
+                push_sfx(SFX_CHANNEL_DELETED, "");
+            }
+            refresh_roster(&book);
+        }
+        UxEvent::ServerUpdated { .. } => {
+            refresh_roster(&book);
+        }
+        UxEvent::TemporarilyDisconnected { reason } => {
+            // On reconnect the supervisor re-primes the whole roster as
+            // fresh events; disarm so the resync stays silent.
+            SFX_ARMED.store(false, Ordering::Relaxed);
+            // The output stream stays up during a temporary disconnect (the
+            // supervisor reconnects on its own), so the connection_lost
+            // sound plays through it normally.
+            push_sfx(SFX_CONNECTION_LOST, "temp disconnect");
+            STATE.lock().pending_events.push_back(TsEvent::Error {
+                message: format!("Temp disconnected: {}", disconnect_reason_text(&reason)),
+            });
+        }
+        UxEvent::Reconnected => {
+            // The supervisor re-primed the book already; refresh, track the
+            // possibly-new client id and re-arm after the burst.
+            let own = self_clid(session) as u32;
+            STATE.lock().own_client_id = own;
+            refresh_roster(&book);
+            RUNTIME.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if STATE.lock().connected {
+                    SFX_ARMED.store(true, Ordering::Relaxed);
+                    push_diag("sfx armed after reconnect settle");
+                }
+            });
+            return true; // renew the voice-sink subscription (new connection)
+        }
+        UxEvent::Closed { reason } => {
+            let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+            let user_initiated =
+                matches!(reason, DisconnectReason::Requested { .. });
+            if current_gen == generation && STATE.lock().connected {
+                {
+                    let mut s = STATE.lock();
+                    s.connected = false;
+                    s.pending_events.push_back(TsEvent::Disconnected {
+                        reason: disconnect_reason_text(&reason),
                     });
                 }
-                // The output stream stays up during a temporary disconnect
-                // (the library reconnects on its own), so the connection_lost
-                // sound plays through it normally.
-                push_sfx(SFX_CONNECTION_LOST, "temp disconnect");
-                STATE.lock().pending_events.push_back(TsEvent::Error {
-                    message: format!("Temp disconnected: {:?}", r),
-                });
+                if SFX_SUPPRESS_DISCONNECT.load(Ordering::Relaxed) {
+                    // Kicked/banned: the kick/ban sound just played — keep
+                    // the stream alive until it finished; no extra sound.
+                    SFX_SUPPRESS_DISCONNECT.store(false, Ordering::Relaxed);
+                    schedule_teardown_after_kick_sfx();
+                } else if !user_initiated {
+                    // Passive disconnect → connection_lost (disconnected is
+                    // reserved for explicit user exit).
+                    schedule_sfx_teardown(SFX_CONNECTION_LOST);
+                }
+                *COMMAND_TX.lock() = None;
             }
-            _ => {}
         }
-    }));
-    if let Err(e) = handle_result {
-        let msg = if let Some(s) = e.downcast_ref::<&str>() {
-            s.to_string()
-        } else if let Some(s) = e.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "unknown panic".into()
-        };
-        push_diag(&format!("event handler PANICKED: {}", msg));
+        UxEvent::IdentityLevelIncreased { level } => {
+            push_diag(&format!("identity level increased to {}", level));
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Terminates the local state after the session ended without a user
+/// request (supervisor exhausted / loop died). Sounds follow the kick/ban
+/// suppression flag.
+fn finalize_passive_disconnect(generation: u64, reason: &str) {
+    let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+    if current_gen != generation {
+        return;
+    }
+    let mut s = STATE.lock();
+    s.connected = false;
+    s.disconnect_requested = false;
+    s.pending_events.push_back(TsEvent::Disconnected {
+        reason: reason.to_string(),
+    });
+    drop(s);
+    if SFX_SUPPRESS_DISCONNECT.load(Ordering::Relaxed) {
+        SFX_SUPPRESS_DISCONNECT.store(false, Ordering::Relaxed);
+        schedule_teardown_after_kick_sfx();
+    } else {
+        schedule_sfx_teardown(SFX_CONNECTION_LOST);
+    }
+    *COMMAND_TX.lock() = None;
+}
+
+/// User-requested disconnect: queue the sound first (the handshake waits
+/// for the server's ack), then close the session.
+async fn do_disconnect(session: &Arc<Ts3Session>, generation: u64) {
+    schedule_sfx_teardown(SFX_DISCONNECTED);
+    let _ = session.disconnect(Some("leaving".to_string())).await;
+    let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+    if current_gen == generation {
+        let mut s = STATE.lock();
+        s.pending_events.push_back(TsEvent::Disconnected {
+            reason: "User disconnected".into(),
+        });
+        s.connected = false;
+        s.disconnect_requested = false;
+        drop(s);
+        *COMMAND_TX.lock() = None;
     }
 }
 
 async fn event_loop(
-    mut con: Connection,
+    session: Arc<Ts3Session>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
     generation: u64,
 ) {
     eprintln!("event_loop: started gen={}", generation);
     push_diag(&format!("event_loop: started (gen={})", generation));
     crate::EVENT_LOOP_ALIVE.store(true, Ordering::SeqCst);
+    let mut events = session.events();
+    let mut voice_rx = session.conn().voice_sink_handle().subscribe();
+    let mut recent = RecentClients::new();
     loop {
         // NOTE: no per-iteration cleanup of the "is talking" heartbeats here.
-        // This loop iterates once per event (i.e. per voice packet), and
-        // scanning a map per packet is exactly the kind of work that delays
-        // decoding past a packet's play slot; the maintenance task sweeps
-        // TALKING_CLIENTS on its 5s tick instead.
+        // The maintenance task sweeps TALKING_CLIENTS on its 5s tick — this
+        // loop runs once per voice packet and must stay cheap.
         if SWIPE_DISCONNECT.load(Ordering::SeqCst) {
             STATE.lock().disconnect_requested = true;
             SWIPE_DISCONNECT.store(false, Ordering::SeqCst);
         }
-        let do_disconnect = {
-            let state = STATE.lock();
-            state.disconnect_requested
-        };
-        if do_disconnect {
-            // Queue the disconnected sound BEFORE the disconnect handshake:
-            // the library waits for the server's reply (disconnect ack /
-            // notifyclientleftview, up to 5s) before its events stream ends,
-            // so scheduling after the wait would delay — or on a dead link
-            // nearly lose — the sound. The deferred teardown task still
-            // tears the stream down once the sound finished playing.
-            schedule_sfx_teardown(SFX_DISCONNECTED);
-            let _ = con.disconnect(DisconnectOptions::new());
-            let _ = con.events().for_each(|_| future::ready(())).await;
-            let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
-            if current_gen == generation {
-                STATE
-                    .lock()
-                    .pending_events
-                    .push_back(TsEvent::Disconnected {
-                        reason: "User disconnected".into(),
-                    });
-                STATE.lock().connected = false;
-                STATE.lock().disconnect_requested = false;
-                // File transfer bookkeeping dies with the connection: pending directory
-            // listings are gone, and active workers notice via their sockets.
-            FT_LISTS.lock().clear();
-            FT_OPS.lock().clear();
-            PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
-            *COMMAND_TX.lock() = None;
-            }
+        let do_disconnect_now = STATE.lock().disconnect_requested;
+        if do_disconnect_now {
+            do_disconnect(&session, generation).await;
             return;
         }
 
-        // 1. Process all pending commands (non-blocking)
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                Command::SendMessage {
-                    target_mode,
-                    target_cid,
-                    message,
-                } => {
-                    // target_mode follows the wire encoding: 1=Client, 2=Channel
-                    // (default), 3=Server.
-                    let (target, target_client_id) = match target_mode {
-                        1 => (
-                            tsclientlib::TextMessageTargetMode::Client,
-                            Some(ClientId(target_cid as u16)),
-                        ),
-                        3 => (tsclientlib::TextMessageTargetMode::Server, None),
-                        _ => (tsclientlib::TextMessageTargetMode::Channel, None),
-                    };
-                    let part = OutSendTextMessagePart {
-                        target,
-                        target_client_id,
-                        message: Cow::Owned(message),
-                    };
-                    // send_with_result attaches a return_code so the server's
-                    // answer (e.g. a permission rejection) resolves through
-                    // StreamItem::MessageResult instead of a bare CommandError;
-                    // TEXT_SENDS marks which return_codes are ours.
-                    let result =
-                        OutSendTextMessageMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con);
-                    if let Ok(handle) = result {
-                        TEXT_SENDS.lock().insert(handle.0);
-                        // Outbound chat sound (the server echoes the message
-                        // back; the inbound sound skips our own echoes).
-                        push_sfx(SFX_CHAT_OUTBOUND, "message sent");
-                    }
-                }
-                Command::MoveChannel {
-                    client_id,
-                    channel_id,
-                    password,
-                    token,
-                } => {
-                    // Mark the move so a server rejection (which arrives
-                    // without a return_code) can be attributed back to this
-                    // request — see the CommandError handling below. Only
-                    // remember moves of our own client: moving somebody else
-                    // must not arm the password-error attribution.
-                    if client_id as u32 == own_client_id_or_cache(&con) {
-                        STATE.lock().pending_move = Some((channel_id, Instant::now()));
-                    }
-                    // TS3 expects cpw as base64(sha1(password)); never send
-                    // plaintext over the wire.
-                    let channel_password = password
-                        .as_deref()
-                        .map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
-                        .map(Cow::Owned);
-                    let part = OutClientMovePart {
-                        client_id: ClientId(client_id),
-                        channel_id: ChannelId(channel_id),
-                        channel_password,
-                    };
-                    // A token means "report back": ride the return_code path
-                    // so the sheet gets the server's real answer (success /
-                    // insufficient permission). Without a token this stays the
-                    // legacy fire-and-forget move (used by the channel-entry
-                    // password flow for ourselves, which is already reported
-                    // through MoveRejected).
-                    let result =
-                        OutClientMoveMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con);
-                    match token {
-                        Some(t) => perm_op_send(result, &t),
-                        None => {
-                            if result.is_err() {
-                                push_diag(&format!(
-                                    "move client {}: send failed",
-                                    client_id
-                                ));
-                            }
-                        }
-                    }
-                }
-                Command::SetMuted { input, output } => {
-                    let part = OutClientUpdatePart {
-                        name: None,
-                        input_muted: if input { Some(true) } else { Some(false) },
-                        output_muted: if output { Some(true) } else { Some(false) },
-                        is_away: None,
-                        away_message: None,
-                        input_hardware_enabled: None,
-                        output_hardware_enabled: None,
-                        is_channel_commander: None,
-                        avatar_hash: None,
-                        phonetic_name: None,
-                        talk_power_request: None,
-                        talk_power_request_message: None,
-                        is_recording: None,
-                        badges: None,
-                    };
-                    let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
-                }
-                Command::SetAway { away } => {
-                    let part = OutClientUpdatePart {
-                        name: None,
-                        input_muted: None,
-                        output_muted: None,
-                        is_away: Some(away),
-                        away_message: if away {
-                            Some(Cow::Borrowed("Away"))
-                        } else {
-                            None
-                        },
-                        input_hardware_enabled: None,
-                        output_hardware_enabled: None,
-                        is_channel_commander: None,
-                        avatar_hash: None,
-                        phonetic_name: None,
-                        talk_power_request: None,
-                        talk_power_request_message: None,
-                        is_recording: None,
-                        badges: None,
-                    };
-                    let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
-                }
-                Command::SetAvatarHash { hash } => {
-                    let part = OutClientUpdatePart {
-                        name: None,
-                        input_muted: None,
-                        output_muted: None,
-                        is_away: None,
-                        away_message: None,
-                        input_hardware_enabled: None,
-                        output_hardware_enabled: None,
-                        is_channel_commander: None,
-                        avatar_hash: Some(Cow::Owned(hash)),
-                        phonetic_name: None,
-                        talk_power_request: None,
-                        talk_power_request_message: None,
-                        is_recording: None,
-                        badges: None,
-                    };
-                    let _ = OutClientUpdateMessage::new(&mut std::iter::once(part)).send(&mut con);
-                }
-                Command::DeleteAvatar { path, token } => {
-                    push_diag(&format!("avatar delete {}: {}", token, path));
-                    // 1. Announce "no avatar": client_flag_avatar present but
-                    //    EMPTY, which write_arg serializes as the bare flag
-                    //    the server itself broadcasts for avatar-less clients.
-                    //    Tracked via perm_op_send so Dart gets the server's
-                    //    real answer for the token.
-                    let part = OutClientUpdatePart {
-                        name: None,
-                        input_muted: None,
-                        output_muted: None,
-                        is_away: None,
-                        away_message: None,
-                        input_hardware_enabled: None,
-                        output_hardware_enabled: None,
-                        is_channel_commander: None,
-                        avatar_hash: Some(Cow::Borrowed("")),
-                        phonetic_name: None,
-                        talk_power_request: None,
-                        talk_power_request_message: None,
-                        is_recording: None,
-                        badges: None,
-                    };
-                    let result = OutClientUpdateMessage::new(&mut std::iter::once(part))
-                        .send_with_result(&mut con);
-                    perm_op_send(result, &token);
-                    // 2. Best-effort removal of the stored file — not tracked:
-                    //    an orphan in channel-0 storage is harmless and gets
-                    //    overwritten by the next upload.
-                    let packet = ft_delete_cmd(0, std::slice::from_ref(&path), &None);
-                    let _ = RawCmd(packet).send(&mut con);
-                }
-                Command::SendPoke { client_id, message } => {
-                    // Poke is a dedicated clientpoke request message.
-                    let part = OutClientPokeRequestPart {
-                        client_id: ClientId(client_id),
-                        message: message.into(),
-                    };
-                    let _ =
-                        OutClientPokeRequestMessage::new(&mut std::iter::once(part)).send(&mut con);
-                }
-                Command::KickClient {
-                    client_id,
-                    from_server,
-                    reason,
-                    token,
-                } => {
-                    let own_client_id = own_client_id_or_cache(&con);
-                    if client_id as u32 == own_client_id {
-                        // Self-protection: never kick ourselves even if the
-                        // UI somehow offered the action. (Dialog dismissal is
-                        // handled in the UI layer and never reaches us; an
-                        // empty reason is a deliberate no-reason kick.)
-                        push_diag("kick client: skipped (cannot kick self)");
-                        if let Some(t) = token {
-                            STATE.lock().pending_events.push_back(TsEvent::PermOp {
-                                token: t,
-                                ok: false,
-                                error: Some("cannot kick yourself".into()),
-                            });
-                        }
-                    } else {
-                        // reasonmsg is optional on the wire — an empty reason
-                        // is sent as a kick without a reason message.
-                        let part = OutClientKickPart {
-                            client_id: ClientId(client_id),
-                            reason: if from_server {
-                                tsclientlib::Reason::KickServer
-                            } else {
-                                tsclientlib::Reason::KickChannel
-                            },
-                            reason_message: if reason.is_empty() {
-                                None
-                            } else {
-                                Some(Cow::Owned(reason))
-                            },
-                        };
-                        push_diag(&format!(
-                            "kick client {} (from_server={}): sent",
-                            client_id, from_server
-                        ));
-                        let result =
-                            OutClientKickMessage::new(&mut std::iter::once(part))
-                                .send_with_result(&mut con);
-                        match token {
-                            Some(t) => perm_op_send(result, &t),
-                            None => {
-                                if result.is_err() {
-                                    push_diag(&format!(
-                                        "kick client {}: send failed",
-                                        client_id
-                                    ));
+        tokio::select! {
+            ev = events.next() => {
+                match ev {
+                    Some(ev) => {
+                        let ev = (*ev).clone();
+                        let fut = handle_univox_event(ev, &session, &mut recent, generation);
+                        match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+                            Ok(resubscribe) => {
+                                if resubscribe {
+                                    // The supervisor swapped the connection
+                                    // on a reconnect — the old sink channel
+                                    // is closed.
+                                    voice_rx = session.conn().voice_sink_handle().subscribe();
                                 }
                             }
-                        }
-                    }
-                }
-                Command::BanClient {
-                    client_id,
-                    time_seconds,
-                    reason,
-                    token,
-                } => {
-                    let own_client_id = own_client_id_or_cache(&con);
-                    if reason.is_empty() && time_seconds == 0 {
-                        push_diag("ban client: skipped (no reason / permanent-by-accident)");
-                        if let Some(t) = token {
-                            STATE.lock().pending_events.push_back(TsEvent::PermOp {
-                                token: t,
-                                ok: false,
-                                error: Some("skip: empty reason (permanent ban)".into()),
-                            });
-                        }
-                    } else if client_id as u32 == own_client_id {
-                        push_diag("ban client: skipped (cannot ban self)");
-                        if let Some(t) = token {
-                            STATE.lock().pending_events.push_back(TsEvent::PermOp {
-                                token: t,
-                                ok: false,
-                                error: Some("cannot ban yourself".into()),
-                            });
-                        }
-                    } else {
-                        let part = OutBanClientPart {
-                            client_id: ClientId(client_id),
-                            time: if time_seconds > 0 {
-                                Some(time::Duration::seconds(time_seconds as i64))
-                            } else {
-                                None // permanent ban
-                            },
-                            ban_reason: Some(Cow::Owned(reason)),
-                        };
-                        push_diag(&format!(
-                            "ban client {} ({}s): sent",
-                            client_id, time_seconds
-                        ));
-                        let result =
-                            OutBanClientMessage::new(&mut std::iter::once(part))
-                                .send_with_result(&mut con);
-                        match token {
-                            Some(t) => perm_op_send(result, &t),
-                            None => {
-                                if result.is_err() {
-                                    push_diag(&format!(
-                                        "ban client {}: send failed",
-                                        client_id
-                                    ));
-                                }
+                            Err(p) => {
+                                let msg = panic_msg(&p);
+                                eprintln!("event handler PANICKED: {}", msg);
+                                push_diag(&format!("event handler PANICKED: {}", msg));
                             }
                         }
                     }
-                }
-                // ── Channel management ───────────────────────────────────
-                Command::ChannelCreate { args, token } => {
-                    // channelcreate takes the hashed cpw form (like the move
-                    // and ft commands), never the plaintext.
-                    let hashed_password = args
-                        .password
-                        .as_deref()
-                        .map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
-                        .map(Cow::Owned);
-                    let (family_value, family_unlimited, family_inherited) =
-                        family_limits(args.max_family_clients);
-                    let part = OutChannelCreatePart {
-                        parent_id: Some(ChannelId(args.parent_id.unwrap_or(0) as u64)),
-                        name: Cow::Owned(args.name.clone().unwrap_or_default()),
-                        topic: args.topic.filter(|t| !t.is_empty()).map(Cow::Owned),
-                        description: args
-                            .description
-                            .filter(|d| !d.is_empty())
-                            .map(Cow::Owned),
-                        password: hashed_password,
-                        codec: None,
-                        codec_quality: None,
-                        max_clients: match args.max_clients {
-                            Some(n) if n > 0 => Some(n),
-                            _ => None,
-                        },
-                        max_family_clients: family_value,
-                        order: None,
-                        has_password: Some(args.password.is_some()),
-                        is_unencrypted: None,
-                        delete_delay: args.delete_delay.map(time::Duration::seconds),
-                        is_max_clients_unlimited: Some(!matches!(
-                            args.max_clients,
-                            Some(n) if n > 0
-                        )),
-                        is_max_family_clients_unlimited: family_unlimited,
-                        inherits_max_family_clients: family_inherited,
-                        phonetic_name: None,
-                        is_permanent: Some(args.is_permanent.unwrap_or(false)),
-                        is_semi_permanent: Some(args.is_semi_permanent.unwrap_or(false)),
-                        is_default: Some(args.is_default.unwrap_or(false)),
-                    };
-                    push_diag(&format!(
-                        "channel create under {}: sent",
-                        args.parent_id.unwrap_or(0)
-                    ));
-                    let result = OutChannelCreateMessage::new(&mut std::iter::once(part))
-                        .send_with_result(&mut con);
-                    perm_op_send(result, &token);
-                }
-                Command::ChannelEdit { channel_id, args, token } => {
-                    // password: None = untouched, Some("") = clear,
-                    // Some(p) = set (hashed, see ChannelCreate).
-                    let (has_password, hashed_password) = match args.password {
-                        None => (None, None),
-                        Some(ref p) if p.is_empty() => (Some(false), None),
-                        Some(ref p) => (
-                            Some(true),
-                            Some(Cow::Owned(
-                                tsproto_types::crypto::encode_password(p.as_bytes()),
-                            )),
-                        ),
-                    };
-                    let (family_value, family_unlimited, family_inherited) =
-                        family_limits(args.max_family_clients);
-                    let part = OutChannelEditPart {
-                        channel_id: ChannelId(channel_id as u64),
-                        order: args.order.map(|id| ChannelId(id as u64)),
-                        name: args.name.map(Cow::Owned),
-                        topic: args.topic.map(Cow::Owned),
-                        is_default: args.is_default,
-                        has_password,
-                        password: hashed_password,
-                        is_permanent: args.is_permanent,
-                        is_semi_permanent: args.is_semi_permanent,
-                        codec: None,
-                        codec_quality: None,
-                        needed_talk_power: args.needed_talk_power,
-                        max_clients: match args.max_clients {
-                            Some(n) if n > 0 => Some(n),
-                            _ => None,
-                        },
-                        max_family_clients: family_value,
-                        codec_latency_factor: None,
-                        is_unencrypted: None,
-                        delete_delay: args.delete_delay.map(time::Duration::seconds),
-                        is_max_clients_unlimited: match args.max_clients {
-                            Some(0) => Some(true),
-                            Some(_) => Some(false),
-                            None => None,
-                        },
-                        is_max_family_clients_unlimited: family_unlimited,
-                        inherits_max_family_clients: family_inherited,
-                        phonetic_name: None,
-                        description: args.description.map(Cow::Owned),
-                    };
-                    push_diag(&format!("channel edit {}: sent", channel_id));
-                    let result = OutChannelEditMessage::new(&mut std::iter::once(part))
-                        .send_with_result(&mut con);
-                    perm_op_send(result, &token);
-                }
-                Command::ServerEdit { args, token } => {
-                    // password: None = untouched, Some("") = clear,
-                    // Some(p) = set (hashed, same encoding as the channel
-                    // password — see ChannelCreate/ChannelEdit).
-                    let password = match args.password {
-                        None => None,
-                        Some(ref p) if p.is_empty() => Some(Cow::Borrowed("")),
-                        Some(ref p) => Some(Cow::Owned(
-                            tsproto_types::crypto::encode_password(p.as_bytes()),
-                        )),
-                    };
-                    let part = OutServerEditPart {
-                        server_id: None,
-                        name: args.name.map(Cow::Owned),
-                        welcome_message: args.welcome_message.map(Cow::Owned),
-                        max_clients: args.max_clients,
-                        password,
-                        hostmessage: None,
-                        hostmessage_mode: None,
-                        hostbanner_url: None,
-                        hostbanner_gfx_url: None,
-                        hostbanner_gfx_interval: None,
-                        hostbutton_tooltip: None,
-                        hostbutton_url: None,
-                        hostbutton_gfx_url: None,
-                        icon: None,
-                        reserved_slots: None,
-                        hostbanner_mode: None,
-                        nickname: None,
-                        max_download_bandwidth_total: None,
-                        max_upload_bandwidth_total: None,
-                        download_quota: None,
-                        upload_quota: None,
-                        antiflood_points_tick_reduce: None,
-                        antiflood_points_to_command_block: None,
-                        antiflood_points_to_ip_block: None,
-                        codec_encryption_mode: None,
-                        needed_identity_security_level: None,
-                        default_server_group: None,
-                        default_channel_group: None,
-                        default_channel_admin_group: None,
-                        complain_autoban_count: None,
-                        complain_autoban_time: None,
-                        complain_remove_time: None,
-                        min_clients_in_channel_before_forced_silence: None,
-                        priority_speaker_dimm_modificator: None,
-                        phonetic_name: None,
-                        temp_channel_default_delete_delay: None,
-                        weblist_enabled: None,
-                        log_client: None,
-                        log_query: None,
-                        log_channel: None,
-                        log_permissions: None,
-                        log_server: None,
-                        log_filetransfer: None,
-                    };
-                    push_diag("server edit: sent");
-                    let result = OutServerEditMessage::new(&mut std::iter::once(part))
-                        .send_with_result(&mut con);
-                    perm_op_send(result, &token);
-                }
-                Command::ChannelDelete {
-                    channel_id,
-                    force,
-                    token,
-                } => {
-                    let part = OutChannelDeletePart {
-                        channel_id: ChannelId(channel_id as u64),
-                        force,
-                    };
-                    push_diag(&format!("channel delete {} (force={}): sent", channel_id, force));
-                    let result = OutChannelDeleteMessage::new(&mut std::iter::once(part))
-                        .send_with_result(&mut con);
-                    perm_op_send(result, &token);
-                }
-                Command::ChannelMove {
-                    channel_id,
-                    parent_id,
-                    order,
-                    token,
-                } => {
-                    let part = OutChannelMovePart {
-                        channel_id: ChannelId(channel_id as u64),
-                        parent_id: ChannelId(parent_id as u64),
-                        order: order.map(|id| ChannelId(id as u64)),
-                    };
-                    push_diag(&format!(
-                        "channel move {} -> {} (order {:?}): sent",
-                        channel_id, parent_id, order
-                    ));
-                    let result = OutChannelMoveMessage::new(&mut std::iter::once(part))
-                        .send_with_result(&mut con);
-                    perm_op_send(result, &token);
-                }
-                // ── Permission management ────────────────────────────────
-                Command::ServerGroupAddClient { sgid, dbid, token } => {
-                    let part = OutServerGroupAddClientPart {
-                        server_group_id: tsclientlib::ServerGroupId(sgid),
-                        client_db_id: tsclientlib::ClientDbId(dbid),
-                    };
-                    perm_op_send(
-                        OutServerGroupAddClientMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con),
-                        &token,
-                    );
-                }
-                Command::ServerGroupDelClient { sgid, dbid, token } => {
-                    let part = OutServerGroupDelClientPart {
-                        server_group_id: tsclientlib::ServerGroupId(sgid),
-                        client_db_id: tsclientlib::ClientDbId(dbid),
-                    };
-                    perm_op_send(
-                        OutServerGroupDelClientMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con),
-                        &token,
-                    );
-                }
-                Command::ChannelGroupSet { cgid, cid, dbid, token } => {
-                    // `channelgroupaddclient` is not declared in the vendored
-                    // tsdeclarations — build the packet by hand (same pattern
-                    // as the ft commands).
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "channelgroupaddclient",
-                    );
-                    packet.write_arg("cgid", &cgid);
-                    packet.write_arg("cid", &cid);
-                    packet.write_arg("cldbid", &dbid);
-                    perm_op_send(RawCmd(packet).send_with_result(&mut con), &token);
-                }
-                Command::ChannelGroupClear { cid, dbid, token } => {
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "channelgroupdelclient",
-                    );
-                    packet.write_arg("cid", &cid);
-                    packet.write_arg("cldbid", &dbid);
-                    perm_op_send(RawCmd(packet).send_with_result(&mut con), &token);
-                }
-                Command::GrantChannelPerm { cid, dbid, permsid, value, token } => {
-                    let part = OutChannelClientAddPermPart {
-                        channel_id: tsclientlib::ChannelId(cid as u64),
-                        client_db_id: tsclientlib::ClientDbId(dbid),
-                        permission_id: None,
-                        permission_name_id: Some(Cow::Owned(permsid)),
-                        permission_value: value,
-                    };
-                    perm_op_send(
-                        OutChannelClientAddPermMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con),
-                        &token,
-                    );
-                }
-                Command::RevokeChannelPerm { cid, dbid, permsid, token } => {
-                    let part = OutChannelClientDelPermPart {
-                        channel_id: tsclientlib::ChannelId(cid as u64),
-                        client_db_id: tsclientlib::ClientDbId(dbid),
-                        permission_id: None,
-                        permission_name_id: Some(Cow::Owned(permsid)),
-                    };
-                    perm_op_send(
-                        OutChannelClientDelPermMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con),
-                        &token,
-                    );
-                }
-                Command::GrantServerPerm { dbid, permsid, value, token } => {
-                    // Server-wide permission (`clientaddperm`): applies to the
-                    // client everywhere, not just one channel.
-                    let part = OutClientAddPermPart {
-                        client_db_id: tsclientlib::ClientDbId(dbid),
-                        permission_id: None,
-                        permission_name_id: Some(Cow::Owned(permsid)),
-                        permission_value: value,
-                        permission_skip: false,
-                    };
-                    perm_op_send(
-                        OutClientAddPermMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con),
-                        &token,
-                    );
-                }
-                Command::RevokeServerPerm { dbid, permsid, token } => {
-                    let part = OutClientDelPermPart {
-                        client_db_id: tsclientlib::ClientDbId(dbid),
-                        permission_id: None,
-                        permission_name_id: Some(Cow::Owned(permsid)),
-                    };
-                    perm_op_send(
-                        OutClientDelPermMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con),
-                        &token,
-                    );
-                }
-                Command::RefreshGroups => {
-                    let _ = OutServerGroupListRequestMessage::new().send(&mut con);
-                    let _ = OutChannelGroupListRequestMessage::new().send(&mut con);
-                    push_diag("perm: re-requested server/channel group lists");
-                }
-                Command::UsePrivilegeKey { token, op_token } => {
-                    // Redeem a privilege key after connecting (`privilegekeyuse`
-                    // — the same command the official client sends for
-                    // "Use Privilege Key"; on success the server answers with
-                    // `notifytokenused`).
-                    let part = OutPrivilegeKeyUsePart { token: token.into() };
-                    perm_op_send(
-                        OutPrivilegeKeyUseMessage::new(&mut std::iter::once(part))
-                            .send_with_result(&mut con),
-                        &op_token,
-                    );
-                }
-                Command::OwnPermList => {
-                    // (Re-)request our own directly-assigned permissions.
-                    let (own_id, own_dbid) = {
-                        let state = STATE.lock();
-                        let own_dbid = state
-                            .clients
-                            .iter()
-                            .find(|c| c.id as u32 == state.own_client_id)
-                            .map(|c| c.database_id)
-                            .unwrap_or(0);
-                        (state.own_client_id, own_dbid)
-                    };
-                    if own_dbid == 0 {
-                        push_diag(&format!(
-                            "own clientpermlist: database id unknown yet (own_id={})",
-                            own_id
-                        ));
-                    } else {
-                        let part = OutClientPermListRequestPart {
-                            client_db_id: tsclientlib::ClientDbId(own_dbid),
-                        };
-                        let _ = OutClientPermListRequestMessage::new(&mut std::iter::once(part))
-                            .send(&mut con);
-                        push_diag("own clientpermlist: requested");
+                    None => {
+                        // The event stream ended: the supervisor exhausted
+                        // its attempts (Closed was delivered) or the session
+                        // was dropped.
+                        eprintln!(
+                            "event_loop: event stream ended (gen={})",
+                            generation
+                        );
+                        finalize_passive_disconnect(generation, "Connection closed by server");
+                        return;
                     }
                 }
-                Command::FtList { cid, path, password, token } => {
-                    // Hand-built so `cpw` is omitted for unlocked channels
-                    // (see RawCmd above).
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "ftgetfilelist",
-                    );
-                    packet.write_arg("cid", &cid);
-                    packet.write_arg("cpw", &encoded_cpw(&password));
-                    packet.write_arg("path", &path);
-                    push_diag(&format!("ft list {}: request cid={} path={}", token, cid, path));
-                    push_wire_diag(&format!("list {}", token), &packet);
-                    match RawCmd(packet).send_with_result(&mut con) {
-                        Ok(handle) => {
-                            // Marks the point after the send: if the next
-                            // log line is missing, the loop died inside the
-                            // send itself rather than in the reply handling.
-                            push_diag(&format!(
-                                "ft list {}: sent (rc={})",
-                                token, handle.0
-                            ));
-                            let mut lists = FT_LISTS.lock();
-                            lists.insert(
-                                handle.0,
-                                PendingFtList {
-                                    token,
-                                    entries: Vec::new(),
-                                    created: Instant::now(),
-                                    cid,
-                                    path,
-                                    result_seen: false,
-                                    result_ok: false,
-                                    result_error: None,
-                                    finished_seen: false,
-                                    finalize_scheduled: false,
-                                },
-                            );
-                            // Safety valve: drop unanswered pendings after
-                            // half a minute (normally every request gets its
-                            // trailing error frame).
-                            let stale: Vec<u16> = lists
-                                .iter()
-                                .filter(|(_, p)| p.created.elapsed() > Duration::from_secs(30))
-                                .map(|(k, _)| *k)
-                                .collect();
-                            for k in stale {
-                                lists.remove(&k);
-                            }
-                        }
-                        Err(e) => {
-                            push_diag(&format!("ft list {}: send failed: {}", token, e));
-                            STATE
-                                .lock()
-                                .pending_events
-                                .push_back(TsEvent::FtListing {
-                                    token,
-                                    entries: vec![],
-                                    error: Some(format!("{}", e)),
-                                });
-                        }
-                    }
+            }
+            v = voice_rx.recv() => match v {
+                Ok(vd) => on_voice_data(vd),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // The connection object was swapped; the Reconnected
+                    // event renews the subscription.
+                    continue;
                 }
-                Command::FtCreateDir { cid, dirname, password, token } => {
-                    push_diag(&format!("ft mkdir {}: dirname={}", token, dirname));
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "ftcreatedir",
-                    );
-                    packet.write_arg("cid", &cid);
-                    packet.write_arg("cpw", &encoded_cpw(&password));
-                    packet.write_arg("dirname", &dirname);
-                    push_wire_diag(&format!("mkdir {}", token), &packet);
-                    match RawCmd(packet).send_with_result(&mut con) {
-                        Ok(handle) => {
-                            FT_OPS.lock().insert(handle.0, crate::PendingFtOp { token });
-                        }
-                        Err(e) => {
-                            push_diag(&format!("ft mkdir {}: send failed: {}", token, e));
-                            STATE.lock().pending_events.push_back(TsEvent::FtOp {
-                                token,
-                                ok: false,
-                                error: Some(format!("{}", e)),
-                            });
+            },
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { return };
+                let fut = handle_command(cmd, &session, generation);
+                match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+                    Ok(exit) => {
+                        if exit {
+                            return;
                         }
                     }
-                }
-                Command::FtDelete { cid, names, password, token } => {
-                    push_diag(&format!("ft delete {}: {} path(s)", token, names.len()));
-                    // Every deleted entry is one part of a single ftdeletefile.
-                    let packet = ft_delete_cmd(cid, &names, &password);
-                    push_wire_diag(&format!("delete {}", token), &packet);
-                    match RawCmd(packet).send_with_result(&mut con) {
-                        Ok(handle) => {
-                            FT_OPS.lock().insert(handle.0, crate::PendingFtOp { token });
-                        }
-                        Err(e) => {
-                            push_diag(&format!("ft delete {}: send failed: {}", token, e));
-                            STATE.lock().pending_events.push_back(TsEvent::FtOp {
-                                token,
-                                ok: false,
-                                error: Some(format!("{}", e)),
-                            });
-                        }
-                    }
-                }
-                Command::FtDownload { cid, path, password, task_id } => {
-                    push_diag(&format!(
-                        "ft download task={} cid={} path={}",
-                        task_id, cid, path
-                    ));
-                    // Hand-built ftinitdownload (cpw omitted when absent, own
-                    // transfer id — see FT_CLIENT_FT).
-                    let ftid = FT_CLIENT_FT.fetch_add(1, Ordering::SeqCst);
-                    if let Some(t) = FT_TASKS.get_mut(&task_id) {
-                        t.client_ft_id.store(ftid, Ordering::Relaxed);
-                    }
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "ftinitdownload",
-                    );
-                    packet.write_arg("clientftfid", &ftid);
-                    packet.write_arg("name", &path);
-                    packet.write_arg("cid", &cid);
-                    packet.write_arg("cpw", &encoded_cpw(&password));
-                    packet.write_arg("seekpos", &0u64);
-                    packet.write_arg("proto", &1u8);
-                    push_wire_diag(&format!("download task={}", task_id), &packet);
-                    match RawCmd(packet).send_with_result(&mut con) {
-                        Ok(handle) => {
-                            FT_TASK_BY_RC.lock().insert(handle.0, task_id);
-                        }
-                        Err(e) => {
-                            crate::finish_ft_task(task_id, false, Some(format!("{}", e)));
-                        }
-                    }
-                }
-                Command::FtUpload { cid, path, password, task_id } => {
-                    push_diag(&format!(
-                        "ft upload task={} cid={} path={}",
-                        task_id, cid, path
-                    ));
-                    let total = FT_TASKS
-                        .get(&task_id)
-                        .map(|t| t.total.load(std::sync::atomic::Ordering::Relaxed))
-                        .unwrap_or(0);
-                    let ftid = FT_CLIENT_FT.fetch_add(1, Ordering::SeqCst);
-                    if let Some(t) = FT_TASKS.get_mut(&task_id) {
-                        t.client_ft_id.store(ftid, Ordering::Relaxed);
-                    }
-                    let mut packet = OutCommand::new(
-                        Direction::C2S,
-                        Flags::empty(),
-                        PacketType::Command,
-                        "ftinitupload",
-                    );
-                    packet.write_arg("clientftfid", &ftid);
-                    packet.write_arg("name", &path);
-                    packet.write_arg("cid", &cid);
-                    packet.write_arg("cpw", &encoded_cpw(&password));
-                    packet.write_arg("size", &total);
-                    packet.write_arg("overwrite", &1u8);
-                    packet.write_arg("resume", &0u8);
-                    packet.write_arg("proto", &1u8);
-                    push_wire_diag(&format!("upload task={}", task_id), &packet);
-                    match RawCmd(packet).send_with_result(&mut con) {
-                        Ok(handle) => {
-                            FT_TASK_BY_RC.lock().insert(handle.0, task_id);
-                        }
-                        Err(e) => {
-                            crate::finish_ft_task(task_id, false, Some(format!("{}", e)));
-                        }
-                    }
-                }
-                Command::Disconnect => {
-                    // Queue the disconnected sound BEFORE the disconnect
-                    // handshake (see do_disconnect above: the library waits
-                    // for the server's disconnect ack before its events
-                    // stream ends). The deferred teardown task still tears
-                    // the stream down once the sound finished playing.
-                    schedule_sfx_teardown(SFX_DISCONNECTED);
-                    let _ = con.disconnect(DisconnectOptions::new());
-                    let _ = con.events().for_each(|_| future::ready(())).await;
-                    let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
-                    if current_gen == generation {
-                        let mut s = STATE.lock();
-                        s.pending_events.push_back(TsEvent::Disconnected {
-                            reason: "User disconnected".into(),
-                        });
-                        s.connected = false;
-                        drop(s);
-                        // File transfer bookkeeping dies with the connection: pending directory
-            // listings are gone, and active workers notice via their sockets.
-            FT_LISTS.lock().clear();
-            FT_OPS.lock().clear();
-            PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
-            *COMMAND_TX.lock() = None;
-                    }
-                    return;
-                }
-                Command::SendAudio { data } => {
-                    // The pipeline decides (VAD), gains (AGC + slider) and
-                    // encodes; only the network sends happen out here, so
-                    // `con` is never borrowed under the pipeline lock.
-                    let bursts = {
-                        let mut pipe = MIC_PIPELINE.lock();
-                        pipe.push_samples(&data);
-                        let mut bursts = Vec::new();
-                        while let Some(burst) = pipe.next_burst() {
-                            let done = burst.packets.is_empty();
-                            bursts.push(burst);
-                            if done {
-                                break;
-                            }
-                        }
-                        bursts
-                    };
-                    for burst in bursts {
-                        let n = burst.packets.len();
-                        for (i, (seq, opus)) in burst.packets.into_iter().enumerate() {
-                            // Recording tap: our own uplink frames, back-filled
-                            // so keys stay strictly ascending across a preroll
-                            // burst. Skipped when the back-fill would underflow
-                            // (the very first frames of a session).
-                            let slot =
-                                PLAYED_SAMPLES.load(Ordering::Relaxed) / FRAME_SIZE;
-                            let back = (n - 1 - i) as u64;
-                            if slot >= back {
-                                recording::push_mic(slot - back, &opus);
-                            }
-                            let packet = OutAudio::new(&AudioData::C2S {
-                                id: seq,
-                                codec: CodecType::OpusVoice,
-                                data: &opus,
-                            });
-                            match con.send_audio(packet) {
-                                Ok(_) => {
-                                    crate::VOICE_ACTIVE.store(true, Ordering::Relaxed);
-                                }
-                                Err(e) => {
-                                    eprintln!("event_loop: send_audio error: {}", e)
-                                }
-                            }
-                        }
+                    Err(p) => {
+                        let msg = panic_msg(&p);
+                        eprintln!("command handler PANICKED: {}", msg);
+                        push_diag(&format!("command handler PANICKED: {}", msg));
                     }
                 }
             }
         }
-
-        // 2. Poll events — decode each audio packet to its speaker's own buffer.
-        //    Do NOT mix — each speaker's audio is kept separate.
-        // 2a. First event — up to 20ms timeout (keeps commands responsive)
-        let first = tokio::time::timeout(Duration::from_millis(20), con.events().next()).await;
-        let mut deferred: Option<StreamItem> = None;
-
-        match first {
-            Ok(Some(Ok(StreamItem::Audio(audio_buf)))) => {
-                decode_to_client_buffer(audio_buf);
-            }
-            Ok(Some(Ok(item))) => {
-                deferred = Some(item);
-            }
-            Ok(Some(Err(e))) => {
-                eprintln!("event_loop: stream error: {} (gen={})", e, generation);
-                let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
-                if current_gen == generation {
-                    STATE.lock().pending_events.push_back(TsEvent::Error {
-                        message: format!("{}", e),
-                    });
-                    // End the session visibly (Dart ignores `error` events
-                    // once connected) and let the error sound finish before
-                    // tearing the stream down.
-                    STATE.lock().connected = false;
-                    STATE.lock().pending_events.push_back(TsEvent::Disconnected {
-                        reason: format!("Connection error: {}", e),
-                    });
-                    schedule_sfx_teardown(SFX_ERROR);
-                    // File transfer bookkeeping dies with the connection: pending directory
-            // listings are gone, and active workers notice via their sockets.
-            FT_LISTS.lock().clear();
-            FT_OPS.lock().clear();
-            PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
-            *COMMAND_TX.lock() = None;
-                }
-                // The stream errored out (same termination as Ok(None)):
-                // return directly instead of falling into 2b, which would
-                // poll again and could play an extra sound.
-                return;
-            }
-            Ok(None) => {
-                eprintln!("event_loop: stream ended (server disconnect, gen={})", generation);
-                let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
-                if current_gen == generation {
-                    let mut s = STATE.lock();
-                    s.connected = false;
-                    s.pending_events.push_back(TsEvent::Disconnected {
-                        reason: "Connection closed by server".into(),
-                    });
-                    drop(s);
-                    if SFX_SUPPRESS_DISCONNECT.load(Ordering::Relaxed) {
-                        // Kicked/banned: the kick/ban sound just played — keep
-                        // the stream alive until it finished; do NOT play any
-                        // extra sound on top of it.
-                        SFX_SUPPRESS_DISCONNECT.store(false, Ordering::Relaxed);
-                        schedule_teardown_after_kick_sfx();
-                    } else {
-                        // Passive disconnect (server closed / network lost):
-                        // play the connection_lost sound, not disconnected
-                        // (disconnected is reserved for explicit user exit).
-                        schedule_sfx_teardown(SFX_CONNECTION_LOST);
-                    }
-                    // File transfer bookkeeping dies with the connection: pending directory
-            // listings are gone, and active workers notice via their sockets.
-            FT_LISTS.lock().clear();
-            FT_OPS.lock().clear();
-            PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
-            *COMMAND_TX.lock() = None;
-                }
-                // The stream is truly over — do not fall through to the
-                // drain loop (2b), which would poll the finished stream again
-                // and re-enter this branch with SUPPRESS already cleared,
-                // producing a second sound.
-                return;
-            }
-            Err(_) => {} // 20ms timeout — continue
-        }
-
-        // 2b. Drain remaining already-available events (1ms timeout)
-        let mut deferred_events: Vec<StreamItem> = Vec::new();
-        // Set when the events stream ends cleanly (Ok(None)). The actual
-        // finalization (sound decision, Disconnected event, teardown) runs
-        // AFTER 2c below, outside the `con.events()` borrow — the kicked/
-        // banned BookEvents must be processed first so SFX_SUPPRESS_DISCONNECT
-        // is up to date before we decide which sound (if any) to play.
-        let mut stream_ended = false;
-        loop {
-            match tokio::time::timeout(Duration::from_millis(1), con.events().next()).await {
-                Ok(Some(Ok(StreamItem::Audio(audio_buf)))) => {
-                    decode_to_client_buffer(audio_buf);
-                }
-                Ok(Some(Ok(item))) => {
-                    deferred_events.push(item);
-                }
-                Ok(Some(Err(e))) => {
-                    eprintln!("event_loop: stream error: {} (gen={})", e, generation);
-                    let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
-                    if current_gen == generation {
-                        STATE.lock().pending_events.push_back(TsEvent::Error {
-                            message: format!("{}", e),
-                        });
-                        STATE.lock().connected = false;
-                        STATE.lock().pending_events.push_back(TsEvent::Disconnected {
-                            reason: format!("Connection error: {}", e),
-                        });
-                        schedule_sfx_teardown(SFX_ERROR);
-                        // File transfer bookkeeping dies with the connection: pending directory
-            // listings are gone, and active workers notice via their sockets.
-            FT_LISTS.lock().clear();
-            FT_OPS.lock().clear();
-            PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
-            *COMMAND_TX.lock() = None;
-                    }
-                    // The stream errored out — return immediately instead of
-                    // looping, so no extra sound is queued on top of the
-                    // error sound.
-                    return;
-                }
-                Ok(None) => {
-                    stream_ended = true;
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-
-        // 2c. Process deferred non-audio events. This runs after 2b so the
-        // `con.events()` borrow has been released.
-        for item in deferred_events {
-            handle_event_item(item, &mut con, generation);
-        }
-        if let Some(item) = deferred {
-            handle_event_item(item, &mut con, generation);
-        }
-
-        // NEK0-DIAG: surface raw incoming commands for ft debugging.
-        drain_raw_incoming(&mut con);
-
-        // Stream ended cleanly: finalize. The deferred events above were
-        // already processed, so a kick/ban has set SFX_SUPPRESS_DISCONNECT
-        // and queued its own sound — play connection_lost only for a true
-        // passive disconnect (server closed / network lost).
-        if stream_ended {
-            let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
-            if current_gen == generation {
-                let mut s = STATE.lock();
-                s.connected = false;
-                s.pending_events.push_back(TsEvent::Disconnected {
-                    reason: "Connection closed by server".into(),
-                });
-                drop(s);
-                if SFX_SUPPRESS_DISCONNECT.load(Ordering::Relaxed) {
-                    // Kicked/banned: keep the stream so the kick/ban sound
-                    // finishes; no extra sound on top.
-                    SFX_SUPPRESS_DISCONNECT.store(false, Ordering::Relaxed);
-                    schedule_teardown_after_kick_sfx();
-                } else {
-                    // Passive disconnect → connection_lost, not disconnected
-                    // (disconnected is reserved for explicit user exit).
-                    schedule_sfx_teardown(SFX_CONNECTION_LOST);
-                }
-                // File transfer bookkeeping dies with the connection: pending directory
-            // listings are gone, and active workers notice via their sockets.
-            FT_LISTS.lock().clear();
-            FT_OPS.lock().clear();
-            PERM_OPS.lock().clear();
-            TEXT_SENDS.lock().clear();
-            *COMMAND_TX.lock() = None;
-            }
-            return;
-        }
-
     }
+}
+
+/// Password-aware `ftgetfilelist`: univox's `list_files` always sends an
+/// empty `cpw`, which fails on password-protected channels — the same
+/// notification collection is mirrored here with the hashed password. The
+/// database-empty-result quirk (a channel whose file storage row does not
+/// exist yet) answers as an empty folder, matching the previous behavior.
+async fn list_files_with_password(
+    session: &Arc<Ts3Session>,
+    cid: u64,
+    path: &str,
+    password: Option<&str>,
+) -> univox_core::error::Result<Vec<univox_ts3_proto::Row>> {
+    let cpw = password.map(hash_password).unwrap_or_default();
+    let mut notifications = session.conn().subscribe();
+    if let Err(e) = session
+        .exec(
+            Ts3Command::new("ftgetfilelist")
+                .param("cid", cid)
+                .param("cpw", cpw)
+                .param("path", path),
+        )
+        .await
+    {
+        return match ts3_error_code(&e) {
+            Some(1281) | Some(2054) => Ok(Vec::new()),
+            _ => Err(e),
+        };
+    }
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), notifications.recv()).await {
+            Ok(Some(cmd)) if cmd.name == "notifyfilelist" => out.extend(cmd.params),
+            Ok(Some(cmd)) if cmd.name == "notifyfilelistfinished" => break,
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Executes one queued command against the session. Returns true when the
+/// event loop should exit (user disconnect).
+async fn handle_command(
+    cmd: Command,
+    session: &Arc<Ts3Session>,
+    generation: u64,
+) -> bool {
+    match cmd {
+        Command::SendMessage { target_mode, target_cid, message } => {
+            let target = match target_mode {
+                1 => MessageTarget::Direct(MemberId::from_u64(target_cid)),
+                3 => MessageTarget::Server,
+                _ => MessageTarget::Channel(ChannelId::from_u64(0)),
+            };
+            let result = session
+                .send_message(target, &univox_core::message::MessageContent::Plain(message))
+                .await;
+            match result {
+                Ok(_) => {
+                    // Outbound chat sound (the server echoes the message
+                    // back; the inbound sound skips our own echoes).
+                    push_sfx(SFX_CHAT_OUTBOUND, "message sent");
+                }
+                Err(e) => {
+                    // A send the server refused (missing send permission
+                    // etc.) — tell Dart instead of dropping it silently.
+                    let reason = error_text(&e);
+                    push_diag(&format!("text message rejected: {}", reason));
+                    STATE
+                        .lock()
+                        .pending_events
+                        .push_back(TsEvent::SendFailed { error: reason });
+                }
+            }
+        }
+        Command::MoveChannel { client_id, channel_id, password, token } => {
+            let is_own = client_id as u32 == self_clid(session) as u32;
+            // TS3 expects cpw as base64(sha1(password)); never send
+            // plaintext over the wire.
+            let mut command = Ts3Command::new("clientmove")
+                .param("clid", client_id)
+                .param("cid", channel_id);
+            if let Some(pw) = password.as_deref().filter(|p| !p.is_empty()) {
+                command = command.param("cpw", hash_password(pw));
+            }
+            match session.exec(command).await {
+                Ok(_) => {
+                    if let Some(t) = token.as_deref() {
+                        push_perm_op(t, true, None);
+                    }
+                }
+                Err(e) => {
+                    if is_own && ts3_error_code(&e) == Some(TS3_ERR_CHANNEL_INVALID_PASSWORD) {
+                        STATE
+                            .lock()
+                            .pending_events
+                            .push_back(TsEvent::MoveRejected {
+                                channel_id: channel_id as u32,
+                            });
+                    }
+                    if let Some(t) = token.as_deref() {
+                        push_perm_op(t, false, Some(error_text(&e)));
+                    } else if !is_own {
+                        push_diag(&format!(
+                            "move client {}: {}",
+                            client_id,
+                            error_text(&e)
+                        ));
+                    }
+                }
+            }
+        }
+        Command::SetMuted { input, output } => {
+            let _ = session
+                .update_self(SelfUpdate {
+                    input_muted: Some(input),
+                    output_muted: Some(output),
+                    ..Default::default()
+                })
+                .await;
+        }
+        Command::SetAway { away } => {
+            let _ = session
+                .update_self(SelfUpdate {
+                    away: Some(away),
+                    away_message: if away { Some("Away".into()) } else { None },
+                    ..Default::default()
+                })
+                .await;
+        }
+        Command::SendPoke { client_id, message } => {
+            if let Err(e) = session
+                .poke(&MemberId::from_u64(client_id as u64), &message)
+                .await
+            {
+                push_diag(&format!("poke client {}: {}", client_id, error_text(&e)));
+            }
+        }
+        Command::KickClient { client_id, from_server, reason, token } => {
+            if client_id as u32 == self_clid(session) as u32 {
+                // Self-protection: never kick ourselves even if the UI
+                // somehow offered the action.
+                push_diag("kick client: skipped (cannot kick self)");
+                if let Some(t) = token {
+                    push_perm_op(&t, false, Some("cannot kick yourself".into()));
+                }
+            } else {
+                push_diag(&format!(
+                    "kick client {} (from_server={}): sent",
+                    client_id, from_server
+                ));
+                let result = session
+                    .kick_member(
+                        &MemberId::from_u64(client_id as u64),
+                        !from_server,
+                        if reason.is_empty() { None } else { Some(reason.as_str()) },
+                    )
+                    .await;
+                let ok = result.is_ok();
+                let err = result.as_ref().err().map(error_text);
+                match token {
+                    Some(t) => push_perm_op(&t, ok, err),
+                    None => {
+                        if let Some(e) = err {
+                            push_diag(&format!("kick client {}: {}", client_id, e));
+                        }
+                    }
+                }
+            }
+        }
+        Command::BanClient { client_id, time_seconds, reason, token } => {
+            if reason.is_empty() && time_seconds == 0 {
+                push_diag("ban client: skipped (no reason / permanent-by-accident)");
+                if let Some(t) = token {
+                    push_perm_op(&t, false, Some("skip: empty reason (permanent ban)".into()));
+                }
+            } else if client_id as u32 == self_clid(session) as u32 {
+                push_diag("ban client: skipped (cannot ban self)");
+                if let Some(t) = token {
+                    push_perm_op(&t, false, Some("cannot ban yourself".into()));
+                }
+            } else {
+                push_diag(&format!("ban client {} ({}s): sent", client_id, time_seconds));
+                let result = session
+                    .ban_member(
+                        &MemberId::from_u64(client_id as u64),
+                        if time_seconds > 0 {
+                            Some(Duration::from_secs(time_seconds as u64))
+                        } else {
+                            None // permanent ban
+                        },
+                        Some(reason.as_str()),
+                    )
+                    .await;
+                let ok = result.is_ok();
+                let err = result.as_ref().err().map(error_text);
+                match token {
+                    Some(t) => push_perm_op(&t, ok, err),
+                    None => {
+                        if let Some(e) = err {
+                            push_diag(&format!("ban client {}: {}", client_id, e));
+                        }
+                    }
+                }
+            }
+        }
+        // ── Channel management ───────────────────────────────────────
+        Command::ChannelCreate { args, token } => {
+            let mut extra: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+            // Family limits: -1 inherited, 0 unlimited, >0 limit — mapped to
+            // the wire flags.
+            match args.max_family_clients {
+                Some(0) => {
+                    extra.insert(
+                        "channel_flag_maxfamilyclients_unlimited".into(),
+                        "1".into(),
+                    );
+                }
+                Some(f) if f < 0 => {
+                    extra.insert(
+                        "channel_flag_inherited_maxfamilyclients".into(),
+                        "1".into(),
+                    );
+                }
+                Some(f) => {
+                    extra.insert("channel_maxfamilyclients".into(), f.to_string());
+                }
+                None => {}
+            }
+            if args.max_clients == Some(0) {
+                extra.insert("channel_flag_maxclients_unlimited".into(), "1".into());
+            }
+            let permanence = if args.is_permanent.unwrap_or(false) {
+                Permanence::Permanent
+            } else if args.is_semi_permanent.unwrap_or(false) {
+                Permanence::SemiPermanent
+            } else {
+                Permanence::Temporary
+            };
+            let options = ChannelOptions {
+                kind: univox_core::model::ChannelKind::Voice,
+                name: args.name.clone().unwrap_or_default(),
+                parent: Some(ChannelId::from_u64(args.parent_id.unwrap_or(0) as u64)),
+                topic: args.topic.clone().filter(|t| !t.is_empty()),
+                description: args.description.clone().filter(|d| !d.is_empty()),
+                password: args.password.clone().filter(|p| !p.is_empty()),
+                user_limit: args.max_clients.filter(|n| *n > 0).map(|n| n as u64),
+                default_channel: args.is_default.unwrap_or(false),
+                permanence,
+                delete_delay: args.delete_delay.map(|v| Duration::from_secs(v as u64)),
+                extra,
+            };
+            push_diag(&format!(
+                "channel create under {}: sent",
+                args.parent_id.unwrap_or(0)
+            ));
+            let result = session.create_channel(options).await;
+            match result {
+                Ok(_) => push_perm_op(&token, true, None),
+                Err(e) => push_perm_op(&token, false, Some(error_text(&e))),
+            }
+        }
+        Command::ChannelEdit { channel_id, args, token } => {
+            let mut extra: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+            match args.max_family_clients {
+                Some(0) => {
+                    extra.insert(
+                        "channel_flag_maxfamilyclients_unlimited".into(),
+                        "1".into(),
+                    );
+                }
+                Some(f) if f < 0 => {
+                    extra.insert(
+                        "channel_flag_inherited_maxfamilyclients".into(),
+                        "1".into(),
+                    );
+                }
+                Some(f) => {
+                    extra.insert("channel_maxfamilyclients".into(), f.to_string());
+                }
+                None => {}
+            }
+            match args.max_clients {
+                Some(0) => {
+                    extra.insert("channel_flag_maxclients_unlimited".into(), "1".into());
+                }
+                Some(n) if n > 0 => {
+                    extra.insert("channel_maxclients".into(), n.to_string());
+                }
+                _ => {}
+            }
+            // password: None = untouched, Some("") = clear, Some(p) = set.
+            match &args.password {
+                Some(p) if p.is_empty() => {
+                    extra.insert("channel_flag_password".into(), "0".into());
+                }
+                Some(p) => {
+                    extra.insert("channel_flag_password".into(), "1".into());
+                    extra.insert("channel_password".into(), p.clone());
+                }
+                None => {}
+            }
+            if let Some(v) = args.is_permanent {
+                extra.insert("channel_flag_permanent".into(), u8::from(v).to_string());
+            }
+            if let Some(v) = args.is_semi_permanent {
+                extra.insert(
+                    "channel_flag_semi_permanent".into(),
+                    u8::from(v).to_string(),
+                );
+            }
+            if let Some(v) = args.is_default {
+                extra.insert("channel_flag_default".into(), u8::from(v).to_string());
+            }
+            if let Some(v) = args.delete_delay {
+                extra.insert("channel_delete_delay".into(), v.to_string());
+            }
+            // Edit-only knobs ride the extra passthrough (channeledit).
+            if let Some(v) = args.needed_talk_power {
+                extra.insert("channel_needed_talk_power".into(), v.to_string());
+            }
+            if let Some(v) = args.order {
+                extra.insert("channel_order".into(), v.to_string());
+            }
+            let options = ChannelOptions {
+                kind: univox_core::model::ChannelKind::Voice,
+                name: args.name.clone().unwrap_or_default(),
+                topic: args.topic.clone(),
+                description: args.description.clone(),
+                ..Default::default()
+            };
+            push_diag(&format!("channel edit {}: sent", channel_id));
+            let result = session
+                .edit_channel(&ChannelId::from_u64(channel_id as u64), options)
+                .await;
+            match result {
+                Ok(_) => push_perm_op(&token, true, None),
+                Err(e) => push_perm_op(&token, false, Some(error_text(&e))),
+            }
+        }
+        Command::ServerEdit { args, token } => {
+            let mut command = Ts3Command::new("serveredit");
+            if let Some(v) = &args.name {
+                command = command.param("virtualserver_name", v);
+            }
+            // None = untouched, Some("") = clear, Some(p) = set (the server
+            // hashes plaintext passwords on serveredit).
+            if let Some(p) = &args.password {
+                command = command.param("virtualserver_password", p);
+            }
+            if let Some(v) = args.max_clients {
+                command = command.param("virtualserver_maxclients", v);
+            }
+            if let Some(v) = &args.welcome_message {
+                command = command.param("virtualserver_welcomemessage", v);
+            }
+            push_diag("server edit: sent");
+            let result = session.exec(command).await;
+            match result {
+                Ok(_) => push_perm_op(&token, true, None),
+                Err(e) => push_perm_op(&token, false, Some(error_text(&e))),
+            }
+        }
+        Command::ChannelDelete { channel_id, force, token } => {
+            push_diag(&format!(
+                "channel delete {} (force={}): sent",
+                channel_id, force
+            ));
+            let result = session
+                .delete_channel(&ChannelId::from_u64(channel_id as u64), force)
+                .await;
+            match result {
+                Ok(_) => push_perm_op(&token, true, None),
+                Err(e) => push_perm_op(&token, false, Some(error_text(&e))),
+            }
+        }
+        Command::ChannelMove { channel_id, parent_id, order, token } => {
+            push_diag(&format!(
+                "channel move {} -> {} (order {:?}): sent",
+                channel_id, parent_id, order
+            ));
+            // Omitting `order` appends the channel at the end (server
+            // default) — the reason this is an exec instead of the typed
+            // move_channel (which always sends order=0).
+            let mut command = Ts3Command::new("channelmove")
+                .param("cid", channel_id as u64)
+                .param("cpid", parent_id as u64);
+            if let Some(o) = order {
+                command = command.param("order", o as u64);
+            }
+            match session.exec(command).await {
+                Ok(_) => push_perm_op(&token, true, None),
+                Err(e) => push_perm_op(&token, false, Some(error_text(&e))),
+            }
+        }
+        // ── Permission management ────────────────────────────────────
+        Command::ServerGroupAddClient { sgid, dbid, token } => {
+            let result = session
+                .assign_role(&MemberId::from_u64(dbid), &univox_core::id::RoleId::from_u64(sgid))
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::ServerGroupDelClient { sgid, dbid, token } => {
+            let result = session
+                .revoke_role(&MemberId::from_u64(dbid), &univox_core::id::RoleId::from_u64(sgid))
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::ChannelGroupSet { cgid, cid, dbid, token } => {
+            let result = session
+                .exec(
+                    Ts3Command::new("channelgroupaddclient")
+                        .param("cgid", cgid)
+                        .param("cid", cid)
+                        .param("cldbid", dbid),
+                )
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::ChannelGroupClear { cid, dbid, token } => {
+            let result = session
+                .exec(
+                    Ts3Command::new("channelgroupdelclient")
+                        .param("cid", cid)
+                        .param("cldbid", dbid),
+                )
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::GrantChannelPerm { cid, dbid, permsid, value, token } => {
+            let result = session
+                .exec(
+                    Ts3Command::new("channelclientaddperm")
+                        .param("cid", cid)
+                        .param("cldbid", dbid)
+                        .param("permsid", &permsid)
+                        .param("permvalue", value),
+                )
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::RevokeChannelPerm { cid, dbid, permsid, token } => {
+            let result = session
+                .exec(
+                    Ts3Command::new("channelclientdelperm")
+                        .param("cid", cid)
+                        .param("cldbid", dbid)
+                        .param("permsid", &permsid),
+                )
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::GrantServerPerm { dbid, permsid, value, token } => {
+            let result = session
+                .exec(
+                    Ts3Command::new("clientaddperm")
+                        .param("cldbid", dbid)
+                        .param("permsid", &permsid)
+                        .param("permvalue", value),
+                )
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::RevokeServerPerm { dbid, permsid, token } => {
+            let result = session
+                .exec(
+                    Ts3Command::new("clientdelperm")
+                        .param("cldbid", dbid)
+                        .param("permsid", &permsid),
+                )
+                .await;
+            push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::RefreshGroups => {
+            refresh_group_lists(session).await;
+            push_diag("perm: re-requested server/channel group lists");
+        }
+        Command::UsePrivilegeKey { token, op_token } => {
+            // Redeem a privilege key after connecting — the same command the
+            // official client sends for "Use Privilege Key".
+            let result = session.use_privilege_key(&token).await;
+            push_perm_op(
+                &op_token,
+                result.is_ok(),
+                result.as_ref().err().map(error_text),
+            );
+        }
+        Command::OwnPermList => {
+            refresh_own_perms(session).await;
+        }
+        // ── File transfers ───────────────────────────────────────────
+        Command::FtList { cid, path, password, token } => {
+            push_diag(&format!("ft list {}: request cid={} path={}", token, cid, path));
+            let result = list_files_with_password(session, cid, &path, password.as_deref()).await;
+            match result {
+                Ok(rows) => {
+                    let entries: Vec<TsFtEntry> = rows
+                        .iter()
+                        .map(|r| TsFtEntry {
+                            name: r.get("name").unwrap_or("").to_string(),
+                            size: r.get("size").and_then(|v| v.parse().ok()).unwrap_or(0),
+                            // Unix seconds; -1 when the server sent none.
+                            datetime: r
+                                .get("datetime")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(-1),
+                            // Wire type: 0 = file, anything else = directory.
+                            is_file: r.get("type").map(|t| t == "0").unwrap_or(true),
+                        })
+                        .collect();
+                    STATE
+                        .lock()
+                        .pending_events
+                        .push_back(TsEvent::FtListing {
+                            token,
+                            entries,
+                            error: None,
+                        });
+                }
+                Err(e) => {
+                    push_diag(&format!("ft list {}: {}", token, error_text(&e)));
+                    STATE
+                        .lock()
+                        .pending_events
+                        .push_back(TsEvent::FtListing {
+                            token,
+                            entries: vec![],
+                            error: Some(error_text(&e)),
+                        });
+                }
+            }
+        }
+        Command::FtCreateDir { cid, dirname, password, token } => {
+            push_diag(&format!("ft mkdir {}: dirname={}", token, dirname));
+            let result = session
+                .create_dir(&ChannelId::from_u64(cid), &dirname, password.as_deref())
+                .await;
+            push_perm_op_like_ft(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::FtDelete { cid, names, password, token } => {
+            push_diag(&format!("ft delete {}: {} path(s)", token, names.len()));
+            // Every entry is one part of the same packet, so multiple paths
+            // die with one server round-trip; `cpw` must be present even for
+            // unlocked channels (bare empty value).
+            let cpw = password.as_deref().map(hash_password).unwrap_or_default();
+            let mut command = Ts3Command::new("ftdeletefile");
+            command.params = names
+                .iter()
+                .map(|name| {
+                    vec![
+                        ("cid".to_string(), cid.to_string()),
+                        ("cpw".to_string(), cpw.clone()),
+                        ("name".to_string(), name.clone()),
+                    ]
+                })
+                .collect();
+            let result = session.exec(command).await;
+            push_perm_op_like_ft(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        }
+        Command::FtDownload { cid, path, password, task_id } => {
+            push_diag(&format!(
+                "ft download task={} cid={} path={}",
+                task_id, cid, path
+            ));
+            match session
+                .download_file_stream(&ChannelId::from_u64(cid), &path, password.as_deref())
+                .await
+            {
+                Ok(dl) => spawn_download_task(task_id, dl),
+                Err(e) => crate::finish_ft_task(task_id, false, Some(error_text(&e))),
+            }
+        }
+        Command::FtUpload { cid, path, password, task_id } => {
+            push_diag(&format!(
+                "ft upload task={} cid={} path={}",
+                task_id, cid, path
+            ));
+            let total = FT_TASKS
+                .get(&task_id)
+                .map(|t| t.total.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            match session
+                .upload_file_stream(
+                    &ChannelId::from_u64(cid),
+                    &path,
+                    total,
+                    password.as_deref(),
+                )
+                .await
+            {
+                Ok(up) => spawn_upload_task(task_id, up, {
+                    FT_TASKS
+                        .get(&task_id)
+                        .map(|t| t.local_path.clone())
+                        .unwrap_or_default()
+                }),
+                Err(e) => crate::finish_ft_task(task_id, false, Some(error_text(&e))),
+            }
+        }
+        Command::Disconnect => {
+            do_disconnect(session, generation).await;
+            return true;
+        }
+        Command::SendAudio { data } => {
+            // The pipeline decides (VAD), gains (AGC + slider) and encodes;
+            // only the network sends happen out here, so the session is
+            // never touched under the pipeline lock.
+            let bursts = {
+                let mut pipe = MIC_PIPELINE.lock();
+                pipe.push_samples(&data);
+                let mut bursts = Vec::new();
+                while let Some(burst) = pipe.next_burst() {
+                    let done = burst.packets.is_empty();
+                    bursts.push(burst);
+                    if done {
+                        break;
+                    }
+                }
+                bursts
+            };
+            let conn = session.conn();
+            for burst in bursts {
+                let n = burst.packets.len();
+                for (i, (_seq, opus)) in burst.packets.into_iter().enumerate() {
+                    // Recording tap: our own uplink frames, back-filled so
+                    // keys stay strictly ascending across a preroll burst.
+                    // Skipped when the back-fill would underflow (the very
+                    // first frames of a session).
+                    let slot = PLAYED_SAMPLES.load(Ordering::Relaxed) / FRAME_SIZE;
+                    let back = (n - 1 - i) as u64;
+                    if slot >= back {
+                        recording::push_mic(slot - back, &opus);
+                    }
+                    // Codec byte + opus payload; the connection actor
+                    // prepends the voice sequence id.
+                    let mut content = Vec::with_capacity(1 + opus.len());
+                    content.push(univox_ts3_proto::CODEC_OPUS_VOICE);
+                    content.extend_from_slice(&opus);
+                    conn.send_voice(content, PacketType::Voice).await;
+                    crate::VOICE_ACTIVE.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// FtOp answers share the PermOp shape but are matched by ft_service.dart —
+/// same publish path, clearer call sites.
+fn push_perm_op_like_ft(token: &str, ok: bool, error: Option<String>) {
+    push_diag(&format!(
+        "ft op {}: ok={} {}",
+        token,
+        ok,
+        error.as_deref().unwrap_or("")
+    ));
+    STATE.lock().pending_events.push_back(TsEvent::FtOp {
+        token: token.to_string(),
+        ok,
+        error,
+    });
 }
 
 // ─── Disconnect ─────────────────────────────────────────────────────
@@ -4302,11 +3522,10 @@ pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect(
     }
     drop(tx);
 
-    // Fallback: if the event loop is dead, take the Connection from stash
+    // Fallback: if the event loop is dead, take the session from stash
     // and do a synchronous block_on disconnect directly.
-    if let Some(mut con) = crate::CONNECTION_STASH.lock().take() {
-        let _ = con.disconnect(DisconnectOptions::new());
-        let _ = RUNTIME.block_on(con.events().for_each(|_| future::ready(())));
+    if let Some(session) = crate::CONNECTION_STASH.lock().take() {
+        let _ = RUNTIME.block_on(session.disconnect(Some("leaving".to_string())));
         let mut s = STATE.lock();
         s.connected = false;
         s.disconnect_requested = false;
@@ -4321,10 +3540,6 @@ pub extern "system" fn Java_com_senlinjun_nek0_KeepAliveService_tsDisconnect(
             reason: "User disconnected".into(),
         });
         drop(s);
-        FT_LISTS.lock().clear();
-        FT_OPS.lock().clear();
-        PERM_OPS.lock().clear();
-        TEXT_SENDS.lock().clear();
         *COMMAND_TX.lock() = None;
         teardown_output_state();
     }
@@ -4343,9 +3558,8 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
         if let Some(tx) = tx.as_ref() {
             let _ = tx.send(crate::Command::Disconnect);
         }
-    } else if let Some(mut con) = crate::CONNECTION_STASH.lock().take() {
-        let _ = con.disconnect(DisconnectOptions::new());
-        let _ = RUNTIME.block_on(con.events().for_each(|_| future::ready(())));
+    } else if let Some(session) = crate::CONNECTION_STASH.lock().take() {
+        let _ = RUNTIME.block_on(session.disconnect(Some("leaving".to_string())));
         let mut s = STATE.lock();
         s.connected = false;
         s.disconnect_requested = false;
@@ -4374,10 +3588,6 @@ pub extern "C" fn ts_disconnect() -> *mut c_char {
             reason: "User disconnected".into(),
         });
         drop(s);
-        FT_LISTS.lock().clear();
-        FT_OPS.lock().clear();
-        PERM_OPS.lock().clear();
-        TEXT_SENDS.lock().clear();
         *COMMAND_TX.lock() = None;
         teardown_output_state();
     }
@@ -5693,6 +4903,7 @@ unsafe fn read_cstr(p: *const c_char) -> String {
 /// Maps the Dart form's max-family-clients sentinel onto the wire's three
 /// fields: None = don't send (leave untouched), -1 = inherited, 0 = unlimited,
 /// >0 = limited to that many clients.
+#[allow(dead_code)] // superseded by the wire-flag extras in the channel handlers
 fn family_limits(v: Option<i32>) -> (Option<i32>, Option<bool>, Option<bool>) {
     match v {
         None => (None, None, None),
@@ -5966,9 +5177,6 @@ fn ft_new_task(kind: u8, name: String, local_path: String, total: u64) -> u32 {
             total: std::sync::atomic::AtomicU64::new(total),
             done: std::sync::atomic::AtomicU64::new(0),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            // Placeholder until the event loop binds the protocol id.
-            client_ft_id: std::sync::atomic::AtomicU16::new(u16::MAX),
-            avatar_md5: None,
             last_event: parking_lot::Mutex::new(None),
         }),
     );
@@ -6165,23 +5373,10 @@ pub extern "C" fn ts_ft_download(
     task_id
 }
 
-/// The `/avatar_<uid>` remote path for a wire-format uid (base64), or None
-/// when the uid is malformed. Shared by avatar download / upload / delete —
-/// avatars live in the channel-0 file storage without a password.
-fn avatar_remote_path(uid: &str) -> Option<String> {
-    let raw = BASE64_STANDARD.decode(uid.as_bytes()).ok()?;
-    let path = normalize_remote_path(&format!(
-        "/avatar_{}",
-        tsproto_types::Uid::from_bytes(&raw).as_avatar()
-    ));
-    valid_remote_path(&path).then_some(path)
-}
-
 /// Starts downloading a client's avatar into `dest` (local absolute path).
-/// The remote path follows the TS3 convention: `/avatar_<uid>` where the uid
-/// is base64-decoded and hex-encoded with the alphabet [a-p]
-/// (`Uid::as_avatar`). Avatars live in the channel-0 file storage without a
-/// password. Returns the task id (>0) for progress/cancel tracking, 0 when
+/// The univox helper resolves the avatar's remote path
+/// (`/avatar_<base64HashClientUID>`, channel-0 storage) from the uid
+/// internally. Returns the task id (>0) for progress/cancel tracking, 0 when
 /// not queued (not connected, malformed uid).
 #[no_mangle]
 pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) -> u32 {
@@ -6189,90 +5384,86 @@ pub extern "C" fn ts_download_avatar(uid: *const c_char, dest: *const c_char) ->
         return 0;
     }
     let uid = unsafe { cstr_to_string(uid) };
-    let Some(path) = avatar_remote_path(&uid) else {
+    if uid.is_empty() {
         return 0;
-    };
+    }
     let dest = unsafe { cstr_to_string(dest) };
     if dest.is_empty() {
         return 0;
     }
-    let name = remote_basename(&path);
-    let task_id = ft_new_task(FT_KIND_DOWNLOAD, name.clone(), dest, 0);
+    let task_id = ft_new_task(FT_KIND_DOWNLOAD, "avatar".to_string(), dest.clone(), 0);
     ft_push_started(task_id);
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx
-            .send(Command::FtDownload {
-                cid: 0,
-                path,
-                password: None,
-                task_id,
-            })
-            .is_ok()
-        {
-            return task_id;
+    let Some(session) = crate::CONNECTION_STASH.lock().clone() else {
+        crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
+        return task_id;
+    };
+    RUNTIME.spawn(async move {
+        match session.download_avatar_by_uid(&uid).await {
+            Ok(Some(bytes)) => {
+                let written = (|| -> std::io::Result<usize> {
+                    if let Some(parent) = std::path::Path::new(&dest).parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    std::fs::write(&dest, &bytes)?;
+                    Ok(bytes.len())
+                })();
+                match written {
+                    Ok(n) => {
+                        if let Some(t) = FT_TASKS.get(&task_id) {
+                            t.total.store(n as u64, Ordering::Relaxed);
+                            t.done.store(n as u64, Ordering::Relaxed);
+                        }
+                        crate::finish_ft_task(task_id, true, None);
+                    }
+                    Err(e) => crate::finish_ft_task(task_id, false, Some(format!("{e}"))),
+                }
+            }
+            Ok(None) => crate::finish_ft_task(task_id, false, Some("no avatar set".into())),
+            Err(e) => crate::finish_ft_task(task_id, false, Some(error_text(&e))),
         }
-    }
-    // Event loop unreachable — fail the task immediately so no job hangs.
-    crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
+    });
     task_id
 }
 
-/// Starts uploading the local file `src` as our own avatar. The remote path
-/// follows the TS3 convention: `/avatar_<uid>` (uid base64-decoded, hex-
-/// encoded with the alphabet [a-p] via `Uid::as_avatar`), written into the
-/// channel-0 file storage without a password, overwriting the previous
-/// avatar. On success the transfer machinery additionally announces the
-/// file's MD5 via clientupdate (`client_flag_avatar`) — without that the
-/// new avatar never becomes visible. Returns the task id (>0) for
-/// progress/cancel tracking, 0 when not queued (not connected, malformed
-/// uid, missing source file).
+/// Starts uploading the local file `src` as our own avatar. univox writes
+/// the file into the channel-0 storage under `/avatar_<hash>` AND announces
+/// the MD5 via clientupdate (`client_flag_avatar`) — without the announce
+/// the new avatar never becomes visible to other clients. Returns the task
+/// id (>0) for progress/cancel tracking, 0 when not queued (not connected,
+/// missing source file).
 #[no_mangle]
 pub extern "C" fn ts_upload_avatar(uid: *const c_char, src: *const c_char) -> u32 {
+    let _ = uid; // univox announces under the session's own identity
     if !ft_ready() || src.is_null() {
         return 0;
     }
-    let uid = unsafe { cstr_to_string(uid) };
-    let Some(path) = avatar_remote_path(&uid) else {
-        return 0;
-    };
     let src = unsafe { cstr_to_string(src) };
     let meta = std::fs::metadata(&src);
     // Only existing local files are accepted.
     if src.is_empty() || meta.as_ref().map(|m| !m.is_file()).unwrap_or(true) {
         return 0;
     }
-    // Hash BEFORE queueing: the announced hash must match the uploaded
-    // bytes, and Dart must not touch the file between the two.
-    let md5 = match md5_file_hex(&src) {
-        Ok(md5) => md5,
-        Err(_) => return 0,
-    };
     let total = meta.map(|m| m.len()).unwrap_or(0);
-    let name = remote_basename(&path);
-    let task_id = ft_new_task(FT_KIND_UPLOAD, name.clone(), src.clone(), total);
-    if let Some(mut t) = FT_TASKS.get_mut(&task_id) {
-        // Still exclusively held in the map — no worker has touched it yet.
-        if let Some(task) = Arc::get_mut(&mut t) {
-            task.avatar_md5 = Some(md5);
-        }
-    }
+    let task_id = ft_new_task(FT_KIND_UPLOAD, "avatar".to_string(), src.clone(), total);
     ft_push_started(task_id);
-    let tx = COMMAND_TX.lock();
-    if let Some(tx) = tx.as_ref() {
-        if tx
-            .send(Command::FtUpload {
-                cid: 0,
-                path,
-                password: None,
-                task_id,
-            })
-            .is_ok()
-        {
-            return task_id;
+    let Some(session) = crate::CONNECTION_STASH.lock().clone() else {
+        crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
+        return task_id;
+    };
+    RUNTIME.spawn(async move {
+        match std::fs::read(&src) {
+            Ok(data) => match session.upload_avatar(&data).await {
+                Ok(()) => {
+                    if let Some(t) = FT_TASKS.get(&task_id) {
+                        t.done.store(data.len() as u64, Ordering::Relaxed);
+                    }
+                    crate::finish_ft_task(task_id, true, None);
+                }
+                Err(e) => crate::finish_ft_task(task_id, false, Some(error_text(&e))),
+            },
+            Err(e) => crate::finish_ft_task(task_id, false, Some(format!("{e}"))),
         }
-    }
-    crate::finish_ft_task(task_id, false, Some("event loop unavailable".into()));
+    });
     task_id
 }
 
@@ -6322,7 +5513,7 @@ pub extern "C" fn ts_ft_upload(
 
 /// Clears our own avatar: announces an EMPTY `client_flag_avatar` (the
 /// server broadcasts "no avatar" and every client drops the image) and
-/// best-effort removes the stored `/avatar_<uid>` file from the channel-0
+/// best-effort removes the stored `/avatar_<hash>` file from the channel-0
 /// storage. The Dart caller receives the server's real answer for the
 /// announce via the `perm_op` event for `token`; the file removal is not
 /// tracked (an orphan is harmless and overwritten by the next upload).
@@ -6333,21 +5524,42 @@ pub extern "C" fn ts_delete_avatar(uid: *const c_char, token: *const c_char) -> 
         return 0;
     }
     let uid = unsafe { cstr_to_string(uid) };
-    let Some(path) = avatar_remote_path(&uid) else {
+    if uid.is_empty() {
         return 0;
-    };
+    }
     let token = unsafe { cstr_to_string(token) };
     if token.is_empty() {
         return 0;
     }
-    let tx = COMMAND_TX.lock();
-    match tx
-        .as_ref()
-        .map(|tx| tx.send(Command::DeleteAvatar { path, token }))
-    {
-        Some(Ok(())) => 1,
-        _ => 0,
-    }
+    let Some(session) = crate::CONNECTION_STASH.lock().clone() else {
+        return 0;
+    };
+    RUNTIME.spawn(async move {
+        // Resolve the stored avatar path: uid → database id → clientinfo's
+        // base64HashClientUID → /avatar_<hash>.
+        let path = (|| async {
+            let dbid = session.dbid_from_uid(&uid).await.ok().flatten()?;
+            let info = session.client_db_info(&dbid).await.ok()?;
+            let hash = info.get("client_base64HashClientUID")?.to_string();
+            Some(univox_ts3::avatar_path(&hash))
+        })()
+        .await;
+        let Some(path) = path else {
+            push_perm_op(&token, false, Some("cannot resolve avatar path".into()));
+            return;
+        };
+        push_diag(&format!("avatar delete {}: {}", token, path));
+        // 1. Announce "no avatar" (tracked so Dart sees the server answer).
+        let result = session
+            .exec(Ts3Command::new("clientupdate").param("client_flag_avatar", ""))
+            .await;
+        push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
+        // 2. Best-effort removal — not tracked.
+        let _ = session
+            .delete_file(&ChannelId::from_u64(0), &path)
+            .await;
+    });
+    1
 }
 
 /// Requests cancellation of an active transfer (cooperative flag).
@@ -6601,18 +5813,7 @@ mod tests {
         assert!(!MIC_RESTART_REQUESTED.load(Ordering::Relaxed));
     }
 
-    // ─── Return code / path parsing ─────────────────────────────────
-
-    #[test]
-    fn parses_return_codes() {
-        assert_eq!(parse_return_code("12"), Some(12));
-        // "cmd:id" — the id after the last colon is the handle.
-        assert_eq!(parse_return_code("12:5"), Some(5));
-        assert_eq!(parse_return_code("7:3:9"), Some(9));
-        assert_eq!(parse_return_code(""), None);
-        assert_eq!(parse_return_code("abc"), None);
-        assert_eq!(parse_return_code("12:xyz"), None);
-    }
+    // ─── Remote path parsing ────────────────────────────────────────
 
     #[test]
     fn normalizes_remote_paths() {
@@ -6800,52 +6001,48 @@ mod tests {
 
     // ─── Chat-log notice reason/kind mapping ────────────────────────
 
-    #[test]
-    fn enter_view_reason_maps_connect_moved_kicked() {
-        use tsclientlib::Reason;
-        assert_eq!(enter_view_reason(Some(Reason::None)), Some(0));
-        assert_eq!(enter_view_reason(Some(Reason::Moved)), Some(2));
-        assert_eq!(enter_view_reason(Some(Reason::KickChannel)), Some(3));
-        // The initial subscription resync and unknown reasons stay silent.
-        assert_eq!(enter_view_reason(Some(Reason::Subscription)), None);
-        assert_eq!(enter_view_reason(None), None);
+    /// Builds an enterview member whose extra carries the given raw row
+    /// keys (the wire `reasonid` rides in the member's extra map).
+    fn member_with_reasonid(reasonid: &str) -> univox_core::model::Member {
+        let mut m = univox_core::model::Member::default();
+        m.extra.insert("reasonid".into(), reasonid.into());
+        m
     }
 
     #[test]
-    fn enter_switch_reason_differs_on_self_switch() {
-        use tsclientlib::Reason;
-        // A self-switch into our channel is code 1, not the connect code 0.
-        assert_eq!(enter_switch_reason(Some(Reason::None)), Some(1));
-        assert_eq!(enter_switch_reason(Some(Reason::Moved)), Some(2));
-        assert_eq!(enter_switch_reason(Some(Reason::KickChannel)), Some(3));
-        assert_eq!(enter_switch_reason(Some(Reason::Subscription)), None);
+    fn enter_view_reason_maps_connect_moved_kicked() {
+        // Wire reasonid values: 0 = connected, 1 = moved, 4 = kicked in.
+        assert_eq!(enter_view_reason(&member_with_reasonid("0")), Some(0));
+        assert_eq!(enter_view_reason(&member_with_reasonid("1")), Some(2));
+        assert_eq!(enter_view_reason(&member_with_reasonid("4")), Some(3));
+        // The initial subscription resync (2) and unknown values stay silent.
+        assert_eq!(enter_view_reason(&member_with_reasonid("2")), None);
+        assert_eq!(enter_view_reason(&member_with_reasonid("9")), None);
+        assert_eq!(enter_view_reason(&univox_core::model::Member::default()), None);
     }
 
     #[test]
     fn leave_kind_maps_all_real_leaves() {
-        use tsclientlib::Reason;
-        assert_eq!(leave_kind(Some(Reason::Moved)), Some(1));
-        assert_eq!(leave_kind(Some(Reason::KickChannel)), Some(2));
-        assert_eq!(leave_kind(Some(Reason::LostConnection)), Some(3));
-        assert_eq!(leave_kind(Some(Reason::None)), Some(3));
-        assert_eq!(leave_kind(Some(Reason::Clientdisconnect)), Some(3));
-        assert_eq!(leave_kind(Some(Reason::KickServer)), Some(4));
-        assert_eq!(leave_kind(Some(Reason::KickServerBan)), Some(5));
+        use univox_core::model::MemberLeftReason;
+        assert_eq!(leave_kind(&MemberLeftReason::Moved { by: None }), Some(1));
+        assert_eq!(
+            leave_kind(&MemberLeftReason::ChannelKicked { by: None, message: String::new() }),
+            Some(2)
+        );
+        assert_eq!(leave_kind(&MemberLeftReason::Timeout), Some(3));
+        assert_eq!(leave_kind(&MemberLeftReason::Left), Some(3));
+        assert_eq!(leave_kind(&MemberLeftReason::Quit), Some(3));
+        assert_eq!(
+            leave_kind(&MemberLeftReason::ServerKicked { by: None, message: String::new() }),
+            Some(4)
+        );
+        assert_eq!(
+            leave_kind(&MemberLeftReason::Banned { by: None, message: String::new() }),
+            Some(5)
+        );
         // Not real leaves.
-        assert_eq!(leave_kind(Some(Reason::Subscription)), None);
-        assert_eq!(leave_kind(Some(Reason::Serverstop)), None);
-        assert_eq!(leave_kind(Some(Reason::Channelupdate)), None);
-        assert_eq!(leave_kind(None), None);
-    }
-
-    #[test]
-    fn self_move_kind_precedence_kick_beats_mover() {
-        use tsclientlib::Reason;
-        assert_eq!(self_move_kind(Some(Reason::None), false), 0);
-        assert_eq!(self_move_kind(Some(Reason::Moved), true), 1);
-        assert_eq!(self_move_kind(Some(Reason::None), true), 1);
-        // The kick code wins even if an invoker is present.
-        assert_eq!(self_move_kind(Some(Reason::KickChannel), true), 2);
-        assert_eq!(self_move_kind(Some(Reason::KickChannel), false), 2);
+        assert_eq!(leave_kind(&MemberLeftReason::Unsubscribed), None);
+        assert_eq!(leave_kind(&MemberLeftReason::ServerStop), None);
+        assert_eq!(leave_kind(&MemberLeftReason::Other("reasonid=9".into())), None);
     }
 }

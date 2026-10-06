@@ -47,8 +47,32 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   `RUNTIME`, `CONNECTION_STASH`, lock-free per-client jitter buffers, `AUDIO_STREAM` /
   `MIC_STREAM` cpal streams). `src/api.rs`: all `ts_*` FFI exports, the connection event
   loop, audio mixing.
-- `native/Cargo.toml` **patches** the tsclientlib/tsproto git deps to the vendored copy in
-  `native/local_tsclientlib/` — keep the vendored sources and git branch in sync.
+- The protocol/session engine is **univox** (`univox-core` + `univox-ts3` +
+  `univox-ts3-proto`, git deps pinned by rev in `native/Cargo.toml`). `univox-ts3` MUST
+  stay on `default-features = false`: its default `voice` feature pulls `audiopus`, and
+  a second static libopus cannot link into the cdylib next to `opus-rs` (and
+  `audiopus_sys` wants cmake on Android). Nek0 bypasses univox's PCM voice pipeline and
+  uses the raw packet API instead — receive via `UdpConnection::voice_sink_handle()`
+  (broadcast of `VoiceData::S2C{,Whisper}` = speaker clid + voice seq + raw Opus, fed
+  straight into `decode_to_client_buffer`), send via `conn.send_voice([codec byte] ++
+  opus)` from the mic pipeline (`PacketType::Voice`; the univox actor owns the C2S seq).
+- Connection lifecycle lives in `native/src/api.rs`: `do_connect` parses the address
+  (invite links/TSDNS via `univox_ts3::address`), converts Dart's stored identity JSON
+  (`{key, counter, max_counter}` — tsclientlib/tsproto shape, kept for storage
+  compatibility) via `Identity::from_tsclientlib_json`, connects with
+  `Ts3ConnectOptions { server_password, privilege_key, upgrade_identity_to: 24 }`, then
+  writes the possibly-upgraded identity back with `to_tsclientlib_json()`. One tokio
+  task per connection generation drains `session.events()` (unified events:
+  Member*/Channel*/MessageCreated/Closed ...), the raw voice broadcast, and the
+  `COMMAND_TX` command queue via `tokio::select!`. `RecentClients` (2 s windows)
+  dedupes the up-to-three events one channel transition produces (clientmoved +
+  leftview + enterview). Permission hint bits in the roster JSON are computed
+  best-effort from our own `clientpermlist` (univox does not model hints). Group
+  lists and own perms are fetched with plain execs at connect and on
+  `Command::RefreshGroups`/`OwnPermList`; file transfer runs on univox's streaming
+  `FileDownload`/`FileUpload` handles (password-aware `ftgetfilelist`/`ftdeletefile`
+  are exec'd by hand — univox's `list_files`/`delete_file` send no `cpw`).
+  `session.identity()` is the post-connect identity; persist it after every connect.
 - `lib/services/ts_ffi.dart` — FFI bindings. Rust-returned strings MUST be freed via
   `ts_free_string` (the `_ptrToString` helper does this; use it for any new FFI functions).
 - Event flow: Dart polls `TsNative.pollEvents()` on a 200ms `Timer.periodic`; Rust pushes
@@ -94,7 +118,10 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   Both paths converge on the mic pipeline (`native/src/mic_pipeline.rs`, global
   `MIC_PIPELINE` on its OWN mutex — never take `STATE.lock()` for it): per 20 ms frame
   RNNoise speech probability (via pure-Rust `nnnoiseless`; two 10 ms sub-frames, max;
-  first frame after reset is a bypass warm-up) → optional RNNoise denoise → speech-gated
+  first frame after reset is a bypass warm-up; the model is 16-bit-PCM domain on BOTH
+  ends — input scaled ×32768 in, denoised output ÷32768 back to ±1, a missing divide
+  once made denoise sound like full-scale electrical buzz) → optional RNNoise denoise →
+  speech-gated
   AGC (`native/src/agc.rs`, gain frozen in silence, persisted per input device in
   `AGC_MEMORY`) → mic gain + whole-frame peak limiter (0.99, no per-sample clipping) →
   VAD gate (`native/src/vad.rs`) → Opus encode. While NOT connected the frames still
@@ -118,11 +145,16 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   because bare ALSA `default` bypasses PipeWire when `pipewire-alsa` is not installed.
 - The VAD is TeamSpeak-style: three modes (`auto` = ML probability only, `gate` = dB
   volume only, `hybrid` = both, default), dB activation level (default −46 dBFS ≈ the
-  old linear 0.005), two-threshold hysteresis, 2-frame onset confirmation that does NOT
+  old linear 0.005), two-threshold hysteresis, an onset confirmation run that does NOT
   evict the preroll ring (confirmation costs decision latency only), preroll flush on
-  open (`preroll_frames`, 0–8, default 3 — covers the measured RNNoise onset latency,
-  see the `rnnoise_onset_latency_is_covered_by_default_preroll` test) and a `hold_ms`
-  tail (default 200). Silence frames are dropped WITHOUT consuming sequence numbers.
+  open and a `hold_ms` tail (default 200). Defaults are TS3-aligned
+  (`vad_extrabuffersize` = 2, per-frame decision): `preroll_frames` 0–8 default 2,
+  `onset_frames` 1–5 default 1 — so a talkspurt onset is shifted by
+  (preroll + onset − 1) × 20 ms ≈ 40 ms (steady-state latency is unaffected) and the
+  softest onset may lose up to 20 ms when RNNoise ramps slowly, exactly the trade TS3
+  makes. Fast adds no onset delay; robust (preroll 5, onset 3, ≈140 ms) covers the
+  worst measured RNNoise ramp loss-free (`rnnoise_onset_latency_fits_preset_prerolls`
+  test). Silence frames are dropped WITHOUT consuming sequence numbers.
   The recording tap back-fills slots across a preroll burst (`slot − (n−1−i)`), skipped
   when the back-fill would underflow. Dart owns the settings (`lib/models/vad_settings.dart`,
   persisted under `vad_*` SharedPreferences keys) and pushes the full config JSON via

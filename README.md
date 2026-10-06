@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="README_ZH.md">中文</a> ·
-  <a href="https://github.com/ReSpeak/tsclientlib">tsclientlib</a>
+  <a href="https://github.com/senlinjun/univox">univox</a>
 </p>
 
 ---
@@ -41,7 +41,7 @@
 | Layer | Stack |
 |---|---|
 | UI | Flutter (Dart) + Riverpod |
-| Protocol & codec | Rust ([tsclientlib](https://github.com/ReSpeak/tsclientlib), `opus-rs`) |
+| Protocol & codec | Rust ([univox](https://github.com/senlinjun/univox), `opus-rs`) |
 | Playback | Rust (`cpal` — continuous output stream, silence when idle) |
 | Mic capture | Android: Kotlin (`AudioRecord`) → EventChannel → Dart → FFI → Rust<br>Windows/Linux: Rust (`cpal` input stream) → encode/send pipeline |
 | Background persistence | `KeepAliveService` (foreground service + `MediaSession`, Android) |
@@ -51,7 +51,7 @@ Flutter (Dart)                  Rust (Native .so)
 ─────────────                  ─────────────────
 lib/services/ts_ffi.dart  ←FFI→  native/src/api.rs
 lib/services/audio_service.dart  native/src/lib.rs
-lib/models/ts_state.dart         (tsclientlib + opus-rs + tokio)
+lib/models/ts_state.dart         (univox + opus-rs + tokio)
 
 Kotlin (Android only)
 ─────────────────────
@@ -241,8 +241,7 @@ Nek0/
 ├── linux/                          # Flutter Linux runner (bundles native/prebuilt/linux/)
 ├── windows/                        # Flutter Windows runner (bundles native/prebuilt/windows/)
 ├── native/                         # Rust
-│   ├── Cargo.toml                  # Patches tsclientlib/tsproto → local_tsclientlib/
-│   ├── local_tsclientlib/          # Vendored tsclientlib/tsproto sources
+│   ├── Cargo.toml                  # univox-core/ts3/ts3-proto (git, pinned rev)
 │   ├── prebuilt/                   # Desktop artifacts (gitignored, built by pre_build.py)
 │   └── src/
 │       ├── lib.rs                  # State, types, command queue
@@ -262,4 +261,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-For educational use. [tsclientlib](https://github.com/ReSpeak/tsclientlib) has its own license.
+For educational use. [univox](https://github.com/senlinjun/univox) and its dependencies keep their own licenses.
