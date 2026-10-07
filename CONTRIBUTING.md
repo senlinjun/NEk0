@@ -52,10 +52,9 @@ cd native && cargo check   # if you touched Rust
 - Rust-returned strings MUST be freed with `ts_free_string` — use the `_ptrToString`
   helper in `ts_ffi.dart` for any new FFI function.
 - The protocol/session engine is univox (`univox-core` / `univox-ts3` /
-  `univox-ts3-proto` in `native/Cargo.toml`). `univox-ts3` must keep
-  `default-features = false` — its optional audiopus codec would collide with Nek0's
-  own opus-rs inside one cdylib. (While the deps are local paths, CI cannot resolve
-  them; the swap to a pinned git rev is a prepared one-liner.)
+  `univox-ts3-proto` in `native/Cargo.toml`, pinned by rev). `univox-ts3` must
+  keep `default-features = false` — its optional audiopus codec would collide
+  with Nek0's own opus-rs inside one cdylib.
 - Playback is Rust `cpal` (continuous output stream, silence when idle); mic capture is
   Kotlin `AudioRecord` streamed to Dart over EventChannel `com.senlinjun.nek0/mic`.
 - Background persistence is a deliberate design: `KeepAliveService` (foreground service

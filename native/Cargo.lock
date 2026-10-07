@@ -2042,6 +2042,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "univox-core"
 version = "0.1.0"
+source = "git+https://github.com/senlinjun/univox.git?rev=13ab772e80f8fbc8205fadf3b24827d7c48a4944#13ab772e80f8fbc8205fadf3b24827d7c48a4944"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2055,6 +2056,7 @@ dependencies = [
 [[package]]
 name = "univox-ts3"
 version = "0.1.0"
+source = "git+https://github.com/senlinjun/univox.git?rev=13ab772e80f8fbc8205fadf3b24827d7c48a4944#13ab772e80f8fbc8205fadf3b24827d7c48a4944"
 dependencies = [
  "async-trait",
  "base64",
@@ -2077,6 +2079,7 @@ dependencies = [
 [[package]]
 name = "univox-ts3-proto"
 version = "0.1.0"
+source = "git+https://github.com/senlinjun/univox.git?rev=13ab772e80f8fbc8205fadf3b24827d7c48a4944#13ab772e80f8fbc8205fadf3b24827d7c48a4944"
 dependencies = [
  "aes",
  "base64",
