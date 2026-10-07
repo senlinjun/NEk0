@@ -15,6 +15,13 @@ use std::time::Instant;
 use tokio::runtime::Runtime;
 
 pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    // Surface univox's internal tracing (connection timeouts, unacked
+    // packets, ...) on stderr → logcat: without a subscriber every warn
+    // is silently dropped and connection drops leave no trace at all.
+    let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .try_init();
     Runtime::new().expect("Failed to create tokio runtime")
 });
 
@@ -322,7 +329,7 @@ pub struct TsChannel {
     /// so a client already sitting in the default channel can never be
     /// kicked from their channel — the UI hides that action for them.
     pub is_default: bool,
-    /// Raw `ChannelPermissionHint` bits (see tsclientlib::ChannelPermissionHint):
+    /// Raw channel permission-hint bits:
     /// JOIN=1, MODIFY=2, FORCE_DELETE=4, DELETE=8, SUBSCRIBE=16,
     /// VIEW_DESCRIPTION=32, FILE_UPLOAD=64, FILE_DOWNLOAD=128, FILE_DELETE=256,
     /// FILE_RENAME=512, FILE_BROWSE=1024, FILE_DIRECTORY_CREATE=2048,
@@ -484,7 +491,7 @@ pub struct TsClient {
     pub talk_power_granted: bool,
     /// i_client_talk_power of this client.
     pub talk_power: i32,
-    /// Raw `ClientPermissionHint` bits (see tsclientlib::ClientPermissionHint):
+    /// Raw client permission-hint bits:
     /// KICK_SERVER=1, KICK_CHANNEL=2, BAN=4, MOVE_CLIENT=8, PRIVATE_MESSAGE=16,
     /// POKE=32, WHISPER=64, COMPLAIN=128, MODIFY_PERMISSIONS=256.
     /// This is what WE may do to THIS client. 0 while no hints arrived yet.
@@ -761,6 +768,13 @@ pub struct TsConnection {
     pub server_has_password: Option<bool>,
     pub nickname: String,
     pub own_client_id: u32,
+    /// Self state the UI last set (SetMuted/SetAway commands). The univox
+    /// reconnect supervisor only restores the channel and the reconnect
+    /// handshake carries connect-time mutes, so the Reconnected handler
+    /// re-applies these via `update_self`.
+    pub self_input_muted: bool,
+    pub self_output_muted: bool,
+    pub self_away: bool,
     pub channels: Vec<TsChannel>,
     pub clients: Vec<TsClient>,
     /// All server groups on this server (from `servergrouplist`). Populated
@@ -803,6 +817,9 @@ impl TsConnection {
             server_has_password: None,
             nickname: String::new(),
             own_client_id: 0,
+            self_input_muted: false,
+            self_output_muted: false,
+            self_away: false,
             channels: Vec::new(),
             clients: Vec::new(),
             server_groups: Vec::new(),

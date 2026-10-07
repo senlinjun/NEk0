@@ -25,6 +25,9 @@ anyhow = "1"
 once_cell = "1"
 parking_lot = "0.12"
 futures = "0.3"
+# Formatter subscriber for univox's internal tracing — without it every
+# connection-level warn (timeouts, unacked packets) is silently dropped.
+tracing-subscriber = "0.3"
 # >= 0.1.33 required: earlier releases undersize the decoder's SILK work
 # buffer (w_pcm_i16 = 640 samples), so 40/60 ms SILK frames (up to 960
 # samples per channel) panic with a slice range error in release builds.
@@ -34,9 +37,6 @@ cpal = "0.15"
 dashmap = "6"
 crossbeam = "0.8"
 arc-swap = "1"
-# MD5 of the uploaded avatar file — the value sent as client_flag_avatar in
-# the clientupdate that makes the new avatar visible to everyone.
-md-5 = "0.10"
 # Pure-Rust RNNoise port: speech-probability VAD + optional denoise for the
 # mic uplink. 48 kHz / 480-sample frames, i16-range f32 input, returns the
 # frame voice probability (see native/src/vad.rs).

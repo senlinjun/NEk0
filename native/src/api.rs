@@ -23,7 +23,8 @@ use univox_core::connect::{ConnectOptions, InitialChannel};
 use univox_core::event::Event as UxEvent;
 use univox_core::id::{ChannelId, MemberId};
 use univox_core::model::{
-    ChannelOptions, DisconnectReason, MemberLeftReason, MessageTarget, Permanence,
+    ChannelOptions, ClientMoveReason, DisconnectReason, MemberLeftReason, MessageTarget,
+    Permanence,
 };
 use univox_core::session::Session as _;
 use univox_ts3::session::{self_clid, Ts3ConnectOptions, Ts3Session};
@@ -734,7 +735,12 @@ async fn do_connect(
     // Subscribe to every channel so roster updates stream in, then fill the
     // group caches and our own permission list (both are plain execs whose
     // answers are parsed and stored directly — no event-driven collection).
-    let _ = session.subscribe_all().await;
+    if let Err(e) = session.subscribe_all().await {
+        // Permission-restricted servers deny bulk subscribe — the roster
+        // then only grows with own-channel occupants. Make it visible.
+        eprintln!("subscribe_all failed: {e}");
+        push_diag(&format!("subscribe_all failed: {}", error_text(&e)));
+    }
     refresh_group_lists(&session).await;
     refresh_own_perms(&session).await;
 
@@ -746,6 +752,14 @@ async fn do_connect(
         channels.len(),
         clients.len(),
         own_id
+    );
+    // Ground truth for roster issues: where the mirror thinks we are.
+    eprintln!(
+        "do_connect: own roster entry: {:?}",
+        clients
+            .iter()
+            .find(|c| c.id as u64 == own_id as u64)
+            .map(|c| (c.nickname.clone(), c.channel_id))
     );
 
     // Server texts from initserver. The raw virtualserver_* keys are
@@ -769,6 +783,11 @@ async fn do_connect(
         state.connected = true;
         state.server_name = server.name.clone();
         state.own_client_id = own_id;
+        // A fresh connection starts unmuted and present (no initial_state is
+        // requested) — stale values from a previous session must not leak.
+        state.self_input_muted = false;
+        state.self_output_muted = false;
+        state.self_away = false;
         state.channels = channels;
         state.clients = clients;
         state.pending_events.push_back(TsEvent::Connected {
@@ -797,11 +816,19 @@ async fn do_connect(
 
     // Arm channel-event SFX after the connect-time burst (the subscribe-all
     // enterview wave) has flown by; everything before that must stay silent.
+    let settle_session = session.clone();
     RUNTIME.spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
         if STATE.lock().connected {
             SFX_ARMED.store(true, Ordering::Relaxed);
             push_diag("sfx armed after connect settle");
+            // Late roster catch-up: the clientlist dump can be denied
+            // (plain-user permission) and the enterview wave can land
+            // before Dart's event subscription — without this re-push a
+            // quiet server never re-publishes the roster, leaving the own
+            // channel unknown in the UI until the first move.
+            let book = settle_session.book();
+            refresh_roster(&book);
         }
     });
 
@@ -2406,7 +2433,11 @@ async fn handle_univox_event(
                 // "disconnected" sound must not stack on top.
                 match &reason {
                     MemberLeftReason::ChannelKicked { .. } => {
-                        push_sfx(SFX_YOU_KICKED_CHANNEL, &nickname);
+                        // The same kick can also arrive as ClientMoved —
+                        // the window dedupes the double report.
+                        if !recent.sfx_dedupe(mid) {
+                            push_sfx(SFX_YOU_KICKED_CHANNEL, &nickname);
+                        }
                     }
                     MemberLeftReason::ServerKicked { .. } => {
                         SFX_SUPPRESS_DISCONNECT.store(true, Ordering::Relaxed);
@@ -2508,10 +2539,11 @@ async fn handle_univox_event(
                 }
             }
         }
-        UxEvent::ClientMoved { member, channel, invoker } => {
+        UxEvent::ClientMoved { member, channel, invoker, reason } => {
             let mid = member.as_u64().unwrap_or(0);
             let to_channel = channel.as_u64().unwrap_or(0);
             let invoker_id = invoker.as_ref().and_then(|i| i.as_u64());
+            let kicked = matches!(reason, ClientMoveReason::ChannelKicked { .. });
             let third_party = matches!(invoker_id, Some(inv) if inv != mid && inv != 0);
             let (from_channel, nickname) = {
                 let state = STATE.lock();
@@ -2522,10 +2554,16 @@ async fn handle_univox_event(
             };
             refresh_roster(&book);
             if mid == own_client {
-                // Self move: voluntary or forced by an admin (a kick from
-                // the channel is delivered as a leftview with reasonid 4 and
-                // surfaces through MemberLeft instead).
-                let kind = if third_party { 1 } else { 0 };
+                // Self move: voluntary, forced by an admin, or a channel
+                // kick — live captures show reasonid 4 arriving on this very
+                // notification (reasonmsg + invoker attached).
+                let kind = if kicked {
+                    2
+                } else if third_party {
+                    1
+                } else {
+                    0
+                };
                 let inv = invoker_name_by_id(&book, invoker_id, kind);
                 STATE
                     .lock()
@@ -2537,10 +2575,19 @@ async fn handle_univox_event(
                         kind,
                     });
                 if armed {
-                    push_sfx(
-                        if third_party { SFX_YOU_WERE_MOVED } else { SFX_CHANNEL_SWITCHED },
-                        "",
-                    );
+                    if kicked {
+                        // A server may deliver the same kick as a leftview
+                        // too — MemberLeft plays the sound there, the
+                        // window dedupes the double report.
+                        if !recent.sfx_dedupe(mid) {
+                            push_sfx(SFX_YOU_KICKED_CHANNEL, "");
+                        }
+                    } else {
+                        push_sfx(
+                            if third_party { SFX_YOU_WERE_MOVED } else { SFX_CHANNEL_SWITCHED },
+                            "",
+                        );
+                    }
                     // Official CLIENT_RECORDING_IN_CHANNEL: entering a
                     // channel that already has a recorder.
                     if channel_has_recorder(&book, to_channel, own_client) {
@@ -2551,10 +2598,13 @@ async fn handle_univox_event(
                 let was_own = from_channel == own_channel;
                 let now_own = Some(to_channel) == own_channel;
                 if was_own && !now_own {
-                    // Left our channel: moved by an admin or on their own
-                    // (kicks arrive as leftview → MemberLeft; the dedupe
-                    // windows swallow the double report).
-                    let sound = if third_party {
+                    // Left our channel: moved by an admin, on their own, or
+                    // kicked out of it (a kick can also surface as leftview
+                    // → MemberLeft; the dedupe windows swallow the double
+                    // report).
+                    let sound = if kicked {
+                        SFX_NEUTRAL_KICKED_CH_AWAY
+                    } else if third_party {
                         SFX_NEUTRAL_MOVED_AWAY
                     } else {
                         SFX_NEUTRAL_AWAY_FROM_CURRENT
@@ -2562,7 +2612,13 @@ async fn handle_univox_event(
                     if !recent.sfx_dedupe(mid) {
                         push_sfx(sound, &nickname);
                     }
-                    let kind = if third_party { 1 } else { 0 };
+                    let kind = if kicked {
+                        2
+                    } else if third_party {
+                        1
+                    } else {
+                        0
+                    };
                     if !recent.chat_dedupe(mid) {
                         let inv = invoker_name_by_id(&book, invoker_id, kind);
                         STATE
@@ -2576,7 +2632,14 @@ async fn handle_univox_event(
                             });
                     }
                 } else if !was_own && now_own {
-                    let reason = if third_party { 2 } else { 1 };
+                    // 1 = joined on their own, 2 = moved in, 3 = kicked in.
+                    let reason = if kicked {
+                        3
+                    } else if third_party {
+                        2
+                    } else {
+                        1
+                    };
                     if !recent.chat_dedupe(mid) {
                         STATE
                             .lock()
@@ -2589,7 +2652,9 @@ async fn handle_univox_event(
                     }
                     if !recent.sfx_dedupe(mid) {
                         push_sfx(
-                            if third_party {
+                            if kicked {
+                                SFX_NEUTRAL_KICKED_CH_TO_CURRENT
+                            } else if third_party {
                                 SFX_NEUTRAL_MOVED_TO_CURRENT
                             } else {
                                 SFX_NEUTRAL_TO_CURRENT
@@ -2658,6 +2723,28 @@ async fn handle_univox_event(
             let own = self_clid(session) as u32;
             STATE.lock().own_client_id = own;
             refresh_roster(&book);
+            // The supervisor replays its last `update_self` record, but that
+            // record is replaced wholesale on every call — SetMuted followed
+            // by SetAway leaves only the away fields in it. Re-apply the full
+            // triple from our own tracking (no-op when everything is off).
+            let (input, output, away) = {
+                let s = STATE.lock();
+                (s.self_input_muted, s.self_output_muted, s.self_away)
+            };
+            if input || output || away {
+                let session = session.clone();
+                RUNTIME.spawn(async move {
+                    let _ = session
+                        .update_self(SelfUpdate {
+                            input_muted: Some(input),
+                            output_muted: Some(output),
+                            away: Some(away),
+                            away_message: if away { Some("Away".into()) } else { None },
+                            ..Default::default()
+                        })
+                        .await;
+                });
+            }
             RUNTIME.spawn(async move {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if STATE.lock().connected {
@@ -2831,46 +2918,6 @@ async fn event_loop(
     }
 }
 
-/// Password-aware `ftgetfilelist`: univox's `list_files` always sends an
-/// empty `cpw`, which fails on password-protected channels — the same
-/// notification collection is mirrored here with the hashed password. The
-/// database-empty-result quirk (a channel whose file storage row does not
-/// exist yet) answers as an empty folder, matching the previous behavior.
-async fn list_files_with_password(
-    session: &Arc<Ts3Session>,
-    cid: u64,
-    path: &str,
-    password: Option<&str>,
-) -> univox_core::error::Result<Vec<univox_ts3_proto::Row>> {
-    let cpw = password.map(hash_password).unwrap_or_default();
-    let mut notifications = session.conn().subscribe();
-    if let Err(e) = session
-        .exec(
-            Ts3Command::new("ftgetfilelist")
-                .param("cid", cid)
-                .param("cpw", cpw)
-                .param("path", path),
-        )
-        .await
-    {
-        return match ts3_error_code(&e) {
-            Some(1281) | Some(2054) => Ok(Vec::new()),
-            _ => Err(e),
-        };
-    }
-    let mut out = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(500), notifications.recv()).await {
-            Ok(Some(cmd)) if cmd.name == "notifyfilelist" => out.extend(cmd.params),
-            Ok(Some(cmd)) if cmd.name == "notifyfilelistfinished" => break,
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => break,
-        }
-    }
-    Ok(out)
-}
-
 /// Executes one queued command against the session. Returns true when the
 /// event loop should exit (user disconnect).
 async fn handle_command(
@@ -2944,15 +2991,32 @@ async fn handle_command(
             }
         }
         Command::SetMuted { input, output } => {
-            let _ = session
-                .update_self(SelfUpdate {
-                    input_muted: Some(input),
-                    output_muted: Some(output),
-                    ..Default::default()
-                })
-                .await;
+            // Record the intent before the send: the Reconnected handler
+            // re-applies it, even if this very update was lost.
+            let (prev_in, prev_out) = {
+                let mut s = STATE.lock();
+                let prev = (s.self_input_muted, s.self_output_muted);
+                s.self_input_muted = input;
+                s.self_output_muted = output;
+                prev
+            };
+            // Only the changed half goes into the clientupdate: the server
+            // echoes every included key and the MemberUpdated handler plays
+            // one sound per echoed key — sending both toggles both sounds.
+            let in_changed = input != prev_in;
+            let out_changed = output != prev_out;
+            if in_changed || out_changed {
+                let _ = session
+                    .update_self(SelfUpdate {
+                        input_muted: in_changed.then_some(input),
+                        output_muted: out_changed.then_some(output),
+                        ..Default::default()
+                    })
+                    .await;
+            }
         }
         Command::SetAway { away } => {
+            STATE.lock().self_away = away;
             let _ = session
                 .update_self(SelfUpdate {
                     away: Some(away),
@@ -3324,7 +3388,9 @@ async fn handle_command(
         // ── File transfers ───────────────────────────────────────────
         Command::FtList { cid, path, password, token } => {
             push_diag(&format!("ft list {}: request cid={} path={}", token, cid, path));
-            let result = list_files_with_password(session, cid, &path, password.as_deref()).await;
+            let result = session
+                .list_files(&ChannelId::from_u64(cid), &path, password.as_deref())
+                .await;
             match result {
                 Ok(rows) => {
                     let entries: Vec<TsFtEntry> = rows
@@ -3337,8 +3403,10 @@ async fn handle_command(
                                 .get("datetime")
                                 .and_then(|v| v.parse().ok())
                                 .unwrap_or(-1),
-                            // Wire type: 0 = file, anything else = directory.
-                            is_file: r.get("type").map(|t| t == "0").unwrap_or(true),
+                            // Wire type: 0 = directory, 1 = file (verified
+                            // against a live 3.13.8 server — univox's
+                            // create_dir_shows_in_listing test pins it).
+                            is_file: r.get("type").map(|t| t == "1").unwrap_or(true),
                         })
                         .collect();
                     STATE
@@ -3372,22 +3440,18 @@ async fn handle_command(
         }
         Command::FtDelete { cid, names, password, token } => {
             push_diag(&format!("ft delete {}: {} path(s)", token, names.len()));
-            // Every entry is one part of the same packet, so multiple paths
-            // die with one server round-trip; `cpw` must be present even for
-            // unlocked channels (bare empty value).
-            let cpw = password.as_deref().map(hash_password).unwrap_or_default();
-            let mut command = Ts3Command::new("ftdeletefile");
-            command.params = names
-                .iter()
-                .map(|name| {
-                    vec![
-                        ("cid".to_string(), cid.to_string()),
-                        ("cpw".to_string(), cpw.clone()),
-                        ("name".to_string(), name.clone()),
-                    ]
-                })
-                .collect();
-            let result = session.exec(command).await;
+            // One typed call per entry (univox deletes a single file per
+            // command); they run in order and the first failure decides the
+            // reported result.
+            let mut result: univox_core::error::Result<()> = Ok(());
+            for name in &names {
+                result = session
+                    .delete_file(&ChannelId::from_u64(cid), name, password.as_deref())
+                    .await;
+                if result.is_err() {
+                    break;
+                }
+            }
             push_perm_op_like_ft(&token, result.is_ok(), result.as_ref().err().map(error_text));
         }
         Command::FtDownload { cid, path, password, task_id } => {
@@ -5556,7 +5620,7 @@ pub extern "C" fn ts_delete_avatar(uid: *const c_char, token: *const c_char) -> 
         push_perm_op(&token, result.is_ok(), result.as_ref().err().map(error_text));
         // 2. Best-effort removal — not tracked.
         let _ = session
-            .delete_file(&ChannelId::from_u64(0), &path)
+            .delete_file(&ChannelId::from_u64(0), &path, None)
             .await;
     });
     1
