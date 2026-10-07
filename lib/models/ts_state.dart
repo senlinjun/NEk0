@@ -808,6 +808,19 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
             .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
             .toList();
         state = state.copyWith(channels: newChannels, clients: newClients);
+        // The own channel can become known only after the connect burst
+        // (the clientlist dump may be denied and the enterview wave can
+        // predate the event subscription) — re-sync the selection here,
+        // not just on moves. This also snaps the marker back to the real
+        // channel when a move attempt was rejected.
+        final own = newClients
+            .where((c) => c.id == state.ownClientId)
+            .firstOrNull;
+        if (own != null &&
+            own.channelId != 0 &&
+            own.channelId != state.selectedChannelId) {
+          state = state.copyWith(selectedChannelId: own.channelId);
+        }
         _refreshNotification();
         break;
 
