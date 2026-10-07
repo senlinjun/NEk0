@@ -241,7 +241,7 @@ Nek0/
 ├── linux/                          # Flutter Linux runner (bundles native/prebuilt/linux/)
 ├── windows/                        # Flutter Windows runner (bundles native/prebuilt/windows/)
 ├── native/                         # Rust
-│   ├── Cargo.toml                  # univox-core/ts3/ts3-proto, opus-rs, cpal, ...
+│   ├── Cargo.toml                  # univox-core/ts3/ts3-proto (git, pinned rev)
 │   ├── prebuilt/                   # Desktop artifacts (gitignored, built by pre_build.py)
 │   └── src/
 │       ├── lib.rs                  # State, types, command queue
