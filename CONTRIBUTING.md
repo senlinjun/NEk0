@@ -40,10 +40,10 @@ flutter analyze
 cd native && cargo check   # if you touched Rust
 ```
 
-- CI (`.github/workflows/ci.yml`) runs on tag pushes and enforces exactly these checks,
-  then builds the release APKs.
-- There are no Dart/Rust tests in this repo — keeping the checks above green is the
-  verification.
+- CI (`.github/workflows/ci.yml`) runs on every push (any branch or tag) and enforces
+  exactly these checks, then builds the release APKs.
+- Pure-logic tests exist on both sides: `flutter test` (models / service state
+  machines) and `cargo test --lib` in `native/`. Keep them green.
 
 ## Architecture in five bullets
 
@@ -51,8 +51,11 @@ cd native && cargo check   # if you touched Rust
   FFI exports). Dart only polls events every 200ms (`ts_ffi.dart` + `ts_state.dart`).
 - Rust-returned strings MUST be freed with `ts_free_string` — use the `_ptrToString`
   helper in `ts_ffi.dart` for any new FFI function.
-- `native/Cargo.toml` patches tsclientlib/tsproto to the vendored copy in
-  `native/local_tsclientlib/` — keep the vendored sources and the git branch in sync.
+- The protocol/session engine is univox (`univox-core` / `univox-ts3` /
+  `univox-ts3-proto` in `native/Cargo.toml`). `univox-ts3` must keep
+  `default-features = false` — its optional audiopus codec would collide with Nek0's
+  own opus-rs inside one cdylib. (While the deps are local paths, CI cannot resolve
+  them; the swap to a pinned git rev is a prepared one-liner.)
 - Playback is Rust `cpal` (continuous output stream, silence when idle); mic capture is
   Kotlin `AudioRecord` streamed to Dart over EventChannel `com.senlinjun.nek0/mic`.
 - Background persistence is a deliberate design: `KeepAliveService` (foreground service

@@ -64,8 +64,9 @@ class Server {
     fileTransferPort: fileTransferPort,
   );
 
-  /// Address with the custom voice port embedded. tsclientlib's resolver
-  /// natively understands `host:port`, `1.2.3.4:port` and `[::1]:port`, so the
+  /// Address with the custom voice port embedded. univox's address parser
+  /// (`univox_ts3::address::parse`) natively understands `host:port`,
+  /// `1.2.3.4:port` and `[::1]:port`, so the
   /// voice port only takes effect once it is part of the string we hand to the
   /// connection. The other ports are kept for reference and are not used by
   /// the NEk0 voice connection.
