@@ -54,7 +54,9 @@ cd native && cargo check   # if you touched Rust
 - The protocol/session engine is univox (`univox-core` / `univox-ts3` /
   `univox-ts3-proto` in `native/Cargo.toml`, pinned by rev). `univox-ts3` must
   keep `default-features = false` — its optional audiopus codec would collide
-  with Nek0's own opus-rs inside one cdylib.
+  with Nek0's own opus-rs inside one cdylib. univox updates land by bumping the
+  pinned rev (all three crates move together); during local univox development
+  the three can temporarily point at the local checkout instead.
 - Playback is Rust `cpal` (continuous output stream, silence when idle); mic capture is
   Kotlin `AudioRecord` streamed to Dart over EventChannel `com.senlinjun.nek0/mic`.
 - Background persistence is a deliberate design: `KeepAliveService` (foreground service

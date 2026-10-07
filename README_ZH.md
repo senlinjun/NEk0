@@ -233,7 +233,7 @@ Nek0/
 ├── linux/                          # Flutter Linux runner（打包 native/prebuilt/linux/）
 ├── windows/                        # Flutter Windows runner（打包 native/prebuilt/windows/）
 ├── native/                         # Rust
-│   ├── Cargo.toml                  # univox-core/ts3/ts3-proto(git,锁定 rev)
+│   ├── Cargo.toml                  # univox-core/ts3/ts3-proto、opus-rs、cpal 等
 │   ├── prebuilt/                   # 桌面端产物（gitignore，由 pre_build.py 构建）
 │   └── src/
 │       ├── lib.rs                  # 状态、类型、命令队列
