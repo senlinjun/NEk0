@@ -79,87 +79,138 @@ class _PositionEditScreenState extends ConsumerState<PositionEditScreen> {
         elevation: 0,
       ),
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Row(
-              children: [
-                Icon(
-                  widget.client.isTalking ? Icons.mic : Icons.person,
-                  color: widget.client.isTalking ? Colors.blue : Colors.grey,
-                  size: 20,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    widget.client.nickname,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    overflow: TextOverflow.ellipsis,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final desktop = constraints.maxWidth >= 800;
+            final plane = _buildPlane(al.positionSelf);
+            final controls = _buildControls(al, positioned);
+            if (!desktop) {
+              return ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  _buildClientHeading(),
+                  const SizedBox(height: 16),
+                  plane,
+                  const SizedBox(height: 12),
+                  controls,
+                ],
+              );
+            }
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1200),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        flex: 3,
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 640),
+                            child: plane,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 36),
+                      SizedBox(
+                        width: 300,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildClientHeading(),
+                            const SizedBox(height: 24),
+                            controls,
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            AspectRatio(
-              aspectRatio: 1,
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final padSize = constraints.biggest;
-                  void place(Offset local) => _setFromLocal(local, padSize);
-                  return GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTapDown: (d) => place(d.localPosition),
-                    onPanStart: (d) => place(d.localPosition),
-                    onPanUpdate: (d) => place(d.localPosition),
-                    child: CustomPaint(
-                      painter: _PlanePainter(
-                        x: _x,
-                        y: _y,
-                        clientLabel: widget.client.nickname,
-                        selfLabel: al.positionSelf,
-                      ),
-                    ),
-                  );
-                },
               ),
-            ),
-            const SizedBox(height: 12),
-            Center(
-              child: Text(
-                positioned
-                    ? 'x: ${_x!.toStringAsFixed(1)} m,   y: ${_y!.toStringAsFixed(1)} m'
-                    : al.positionUnset,
-                style: const TextStyle(color: Colors.grey, fontSize: 13),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Center(
-              child: OutlinedButton.icon(
-                onPressed: positioned ? () => _apply(null, null) : null,
-                icon: const Icon(Icons.restart_alt, size: 18),
-                label: Text(al.positionReset),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  disabledForegroundColor: Colors.grey,
-                  side: const BorderSide(color: Color(0xFF2A2A4A)),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              al.positionHint,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.grey, fontSize: 12),
-            ),
-          ],
+            );
+          },
         ),
       ),
     );
   }
+
+  Widget _buildClientHeading() => Row(
+    children: [
+      Icon(
+        widget.client.isTalking ? Icons.mic : Icons.person,
+        color: widget.client.isTalking ? Colors.blue : Colors.grey,
+        size: 20,
+      ),
+      const SizedBox(width: 8),
+      Expanded(
+        child: Text(
+          widget.client.nickname,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    ],
+  );
+
+  Widget _buildPlane(String selfLabel) => AspectRatio(
+    aspectRatio: 1,
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final padSize = constraints.biggest;
+        void place(Offset local) => _setFromLocal(local, padSize);
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (d) => place(d.localPosition),
+          onPanStart: (d) => place(d.localPosition),
+          onPanUpdate: (d) => place(d.localPosition),
+          child: CustomPaint(
+            painter: _PlanePainter(
+              x: _x,
+              y: _y,
+              clientLabel: widget.client.nickname,
+              selfLabel: selfLabel,
+            ),
+          ),
+        );
+      },
+    ),
+  );
+
+  Widget _buildControls(AppLocalizations al, bool positioned) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(
+        positioned
+            ? 'x: ${_x!.toStringAsFixed(1)} m,   y: ${_y!.toStringAsFixed(1)} m'
+            : al.positionUnset,
+        style: const TextStyle(color: Colors.grey, fontSize: 13),
+      ),
+      const SizedBox(height: 16),
+      OutlinedButton.icon(
+        onPressed: positioned ? () => _apply(null, null) : null,
+        icon: const Icon(Icons.restart_alt, size: 18),
+        label: Text(al.positionReset),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: Colors.white,
+          disabledForegroundColor: Colors.grey,
+          side: const BorderSide(color: Color(0xFF2A2A4A)),
+        ),
+      ),
+      const SizedBox(height: 16),
+      Text(
+        al.positionHint,
+        textAlign: TextAlign.start,
+        style: const TextStyle(color: Colors.grey, fontSize: 13, height: 1.5),
+      ),
+    ],
+  );
 }
 
 class _PlanePainter extends CustomPainter {
