@@ -835,6 +835,41 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         .firstOrNull;
     final ownPrivilegeTier = _ownPrivilegeTier;
 
+    final sheet = _ClientVolumeSheet(
+      client: client,
+      notifier: connNotifier,
+      ownClientId: conn.ownClientId,
+      // We are a server-query admin: the permission-management entries are
+      // offered even before the hint bits arrive.
+      ownIsQueryAdmin: ownClient?.isQueryAdmin ?? false,
+      // Our own directly-assigned permissions include a management power
+      // (active permission detection — clientpermlist).
+      ownCanManagePermissions: ref
+          .read(tsConnectionProvider.notifier)
+          .canManagePermissions,
+      ownPrivilegeTier: ownPrivilegeTier,
+      channels: conn.channels,
+      onOpenChat: () => _openPrivateChat(client.id),
+    );
+
+    // Wide (desktop) windows get a centered dialog instead of a bottom
+    // sheet stretched across the whole window; the sheet widget itself is
+    // container-agnostic (it scrolls internally).
+    if (MediaQuery.sizeOf(context).width >= kAdaptiveDialogMinWidth) {
+      showDialog(
+        context: context,
+        builder: (_) => Dialog(
+          backgroundColor: const Color(0xFF12122A),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 640),
+          child: sheet,
+        ),
+      );
+      return;
+    }
+
     showModalBottomSheet(
       context: context,
       // The sheet holds up to 8 action buttons — without this the content is
@@ -845,22 +880,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
       ),
-      builder: (ctx) => _ClientVolumeSheet(
-        client: client,
-        notifier: connNotifier,
-        ownClientId: conn.ownClientId,
-        // We are a server-query admin: the permission-management entries are
-        // offered even before the hint bits arrive.
-        ownIsQueryAdmin: ownClient?.isQueryAdmin ?? false,
-        // Our own directly-assigned permissions include a management power
-        // (active permission detection — clientpermlist).
-        ownCanManagePermissions: ref
-            .read(tsConnectionProvider.notifier)
-            .canManagePermissions,
-        ownPrivilegeTier: ownPrivilegeTier,
-        channels: conn.channels,
-        onOpenChat: () => _openPrivateChat(client.id),
-      ),
+      builder: (ctx) => sheet,
     );
   }
 
@@ -1741,7 +1761,7 @@ class _ClientVolumeSheetState extends State<_ClientVolumeSheet> {
                 context,
                 icon: Icons.spatial_audio,
                 label: al.positionTitle,
-                onPressed: () => pushPositionEditPage(context, c),
+                onPressed: () => openPositionEditor(context, c),
               ),
             ],
             // ── Private chat (a communication entry, not a moderation

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,27 +10,78 @@ import '../models/ts_state.dart';
 /// The plane spans ±[planeExtent] meters on both axes; dragging clamps there.
 const double planeExtent = 10.0;
 
-/// Pushes the full-screen 2D position editor for [client]. Changes apply live
-/// while dragging (there is no result to pop): every update goes straight
-/// through the connection notifier into the Rust mixer.
-Future<void> pushPositionEditPage(BuildContext context, TsClient client) {
+/// At or above this logical window width, modals (the per-client volume
+/// sheet and the position editor) present as centered dialogs instead of a
+/// full-width bottom sheet / full-screen page.
+const double kAdaptiveDialogMinWidth = 800.0;
+
+/// Opens the 2D position editor for [client]: a centered dialog on wide
+/// (desktop) windows, the full-screen page below [kAdaptiveDialogMinWidth].
+/// Changes apply live while the pad is dragged (there is no result to pop):
+/// every update goes straight through the connection notifier into the Rust
+/// mixer.
+Future<void> openPositionEditor(BuildContext context, TsClient client) {
+  if (MediaQuery.sizeOf(context).width >= kAdaptiveDialogMinWidth) {
+    return showDialog(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: const Color(0xFF12122A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: PositionEditor(client: client, asDialog: true),
+      ),
+    );
+  }
   return Navigator.of(
     context,
   ).push(MaterialPageRoute(builder: (_) => PositionEditScreen(client: client)));
 }
 
-/// Top-down plane editor: "me" is fixed at the center, the client's dot is
-/// dragged around. +x = right, +y = forward (top of the pad).
-class PositionEditScreen extends ConsumerStatefulWidget {
+/// Full-screen route wrapper around [PositionEditor] for narrow windows and
+/// phones.
+class PositionEditScreen extends StatelessWidget {
   const PositionEditScreen({super.key, required this.client});
 
   final TsClient client;
 
   @override
-  ConsumerState<PositionEditScreen> createState() => _PositionEditScreenState();
+  Widget build(BuildContext context) {
+    final al = AppLocalizations.of(context);
+    return Scaffold(
+      // Transparent so the app-wide custom background shows through.
+      appBar: AppBar(
+        title: Text(
+          al.positionTitle,
+          style: const TextStyle(color: Colors.white, fontSize: 17),
+        ),
+        backgroundColor: const Color(0xFF16213E),
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
+      body: SafeArea(child: PositionEditor(client: client)),
+    );
+  }
 }
 
-class _PositionEditScreenState extends ConsumerState<PositionEditScreen> {
+/// Top-down plane editor: "me" is fixed at the center, the client's dot is
+/// dragged around. +x = right, +y = forward (top of the pad). [asDialog]
+/// packs title, heading and controls beside the pad for the desktop dialog;
+/// otherwise they stack above/below it for the full-screen page.
+class PositionEditor extends ConsumerStatefulWidget {
+  const PositionEditor({
+    super.key,
+    required this.client,
+    this.asDialog = false,
+  });
+
+  final TsClient client;
+  final bool asDialog;
+
+  @override
+  ConsumerState<PositionEditor> createState() => _PositionEditorState();
+}
+
+class _PositionEditorState extends ConsumerState<PositionEditor> {
   double? _x; // meters, +x = right
   double? _y; // meters, +y = forward (top of the pad)
 
@@ -67,72 +120,67 @@ class _PositionEditScreenState extends ConsumerState<PositionEditScreen> {
   Widget build(BuildContext context) {
     final al = AppLocalizations.of(context);
     final positioned = _x != null && _y != null;
-    return Scaffold(
-      // Transparent so the app-wide custom background shows through.
-      appBar: AppBar(
-        title: Text(
-          al.positionTitle,
-          style: const TextStyle(color: Colors.white, fontSize: 17),
-        ),
-        backgroundColor: const Color(0xFF16213E),
-        foregroundColor: Colors.white,
-        elevation: 0,
-      ),
-      body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final desktop = constraints.maxWidth >= 800;
-            final plane = _buildPlane(al.positionSelf);
-            final controls = _buildControls(al, positioned);
-            if (!desktop) {
-              return ListView(
-                padding: const EdgeInsets.all(16),
+    if (!widget.asDialog) {
+      return ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildClientHeading(),
+          const SizedBox(height: 16),
+          _buildPlane(al.positionSelf),
+          const SizedBox(height: 12),
+          _buildControls(al, positioned),
+        ],
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Cap the pad so the title/heading above and the controls column
+          // beside it stay inside the dialog even in short windows.
+          final side = math.min(
+            400.0,
+            math.max(200.0, constraints.maxHeight - 100),
+          );
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  _buildClientHeading(),
-                  const SizedBox(height: 16),
-                  plane,
-                  const SizedBox(height: 12),
-                  controls,
-                ],
-              );
-            }
-            return SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1200),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Expanded(
-                        flex: 3,
-                        child: Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 640),
-                            child: plane,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 36),
-                      SizedBox(
-                        width: 300,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _buildClientHeading(),
-                            const SizedBox(height: 24),
-                            controls,
-                          ],
-                        ),
-                      ),
-                    ],
+                  Text(
+                    al.positionTitle,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                ),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).closeButtonTooltip,
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close, size: 20),
+                    color: Colors.grey,
+                  ),
+                ],
               ),
-            );
-          },
-        ),
+              const SizedBox(height: 8),
+              _buildClientHeading(),
+              const SizedBox(height: 20),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  _buildPlane(al.positionSelf, side: side),
+                  const SizedBox(width: 28),
+                  Expanded(child: _buildControls(al, positioned)),
+                ],
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -159,32 +207,39 @@ class _PositionEditScreenState extends ConsumerState<PositionEditScreen> {
     ],
   );
 
-  Widget _buildPlane(String selfLabel) => AspectRatio(
-    aspectRatio: 1,
-    child: LayoutBuilder(
+  /// [side] fixes the square pad's size (dialog layout); without it the pad
+  /// fills the available width (page layout).
+  Widget _buildPlane(String selfLabel, {double? side}) {
+    final pad = LayoutBuilder(
       builder: (context, constraints) {
         final padSize = constraints.biggest;
         void place(Offset local) => _setFromLocal(local, padSize);
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (d) => place(d.localPosition),
-          onPanStart: (d) => place(d.localPosition),
-          onPanUpdate: (d) => place(d.localPosition),
-          child: CustomPaint(
-            painter: _PlanePainter(
-              x: _x,
-              y: _y,
-              clientLabel: widget.client.nickname,
-              selfLabel: selfLabel,
+        return MouseRegion(
+          cursor: SystemMouseCursors.precise,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (d) => place(d.localPosition),
+            onPanStart: (d) => place(d.localPosition),
+            onPanUpdate: (d) => place(d.localPosition),
+            child: CustomPaint(
+              painter: _PlanePainter(
+                x: _x,
+                y: _y,
+                clientLabel: widget.client.nickname,
+                selfLabel: selfLabel,
+              ),
             ),
           ),
         );
       },
-    ),
-  );
+    );
+    if (side == null) return AspectRatio(aspectRatio: 1, child: pad);
+    return SizedBox(width: side, height: side, child: pad);
+  }
 
   Widget _buildControls(AppLocalizations al, bool positioned) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
     children: [
       Text(
         positioned
