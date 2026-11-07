@@ -880,7 +880,8 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
       ),
-      builder: (ctx) => sheet,
+      // SafeArea keeps the last buttons clear of the gesture-nav inset.
+      builder: (ctx) => SafeArea(child: sheet),
     );
   }
 
@@ -1135,6 +1136,9 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
   void _showVoiceSettings(TsConnectionNotifier notifier) {
     showModalBottomSheet(
       context: context,
+      // The panel is taller than the default ~9/16 sheet cap on small
+      // screens — with this the content scrolls instead of overflowing.
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF12122A),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
@@ -1143,20 +1147,24 @@ class _ServerScreenState extends ConsumerState<ServerScreen> {
         // The modal route lives outside this screen's rebuild tree, so the
         // captured conn snapshot would freeze the level bar; watch the
         // provider here to keep the panel live.
-        return Padding(
-          padding: const EdgeInsets.all(20),
-          child: Consumer(
-            builder: (ctx, ref, _) {
-              final live = ref.watch(tsConnectionProvider);
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _AvatarSection(conn: live, notifier: notifier),
-                  const Divider(color: Colors.white12, height: 24),
-                  VoiceSettingsPanel(conn: live, notifier: notifier),
-                ],
-              );
-            },
+        return SafeArea(
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Consumer(
+                builder: (ctx, ref, _) {
+                  final live = ref.watch(tsConnectionProvider);
+                  return Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _AvatarSection(conn: live, notifier: notifier),
+                      const Divider(color: Colors.white12, height: 24),
+                      VoiceSettingsPanel(conn: live, notifier: notifier),
+                    ],
+                  );
+                },
+              ),
+            ),
           ),
         );
       },
