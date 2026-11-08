@@ -10,12 +10,14 @@ import 'package:url_launcher/url_launcher.dart';
 import '../l10n/generated/app_localizations.dart';
 import '../models/app_locale.dart';
 import '../models/background_settings.dart';
+import '../models/entry_sound_settings.dart';
 import '../models/notification_settings.dart';
 import '../models/recording_settings.dart';
 import '../models/ts_state.dart';
 import '../models/window_settings.dart';
 import '../services/audio_service.dart';
 import '../services/background_service.dart';
+import '../services/entry_sound_service.dart';
 import '../services/foreground_service.dart';
 import '../services/mic_error.dart';
 import '../services/ota_service.dart';
@@ -504,6 +506,189 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// Entry sound: the entertainment broadcast played automatically when a
+  /// connection is established — global enable + local echo toggles and one
+  /// picked WAV (see EntrySoundService).
+  Widget _buildEntrySoundSection(BuildContext context) {
+    final al = AppLocalizations.of(context);
+    final entry = ref.watch(entrySoundSettingsProvider);
+    final configured = entry.soundName != null && entry.soundName!.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionHeader(al.entrySound),
+        const SizedBox(height: 8),
+        Card(
+          color: const Color(0xFF1A1A2E),
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.campaign,
+                      color: configured ? Colors.blueAccent : Colors.grey,
+                      size: 22,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        configured ? entry.soundName! : al.entrySoundNone,
+                        style: TextStyle(
+                          color: configured ? Colors.white : Colors.grey,
+                          fontSize: 14,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (configured)
+                      IconButton(
+                        onPressed: _previewEntrySound,
+                        tooltip: al.entrySoundPreview,
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.all(6),
+                        icon: const Icon(Icons.play_circle_outline, size: 20),
+                        color: Colors.blueAccent,
+                      ),
+                  ],
+                ),
+                const Divider(height: 16, color: Color(0xFF2A2A4A)),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            al.entrySoundEnabled,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            al.entrySoundDesc,
+                            style: const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Switch(
+                      value: entry.enabled,
+                      activeTrackColor: Colors.blue,
+                      onChanged: (v) => ref
+                          .read(entrySoundSettingsProvider.notifier)
+                          .setEnabled(v),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            al.entrySoundLocalEcho,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            al.entrySoundLocalEchoDesc,
+                            style: const TextStyle(
+                              color: Colors.grey,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Switch(
+                      value: entry.playLocally,
+                      activeTrackColor: Colors.blue,
+                      onChanged: (v) => ref
+                          .read(entrySoundSettingsProvider.notifier)
+                          .setPlayLocally(v),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _pickEntrySound,
+                    icon: const Icon(Icons.library_music, size: 18),
+                    label: Text(al.entrySoundPick),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blueAccent,
+                      side: const BorderSide(color: Color(0xFF2A2A4A)),
+                    ),
+                  ),
+                ),
+                if (configured) ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _clearEntrySound,
+                      icon: const Icon(Icons.delete_outline, size: 18),
+                      label: Text(al.entrySoundClear),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.blueAccent,
+                        side: const BorderSide(color: Color(0xFF2A2A4A)),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _pickEntrySound() async {
+    final al = AppLocalizations.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final result = await EntrySoundService.pickAndStore();
+    if (result.code == EntrySoundService.cancelled) return;
+    if (result.code != 0) {
+      messenger.showSnackBar(SnackBar(content: Text(al.entrySoundInvalid)));
+      return;
+    }
+    await ref
+        .read(entrySoundSettingsProvider.notifier)
+        .setSoundName(result.name);
+  }
+
+  Future<void> _previewEntrySound() async {
+    final al = AppLocalizations.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final rc = await EntrySoundService.preview();
+    if (rc != 0) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(al.entrySoundPreviewFailed)),
+      );
+    }
+  }
+
+  Future<void> _clearEntrySound() async {
+    await EntrySoundService.clear();
+    await ref.read(entrySoundSettingsProvider.notifier).setSoundName(null);
+  }
+
   /// User-custom background image: pick / reset + dimming slider. The image
   /// itself is rendered app-wide by the background layer in main.dart.
   Widget _buildBackgroundSection(BuildContext context) {
@@ -915,6 +1100,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // Voice parameters + mic test + channel sounds, folded away by
             // default (see _buildAudioSection).
             _buildAudioSection(context),
+            const SizedBox(height: 24),
+            _buildEntrySoundSection(context),
             const SizedBox(height: 24),
             _buildBackgroundSection(context),
             const SizedBox(height: 24),

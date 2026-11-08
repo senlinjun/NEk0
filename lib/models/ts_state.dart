@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +10,7 @@ import '../models/app_locale.dart';
 import '../models/channel.dart';
 import '../models/client.dart';
 import '../models/chat_message.dart';
+import '../models/entry_sound_settings.dart';
 import '../models/notification_settings.dart';
 import '../models/perm.dart';
 import '../models/recording_settings.dart';
@@ -19,9 +20,11 @@ import '../l10n/generated/app_localizations.dart';
 import '../services/ts_ffi.dart';
 import '../services/audio_service.dart';
 import '../services/avatar_cache.dart';
+import '../services/entry_sound_service.dart';
 import '../services/foreground_service.dart';
 import '../services/ft_service.dart';
 import '../services/recording_service.dart';
+import '../services/sfx_service.dart';
 
 // ─── Immutable State ────────────────────────────────────────────────
 
@@ -543,6 +546,37 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     }
   }
 
+  /// Fires the user's entry sound ~1s after connect (once the channel join
+  /// has settled): the Rust core broadcasts it into the current channel as
+  /// paced voice packets and echoes it locally. A disconnect before the
+  /// timer fires (or a file that vanished) skips the play silently — the
+  /// sound is a nicety, never worth an error surface.
+  void _scheduleEntrySound() {
+    final settings = ref.read(entrySoundSettingsProvider);
+    if (!settings.enabled ||
+        settings.soundName == null ||
+        settings.soundName!.isEmpty) {
+      return;
+    }
+    Timer(const Duration(seconds: 1), () async {
+      if (!state.connected) return;
+      try {
+        final path = await EntrySoundService.soundPath();
+        if (path == null) return;
+        final bytes = await File(path).readAsBytes();
+        final rc = SfxService.playEntrySound(
+          bytes,
+          localEcho: settings.playLocally,
+        );
+        if (rc != 0) {
+          debugPrint('entry sound not played: rc=$rc');
+        }
+      } catch (e) {
+        debugPrint('entry sound failed: $e');
+      }
+    });
+  }
+
   void _handleEvent(Map<String, dynamic> event) {
     final type = event['type'] as String;
     debugPrint('TS: event $type');
@@ -628,6 +662,8 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         // Pull our own directly-assigned permissions (clientpermlist answer
         // is requested by the Rust side on connect; read it back now).
         refreshOwnPerms();
+        // Entertainment: broadcast the user's entry sound into the channel.
+        _scheduleEntrySound();
         // The server's preset text (welcome message / host message) as a
         // system line in the server conversation.
         final preset = systemMessageText(

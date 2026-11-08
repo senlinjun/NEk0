@@ -680,6 +680,72 @@ abstract class AppLocalizations {
   /// **'Some sounds in this pack were skipped (unsupported format).'**
   String get sfxPackPartialLoad;
 
+  /// No description provided for @entrySound.
+  ///
+  /// In en, this message translates to:
+  /// **'Entry sound'**
+  String get entrySound;
+
+  /// No description provided for @entrySoundNone.
+  ///
+  /// In en, this message translates to:
+  /// **'No sound set'**
+  String get entrySoundNone;
+
+  /// No description provided for @entrySoundDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Broadcast a custom sound into the current channel automatically when you connect (WAV).'**
+  String get entrySoundDesc;
+
+  /// No description provided for @entrySoundEnabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Play on connect'**
+  String get entrySoundEnabled;
+
+  /// No description provided for @entrySoundLocalEcho.
+  ///
+  /// In en, this message translates to:
+  /// **'Local echo'**
+  String get entrySoundLocalEcho;
+
+  /// No description provided for @entrySoundLocalEchoDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Also play the sound through your own output while it is broadcast.'**
+  String get entrySoundLocalEchoDesc;
+
+  /// No description provided for @entrySoundPick.
+  ///
+  /// In en, this message translates to:
+  /// **'Choose sound (WAV)'**
+  String get entrySoundPick;
+
+  /// No description provided for @entrySoundPreview.
+  ///
+  /// In en, this message translates to:
+  /// **'Preview'**
+  String get entrySoundPreview;
+
+  /// No description provided for @entrySoundClear.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove sound'**
+  String get entrySoundClear;
+
+  /// No description provided for @entrySoundInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'That file is not a usable WAV (unsupported format or too long).'**
+  String get entrySoundInvalid;
+
+  /// No description provided for @entrySoundPreviewFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Preview failed — the sound file is missing or unreadable.'**
+  String get entrySoundPreviewFailed;
+
   /// No description provided for @poke.
   ///
   /// In en, this message translates to:

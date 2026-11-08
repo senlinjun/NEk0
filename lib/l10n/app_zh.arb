@@ -125,6 +125,18 @@
   "sfxPackInvalidManifest": "pack.json 无效：需要 name 字段，以及把事件 ID（1–37）映射到压缩包内 WAV 文件的 sounds 表。",
   "sfxPackPartialLoad": "语音包中部分音频被跳过（格式不支持）。",
 
+  "entrySound": "入场音效",
+  "entrySoundNone": "未设置音效",
+  "entrySoundDesc": "连接服务器成功后，自动把自定义音效当作语音播进当前频道（WAV）。",
+  "entrySoundEnabled": "连接时播放",
+  "entrySoundLocalEcho": "本地回放",
+  "entrySoundLocalEchoDesc": "广播的同时在自己的输出里也播放一遍。",
+  "entrySoundPick": "选择音效（WAV）",
+  "entrySoundPreview": "试听",
+  "entrySoundClear": "移除音效",
+  "entrySoundInvalid": "该文件不是可用的 WAV（格式不支持或过长）。",
+  "entrySoundPreviewFailed": "试听失败——音效文件丢失或无法读取。",
+
   "poke": "Poke",
   "pokeHint": "输入要发送的提示消息",
   "pokeSent": "Poke 已发送",

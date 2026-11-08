@@ -167,6 +167,21 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   noise, probability and gain; the old `vad_*`/`pcm_in`/encoder fields are gone from
   `STATE` (`voice_active` is the `VOICE_ACTIVE` atomic, read-and-clear via
   `ts_is_voice_active`).
+- **Entry sound (娱乐功能)**: one global user-picked WAV, broadcast into the channel on
+  connect. Dart schedules it 1 s after the `connected` event (`_scheduleEntrySound` in
+  ts_state.dart, gated by `entrySoundSettingsProvider`) and calls
+  `ts_play_entry_sound(bytes, local_echo)`; the Rust core decodes via `parse_wav_pcm` and
+  handles `Command::PlayEntrySound`: a spawned task paces 20 ms opus frames through its own
+  `OpusEncoder` into `conn.send_voice` (the univox actor owns the seq, as for SendAudio),
+  bails out when `CONNECTION_GENERATION` moves on, and clears `ENTRY_SOUND_PLAYING` — the
+  atomic that makes the `Command::SendAudio` arm run the mic pipeline analyze-only (live
+  mic suppressed so injected and live packets never interleave; the level meter stays
+  alive). Local echo reuses the SFX mixer as kind 38 (`SFX_ENTRY_SOUND`; the SFX tables
+  grew from 37 to 38, no builtin for 38). Config UI is the settings screen's entry-sound
+  section; `EntrySoundService` stores the file at `<docs>/entry_sounds/default.wav`
+  (file_picker → private copy, no storage permission) and previews it via
+  `SfxService.setSample/preview` on kind 38. WAV only — `parse_wav_pcm` bounds the
+  duration; the settings name is display metadata, the file is the source of truth.
 - Platform gating: `ForegroundService` (foreground service, notification actions, battery
   exemption, MediaStore saves) is Android-only and degrades to no-ops elsewhere — except
   `saveToDownloads`, which on desktop writes into the system Downloads directory
@@ -212,7 +227,8 @@ and `windows` (prebuild → `flutter build windows` → tag: zip release).
   the test isolate — and only public, FFI-free notifier/service methods are driven. Run with
   `flutter test`. Rust has in-file `#[cfg(test)] mod tests` blocks in `lib.rs` (WAV parsing,
   the adaptive playout-lead state machine, the Dart-facing serde JSON contract), `api.rs`
-  (sequence unwrap, positional gains, OutRing, compression_eps, the mic resampler),
+  (sequence unwrap, positional gains, OutRing, compression_eps, the mic resampler,
+  entry-sound frame splitting),
   `vad.rs` (three-mode gate semantics, hysteresis/tail, the zero-loss preroll invariant,
   the measured RNNoise onset latency, noise floor, config clamps), `agc.rs` (closed-loop
   convergence, silence freeze, limiter shapes) and `mic_pipeline.rs` (patch contract,

@@ -121,6 +121,13 @@ pub enum Command {
     UsePrivilegeKey { token: String, op_token: String },
     Disconnect,
     SendAudio { data: Vec<f32> },
+    /// Play the user-configured entry sound: broadcast the decoded 48 kHz
+    /// mono PCM as real-time paced voice packets into the current channel,
+    /// optionally echoed locally through the SFX mixer (kind 38). While it
+    /// is on the air, live mic uplink is suppressed (see
+    /// [ENTRY_SOUND_PLAYING]) so injected and live packets do not
+    /// interleave.
+    PlayEntrySound { data: Vec<f32>, echo: bool },
     // File transfer commands (see FtTask / FT_TASKS below). `cid` is the
     // channel whose file storage is addressed; remote paths start with '/',
     // passwords are plaintext (encoded per-command where the protocol needs
@@ -992,6 +999,13 @@ pub static SFX_SUPPRESS_DISCONNECT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::
 /// alone so the sound can finish; the deferred task performs the teardown.
 pub static SFX_DEFERRED_TEARDOWN: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
+/// Set while the entry sound (Command::PlayEntrySound) is being broadcast:
+/// the event loop's SendAudio path checks it and runs the mic pipeline in
+/// analyze-only mode, so live speech is not sent on top of the injected
+/// packets. Cleared by the pacing task when the sound finished and by
+/// `teardown_output_state()` on disconnect.
+pub static ENTRY_SOUND_PLAYING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
 /// Drop all pending SFX requests (e.g. when the output stream is rebuilt).
 pub fn clear_sfx_queue() {
     while SFX_QUEUE.pop().is_some() {}
@@ -1227,10 +1241,11 @@ fn load_builtin_sfx(kind: usize, name: &str) -> Option<Vec<f32>> {
 /// 19 away_deactivated, 20 channel_created, 21 channel_deleted,
 /// 22 channel_edited, 23 channel_moved, 24 channelgroup_changed,
 /// 25..36 neutral_* other-user sounds (connection/moved/kicked/banned/
-/// recording), 37 neutral_recording_active.
+/// recording), 37 neutral_recording_active. 38 is the user-configurable
+/// entry sound — no builtin, the slot starts as `None`.
 /// A `None` entry means the asset is missing or failed to parse (playback
 /// falls back to silence for that kind).
-pub static SFX_BUILTIN: Lazy<[Option<Vec<f32>>; 37]> = Lazy::new(|| {
+pub static SFX_BUILTIN: Lazy<[Option<Vec<f32>>; 38]> = Lazy::new(|| {
     [
         load_builtin_sfx(0, "channel_switched"),
         load_builtin_sfx(1, "neutral_switched_tocurrentchannel"),
@@ -1269,15 +1284,17 @@ pub static SFX_BUILTIN: Lazy<[Option<Vec<f32>>; 37]> = Lazy::new(|| {
         load_builtin_sfx(34, "neutral_recording_started_currentchannel"),
         load_builtin_sfx(35, "neutral_recording_stopped_currentchannel"),
         load_builtin_sfx(36, "neutral_recording_active_currentchannel"),
+        // Kind 38 (SFX_ENTRY_SOUND): user-provided only, no builtin asset.
+        None,
     ]
 });
 
 /// The active SFX samples (custom override or built-in fallback) as seen by
 /// the cpal audio thread. `ArcSwap` gives lock-free reads, so the callback
 /// never blocks while a custom sample is being installed from Dart.
-pub static SFX_SAMPLES: Lazy<arc_swap::ArcSwap<[Option<std::sync::Arc<Vec<f32>>>; 37]>> =
+pub static SFX_SAMPLES: Lazy<arc_swap::ArcSwap<[Option<std::sync::Arc<Vec<f32>>>; 38]>> =
     Lazy::new(|| {
-        let builtin: [Option<std::sync::Arc<Vec<f32>>>; 37] =
+        let builtin: [Option<std::sync::Arc<Vec<f32>>>; 38] =
             std::array::from_fn(|i| {
                 SFX_BUILTIN[i]
                     .as_ref()
@@ -1935,12 +1952,17 @@ mod tests {
 
     #[test]
     fn builtin_sfx_assets_all_parse() {
-        assert_eq!(SFX_BUILTIN.len(), 37);
-        for (kind, sample) in SFX_BUILTIN.iter().enumerate() {
+        assert_eq!(SFX_BUILTIN.len(), 38);
+        for (idx, sample) in SFX_BUILTIN.iter().enumerate() {
+            // Kind 38 (SFX_ENTRY_SOUND) is user-provided only — no builtin.
+            if idx + 1 == 38 {
+                assert!(sample.is_none(), "entry sound kind must have no builtin");
+                continue;
+            }
             let samples = sample
                 .as_ref()
-                .unwrap_or_else(|| panic!("builtin sfx kind {} failed to parse", kind));
-            assert!(!samples.is_empty(), "builtin sfx kind {} is empty", kind);
+                .unwrap_or_else(|| panic!("builtin sfx kind {} failed to parse", idx + 1));
+            assert!(!samples.is_empty(), "builtin sfx kind {} is empty", idx + 1);
         }
     }
 }

@@ -324,6 +324,43 @@ class AppLocalizationsEn extends AppLocalizations {
       'Some sounds in this pack were skipped (unsupported format).';
 
   @override
+  String get entrySound => 'Entry sound';
+
+  @override
+  String get entrySoundNone => 'No sound set';
+
+  @override
+  String get entrySoundDesc =>
+      'Broadcast a custom sound into the current channel automatically when you connect (WAV).';
+
+  @override
+  String get entrySoundEnabled => 'Play on connect';
+
+  @override
+  String get entrySoundLocalEcho => 'Local echo';
+
+  @override
+  String get entrySoundLocalEchoDesc =>
+      'Also play the sound through your own output while it is broadcast.';
+
+  @override
+  String get entrySoundPick => 'Choose sound (WAV)';
+
+  @override
+  String get entrySoundPreview => 'Preview';
+
+  @override
+  String get entrySoundClear => 'Remove sound';
+
+  @override
+  String get entrySoundInvalid =>
+      'That file is not a usable WAV (unsupported format or too long).';
+
+  @override
+  String get entrySoundPreviewFailed =>
+      'Preview failed — the sound file is missing or unreadable.';
+
+  @override
   String get poke => 'Poke';
 
   @override

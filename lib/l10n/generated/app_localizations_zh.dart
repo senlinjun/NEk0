@@ -314,6 +314,39 @@ class AppLocalizationsZh extends AppLocalizations {
   String get sfxPackPartialLoad => '语音包中部分音频被跳过（格式不支持）。';
 
   @override
+  String get entrySound => '入场音效';
+
+  @override
+  String get entrySoundNone => '未设置音效';
+
+  @override
+  String get entrySoundDesc => '连接服务器成功后，自动把自定义音效当作语音播进当前频道（WAV）。';
+
+  @override
+  String get entrySoundEnabled => '连接时播放';
+
+  @override
+  String get entrySoundLocalEcho => '本地回放';
+
+  @override
+  String get entrySoundLocalEchoDesc => '广播的同时在自己的输出里也播放一遍。';
+
+  @override
+  String get entrySoundPick => '选择音效（WAV）';
+
+  @override
+  String get entrySoundPreview => '试听';
+
+  @override
+  String get entrySoundClear => '移除音效';
+
+  @override
+  String get entrySoundInvalid => '该文件不是可用的 WAV（格式不支持或过长）。';
+
+  @override
+  String get entrySoundPreviewFailed => '试听失败——音效文件丢失或无法读取。';
+
+  @override
   String get poke => 'Poke';
 
   @override

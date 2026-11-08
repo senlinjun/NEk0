@@ -48,6 +48,10 @@ class SfxKind {
   static const int neutralRecordingStopped = 36;
   static const int neutralRecordingActive = 37;
 
+  /// The user-configurable entry sound (see EntrySoundService). Not
+  /// pack-addressable — deliberately absent from [all].
+  static const int entrySound = 38;
+
   static const List<int> all = [
     channelSwitched,
     neutralToCurrent,
@@ -98,6 +102,16 @@ class SfxError {
   static const int emptyOrTooLong = 3;
 }
 
+/// Error codes returned by `ts_play_entry_sound`.
+class EntrySoundError {
+  EntrySoundError._();
+
+  static const int notConnected = 1;
+  static const int unsupportedFormat = 2;
+  static const int emptyOrTooLong = 3;
+  static const int alreadyPlaying = 4;
+}
+
 /// Low-level channel-event sound handling: pushes WAV samples into the Rust
 /// mixer, restores built-in samples, and plays previews.
 ///
@@ -136,5 +150,18 @@ class SfxService {
   /// Play the active sample for a kind immediately (settings-page preview).
   static int preview(int kind) {
     return TsNative.playSfx(kind);
+  }
+
+  /// Queue the user's entry sound ([bytes], a WAV file): the Rust core
+  /// broadcasts it into the current channel and, when [localEcho], echoes
+  /// it locally. Returns 0 on success, otherwise an [EntrySoundError] code.
+  static int playEntrySound(Uint8List bytes, {bool localEcho = true}) {
+    final ptr = malloc<Uint8>(bytes.length);
+    try {
+      ptr.asTypedList(bytes.length).setAll(0, bytes);
+      return TsNative.playEntrySound(ptr, bytes.length, localEcho ? 1 : 0);
+    } finally {
+      malloc.free(ptr);
+    }
   }
 }

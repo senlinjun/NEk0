@@ -6,6 +6,7 @@ use crate::{
     MIN_SURPLUS_FRAMES, OUTPUT_PERIOD_MS, OUTPUT_RATE, OUTPUT_RESTART_REQUESTED, PLAYED_SAMPLES,
     RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE, SFX_SUPPRESS_DISCONNECT, STATE,
     SWIPE_DISCONNECT, TALKING_CLIENTS, TARGET_FRAMES_CEIL, TARGET_FRAMES_FLOOR, recording,
+    ENTRY_SOUND_PLAYING,
     mic_pipeline::MIC_PIPELINE,
     play_time_ms, publish_clock_ref,
 };
@@ -1200,9 +1201,13 @@ const SFX_NEUTRAL_BANNED_SERVER: u8 = 34;
 const SFX_NEUTRAL_RECORDING_STARTED: u8 = 35;
 const SFX_NEUTRAL_RECORDING_STOPPED: u8 = 36;
 const SFX_NEUTRAL_RECORDING_ACTIVE: u8 = 37;
+/// The user-configurable entry sound (Command::PlayEntrySound local echo /
+/// settings-page preview). No builtin — the slot starts empty and is filled
+/// right before playback.
+const SFX_ENTRY_SOUND: u8 = 38;
 
 /// One parallel SFX playback slot owned by the cpal callback closure.
-/// `kind` is the SFX request id (1..=37, see the consts above);
+/// `kind` is the SFX request id (1..=38, see the consts above);
 /// `kind == 0` means the slot is idle. `pos` is the sample position within
 /// the current sample.
 #[derive(Clone, Copy, Default)]
@@ -2016,6 +2021,9 @@ fn teardown_output_state() {
     JITTER_STATS.clear();
     TALKING_CLIENTS.clear();
     MIN_SURPLUS_FRAMES.store(0, Ordering::Relaxed);
+    // A stale pacing task cannot keep the mic suppressed across a
+    // reconnect; its generation check stops the sends instead.
+    ENTRY_SOUND_PLAYING.store(false, Ordering::Relaxed);
 }
 
 /// Queue a disconnect/error SFX and defer the output-stream teardown until
@@ -2920,6 +2928,15 @@ async fn event_loop(
 
 /// Executes one queued command against the session. Returns true when the
 /// event loop should exit (user disconnect).
+/// Splits decoded entry-sound PCM into exact 20 ms opus frames. A partial
+/// final frame (up to 19 ms of audio) is dropped — inaudible next to the
+/// arbitrary cut the user made when picking the file.
+fn entry_sound_frames(pcm: &[f32]) -> Vec<&[f32]> {
+    pcm.chunks(crate::vad::FRAME)
+        .filter(|c| c.len() == crate::vad::FRAME)
+        .collect()
+}
+
 async fn handle_command(
     cmd: Command,
     session: &Arc<Ts3Session>,
@@ -3499,6 +3516,13 @@ async fn handle_command(
             return true;
         }
         Command::SendAudio { data } => {
+            // While the entry sound is on the air the live mic is suppressed
+            // (analyze-only keeps the level meter and VAD learning alive) —
+            // injected and live packets must not interleave.
+            if ENTRY_SOUND_PLAYING.load(Ordering::Relaxed) {
+                MIC_PIPELINE.lock().analyze_only(&data);
+                return false;
+            }
             // The pipeline decides (VAD), gains (AGC + slider) and encodes;
             // only the network sends happen out here, so the session is
             // never touched under the pipeline lock.
@@ -3537,6 +3561,67 @@ async fn handle_command(
                     crate::VOICE_ACTIVE.store(true, Ordering::Relaxed);
                 }
             }
+        }
+        Command::PlayEntrySound { data, echo } => {
+            // Broadcast the user's entry sound. Local echo first (only when
+            // the user wants it): install the samples as SFX kind 38 and
+            // let the output mixer play them (the same path the settings
+            // preview uses). The uplink is paced from a dedicated task so
+            // this loop keeps servicing events and commands meanwhile; the
+            // connection actor assigns the voice sequence numbers, as for
+            // SendAudio.
+            ENTRY_SOUND_PLAYING.store(true, Ordering::Relaxed);
+            if echo {
+                let guard = crate::SFX_SAMPLES.load();
+                let mut next = (**guard).clone();
+                drop(guard);
+                next[(SFX_ENTRY_SOUND - 1) as usize] =
+                    Some(std::sync::Arc::new(data.clone()));
+                crate::SFX_SAMPLES.store(std::sync::Arc::new(next));
+                if AUDIO_STREAM.lock().unwrap().0.is_none() {
+                    restart_output_stream();
+                }
+                push_sfx(SFX_ENTRY_SOUND, "entry sound local echo");
+            }
+            let conn = session.conn();
+            let total_ms = data.len() as u64 * 1000 / 48_000;
+            RUNTIME.spawn(async move {
+                match opus_rs::OpusEncoder::new(48000, 1, opus_rs::Application::Voip) {
+                    Ok(mut encoder) => {
+                        // A dead connection (disconnect mid-sound) or a fast
+                        // reconnect would otherwise keep the stale task
+                        // sending: bail out once the generation moved on.
+                        let generation =
+                            crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+                        let mut enc_buf = [0u8; 4000];
+                        let mut ticker = tokio::time::interval(Duration::from_millis(20));
+                        ticker
+                            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        ticker.tick().await; // interval fires immediately — consume
+                        for frame in entry_sound_frames(&data) {
+                            if crate::CONNECTION_GENERATION.load(Ordering::SeqCst)
+                                != generation
+                            {
+                                break;
+                            }
+                            match encoder.encode(frame, crate::vad::FRAME, &mut enc_buf) {
+                                Ok(len) => {
+                                    // Codec byte + opus payload, as in SendAudio.
+                                    let mut content = Vec::with_capacity(1 + len);
+                                    content.push(univox_ts3_proto::CODEC_OPUS_VOICE);
+                                    content.extend_from_slice(&enc_buf[..len]);
+                                    conn.send_voice(content, PacketType::Voice).await;
+                                }
+                                Err(e) => eprintln!("[entry] opus encode error: {}", e),
+                            }
+                            ticker.tick().await;
+                        }
+                    }
+                    Err(e) => eprintln!("[entry] encoder error: {}", e),
+                }
+                ENTRY_SOUND_PLAYING.store(false, Ordering::Relaxed);
+                eprintln!("[entry] broadcast finished ({}ms)", total_ms);
+            });
         }
     }
     false
@@ -5638,7 +5723,7 @@ pub extern "C" fn ts_ft_cancel(task_id: u32) -> u8 {
     }
 }
 
-/// Install a custom SFX sample. `kind` is 1..=37 (see the SFX_* consts);
+/// Install a custom SFX sample. `kind` is 1..=38 (see the SFX_* consts);
 /// `data` points to `len` bytes of a RIFF/WAVE file (PCM 16-bit or IEEE
 /// float32, 1/2 channels — anything else is rejected without touching the
 /// currently active sample; only parse_wav_pcm's allocation guard bounds the
@@ -5648,7 +5733,7 @@ pub extern "C" fn ts_ft_cancel(task_id: u32) -> u8 {
 /// 3 for empty/too-long input.
 #[no_mangle]
 pub extern "C" fn ts_set_sfx_sample(kind: u8, data: *const u8, len: usize) -> i32 {
-    if !(1..=37).contains(&kind) {
+    if !(1..=38).contains(&kind) {
         return 1;
     }
     if data.is_null() || len == 0 {
@@ -5676,11 +5761,12 @@ pub extern "C" fn ts_set_sfx_sample(kind: u8, data: *const u8, len: usize) -> i3
     }
 }
 
-/// Restore the built-in sample for an SFX kind (1..=37). Returns 0 on
-/// success, 1 for an invalid kind.
+/// Restore the built-in sample for an SFX kind (1..=38). Returns 0 on
+/// success, 1 for an invalid kind. Kind 38 has no builtin — clearing it
+/// empties the slot.
 #[no_mangle]
 pub extern "C" fn ts_clear_sfx_sample(kind: u8) -> i32 {
-    if !(1..=37).contains(&kind) {
+    if !(1..=38).contains(&kind) {
         return 1;
     }
     let guard = crate::SFX_SAMPLES.load();
@@ -5700,7 +5786,7 @@ pub extern "C" fn ts_clear_sfx_sample(kind: u8) -> i32 {
 /// Returns 0 on success, 1 for an invalid kind.
 #[no_mangle]
 pub extern "C" fn ts_play_sfx(kind: u8) -> i32 {
-    if !(1..=37).contains(&kind) {
+    if !(1..=38).contains(&kind) {
         return 1;
     }
     if AUDIO_STREAM.lock().unwrap().0.is_none() {
@@ -5709,6 +5795,55 @@ pub extern "C" fn ts_play_sfx(kind: u8) -> i32 {
     crate::SFX_QUEUE.push(kind);
     eprintln!("[sfx] manual preview kind={}", kind);
     0
+}
+
+/// Decode a WAV file and queue it as the ENTRY SOUND: the event loop
+/// broadcasts it into the current channel as real-time paced voice packets
+/// and — when `local_echo` is nonzero — echoes it locally through the SFX
+/// mixer (kind 38). Requires an active connection; `data` points to `len`
+/// bytes of a RIFF/WAVE file (same formats as ts_set_sfx_sample).
+///
+/// Returns 0 on success, 1 when not connected, 2 for an unsupported
+/// format, 3 for empty/too-long input, 4 when a sound is already playing.
+#[no_mangle]
+pub extern "C" fn ts_play_entry_sound(data: *const u8, len: usize, local_echo: u8) -> i32 {
+    if data.is_null() || len == 0 {
+        return 3;
+    }
+    if !STATE.lock().connected {
+        return 1;
+    }
+    if ENTRY_SOUND_PLAYING.load(Ordering::Relaxed) {
+        return 4;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    let samples = match crate::parse_wav_pcm(bytes) {
+        Ok(s) => s,
+        Err(msg) => {
+            eprintln!("[entry] decode rejected: {}", msg);
+            return if msg.contains("too long") || msg.contains("no audio data") {
+                3
+            } else {
+                2
+            };
+        }
+    };
+    let tx = COMMAND_TX.lock();
+    match tx.as_ref() {
+        Some(tx) => {
+            if tx
+                .send(Command::PlayEntrySound {
+                    data: samples,
+                    echo: local_echo != 0,
+                })
+                .is_err()
+            {
+                return 1;
+            }
+            0
+        }
+        None => 1,
+    }
 }
 
 // ─── Recording (see recording.rs) ───────────────────────────────────
@@ -5767,6 +5902,25 @@ pub extern "C" fn ts_discard_recording() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Entry sound frame splitting ─────────────────────────────────
+
+    #[test]
+    fn entry_sound_frames_split_exact_frames() {
+        let pcm = vec![0.0f32; 3 * crate::vad::FRAME + 100];
+        let frames = entry_sound_frames(&pcm);
+        assert_eq!(frames.len(), 3);
+        assert!(frames.iter().all(|f| f.len() == crate::vad::FRAME));
+    }
+
+    #[test]
+    fn entry_sound_frames_drop_short_tail() {
+        let pcm = vec![0.0f32; crate::vad::FRAME + 1];
+        assert_eq!(entry_sound_frames(&pcm).len(), 1);
+        let pcm = vec![0.0f32; crate::vad::FRAME - 1];
+        assert!(entry_sound_frames(&pcm).is_empty());
+        assert!(entry_sound_frames(&[]).is_empty());
+    }
 
     // ─── Linux device list (hint enumeration helpers) ────────────────
 

@@ -130,6 +130,18 @@
   "sfxPackInvalidManifest": "pack.json is invalid: it needs a name and a sounds table mapping event IDs (1–37) to WAV files from the archive.",
   "sfxPackPartialLoad": "Some sounds in this pack were skipped (unsupported format).",
 
+  "entrySound": "Entry sound",
+  "entrySoundNone": "No sound set",
+  "entrySoundDesc": "Broadcast a custom sound into the current channel automatically when you connect (WAV).",
+  "entrySoundEnabled": "Play on connect",
+  "entrySoundLocalEcho": "Local echo",
+  "entrySoundLocalEchoDesc": "Also play the sound through your own output while it is broadcast.",
+  "entrySoundPick": "Choose sound (WAV)",
+  "entrySoundPreview": "Preview",
+  "entrySoundClear": "Remove sound",
+  "entrySoundInvalid": "That file is not a usable WAV (unsupported format or too long).",
+  "entrySoundPreviewFailed": "Preview failed — the sound file is missing or unreadable.",
+
   "poke": "Poke",
   "pokeHint": "Message to send",
   "pokeSent": "Poke sent",

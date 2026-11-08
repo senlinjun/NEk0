@@ -171,6 +171,10 @@ typedef _ClearSfxSampleDart = int Function(int);
 typedef _PlaySfxNative = Int32 Function(Uint8);
 typedef _PlaySfxDart = int Function(int);
 
+// ts_play_entry_sound(data: *const u8, len: usize, local_echo: u8) -> i32
+typedef _PlayEntrySoundNative = Int32 Function(Pointer<Uint8>, IntPtr, Uint8);
+typedef _PlayEntrySoundDart = int Function(Pointer<Uint8>, int, int);
+
 // ts_set_away(away: bool) -> bool
 typedef _SetAwayNative = Uint8 Function(Uint8);
 typedef _SetAwayDart = int Function(int);
@@ -464,6 +468,10 @@ final _clearSfxSample = _lib
 final _playSfx = _lib.lookupFunction<_PlaySfxNative, _PlaySfxDart>(
   'ts_play_sfx',
 );
+final _playEntrySound = _lib
+    .lookupFunction<_PlayEntrySoundNative, _PlayEntrySoundDart>(
+      'ts_play_entry_sound',
+    );
 final _setAway = _lib.lookupFunction<_SetAwayNative, _SetAwayDart>(
   'ts_set_away',
 );
@@ -836,7 +844,7 @@ class TsNative {
     _setClientPosition(clientId, x ?? 0.0, y ?? 0.0, enabled);
   }
 
-  /// Install a custom WAV sample for an SFX kind (1..=37, see SfxKind).
+  /// Install a custom WAV sample for an SFX kind (1..=38, see SfxKind).
   /// Returns 0 on success; see the typedef above for error codes.
   static int setSfxSample(int kind, Pointer<Uint8> data, int len) {
     return _setSfxSample(kind, data, len);
@@ -852,6 +860,14 @@ class TsNative {
   /// Returns 0 on success, 1 for an invalid kind.
   static int playSfx(int kind) {
     return _playSfx(kind);
+  }
+
+  /// Queue the user's entry sound: the Rust core broadcasts it into the
+  /// current channel as paced voice packets and — when [localEcho] — echoes
+  /// it locally (SFX kind 38). Returns 0 on success; 1 not connected, 2
+  /// unsupported format, 3 empty/too long, 4 already playing.
+  static int playEntrySound(Pointer<Uint8> data, int len, int localEcho) {
+    return _playEntrySound(data, len, localEcho);
   }
 
   /// Set our own away state (server echo drives the away sounds).
