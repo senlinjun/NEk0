@@ -14,6 +14,7 @@ import '../models/entry_sound_settings.dart';
 import '../models/notification_settings.dart';
 import '../models/perm.dart';
 import '../models/recording_settings.dart';
+import '../models/roster_parser.dart';
 import '../models/server.dart';
 import '../models/vad_settings.dart';
 import '../l10n/generated/app_localizations.dart';
@@ -523,16 +524,31 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
           );
         }
       } catch (_) {} // status is cosmetic — never break the poll loop
-      // Refresh client talking indicators from live Rust data
+      // Refresh client talking indicators from live Rust data (per-row
+      // resilient parse — one bad row must not kill the whole tick)
       try {
-        final clientsJson = TsNative.getClients();
-        final clients = (jsonDecode(clientsJson) as List)
-            .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
-            .toList();
+        final clients = parseClientRoster(TsNative.getClients());
         if (clients.isNotEmpty) {
           state = state.copyWith(clients: clients);
         }
       } catch (_) {} // ignore parse errors during refresh
+      // Channel-tree self-heal: channels reach Dart only via the
+      // connected/channels_updated events, so a lost event or a snapshot
+      // taken before the login dump landed would leave the tree empty
+      // forever on a quiet server. Fetch channels only while the tree is
+      // unusable (empty or rootless) — the recovery ticks stop on their own
+      // once the roster is whole, so the steady state costs nothing.
+      if (state.connected && !hasUsableChannels(state.channels)) {
+        try {
+          final merged = mergeChannelRoster(
+            state.channels,
+            parseChannelRoster(TsNative.getChannels()),
+          );
+          if (hasUsableChannels(merged)) {
+            state = state.copyWith(channels: merged);
+          }
+        } catch (_) {}
+      }
       // Queue downloads for newly seen client avatars (no-op when all
       // hashes are already cached/queued/failed).
       ref.read(avatarCacheProvider.notifier).updateFromClients(state.clients);
@@ -582,16 +598,24 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
     debugPrint('TS: event $type');
     switch (type) {
       case 'connected':
-        // Connection succeeded - refresh channels/clients from Rust
-        final channelsJson = TsNative.getChannels();
-        final clientsJson = TsNative.getClients();
-
-        final channels = (jsonDecode(channelsJson) as List)
-            .map((j) => TsChannel.fromJson(j as Map<String, dynamic>))
-            .toList();
-        final clients = (jsonDecode(clientsJson) as List)
-            .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
-            .toList();
+        // The poll timer runs this handler — but a same-batch
+        // 'disconnected' from a previous connection cancels it mid-drain
+        // (a fast A→B reconnect lands both events in one poll). Restore it
+        // so the new connection's events keep flowing.
+        _startPolling();
+        // Connection succeeded - refresh channels/clients from Rust.
+        // Per-row resilient parse + empty-safe merge: native's "[]" is
+        // ambiguous (roster not primed yet vs. genuinely empty) and one
+        // malformed row must not abort the handler (connecting would then
+        // stay true forever).
+        final channels = mergeChannelRoster(
+          state.channels,
+          parseChannelRoster(TsNative.getChannels()),
+        );
+        final clients = mergeClientRoster(
+          state.clients,
+          parseClientRoster(TsNative.getClients()),
+        );
 
         final ownId = event['client_id'] as int? ?? state.ownClientId;
         // Find the channel the user is actually in
@@ -834,22 +858,24 @@ class TsConnectionNotifier extends Notifier<TsConnectionState> {
         break;
 
       case 'channels_updated':
-        // Re-fetch channels and clients from Rust cache
-        final chJson = TsNative.getChannels();
-        final clJson = TsNative.getClients();
-        final newChannels = (jsonDecode(chJson) as List)
-            .map((j) => TsChannel.fromJson(j as Map<String, dynamic>))
-            .toList();
-        final newClients = (jsonDecode(clJson) as List)
-            .map((j) => TsClient.fromJson(j as Map<String, dynamic>))
-            .toList();
+        // Re-fetch channels and clients from Rust cache. The merge keeps a
+        // usable roster alive across the brief empty-mirror window while
+        // univox rebuilds it around a temporary reconnect.
+        final newChannels = mergeChannelRoster(
+          state.channels,
+          parseChannelRoster(TsNative.getChannels()),
+        );
+        final newClients = mergeClientRoster(
+          state.clients,
+          parseClientRoster(TsNative.getClients()),
+        );
         state = state.copyWith(channels: newChannels, clients: newClients);
         // The own channel can become known only after the connect burst
         // (the clientlist dump may be denied and the enterview wave can
         // predate the event subscription) — re-sync the selection here,
         // not just on moves. This also snaps the marker back to the real
         // channel when a move attempt was rejected.
-        final own = newClients
+        final own = state.clients
             .where((c) => c.id == state.ownClientId)
             .firstOrNull;
         if (own != null &&

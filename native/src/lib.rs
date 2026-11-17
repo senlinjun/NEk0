@@ -111,6 +111,16 @@ pub enum Command {
     /// Re-request `servergrouplist`/`channelgrouplist` (used by the group
     /// dialogs' retry when the lists never arrived).
     RefreshGroups,
+    /// Internal roster reconciliation (no FFI producer): the event loop
+    /// re-reads the mirror and — when the book is still missing the login
+    /// dumps — requests `channellist` / `clientlist` directly. Queued here
+    /// (not exec'd from the reconciler task) so the probe execs run
+    /// serially with every other session command: UdpConnection rejects
+    /// concurrent execs with "concurrent client command".
+    SyncRoster {
+        probe_channels: bool,
+        probe_clients: bool,
+    },
     /// Request OUR OWN directly-assigned permission list (`clientpermlist`
     /// for our own database id). The answer fills `STATE.own_perms`.
     OwnPermList,
@@ -195,6 +205,16 @@ pub static COMMAND_TX: Lazy<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Comm
 
 pub static CONNECTION_GENERATION: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static EVENT_LOOP_ALIVE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+/// Token of the newest roster-reconciler window (connect / reconnect). A
+/// reconciler exits when this no longer matches its own token, so a
+/// reconnect's window can never run alongside a stale one.
+pub static ROSTER_RECONCILE_SEQ: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+/// Serializes roster writes (the connect-time snapshot assignment and every
+/// refresh_roster) across tasks and connection generations: a refresh
+/// computes its vectors outside the STATE lock, so without this gate an old
+/// generation's late refresh could land between a new connection's
+/// generation bump and its initial assignment.
+pub static ROSTER_SYNC: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 pub static SWIPE_DISCONNECT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 /// Set when the cpal output stream should be rebuilt (device route change,
 /// stream error, or explicit restart request from the Android side). The
@@ -323,7 +343,7 @@ pub struct TsRecordingFile {
     pub mixed: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TsChannel {
     pub id: u32,
     pub name: String,
@@ -470,7 +490,7 @@ pub struct TsPerm {
     pub skip: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TsClient {
     pub id: u32,
     pub nickname: String,

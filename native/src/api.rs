@@ -4,7 +4,8 @@ use crate::{
     CB_STATS, CLIENT_BUFFERS, CLOCK_REF, COMMAND_TX, FRAME_SIZE, FT_KIND_DOWNLOAD,
     FT_KIND_UPLOAD, FT_TASKS, FT_TASK_SEQ, IDENTITY_STASH, JITTER_STATS, MIC_RESTART_REQUESTED,
     MIN_SURPLUS_FRAMES, OUTPUT_PERIOD_MS, OUTPUT_RATE, OUTPUT_RESTART_REQUESTED, PLAYED_SAMPLES,
-    RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE, SFX_SUPPRESS_DISCONNECT, STATE,
+    RUNTIME, SFX_ARMED, SFX_DEFERRED_TEARDOWN, SFX_QUEUE,
+    SFX_SUPPRESS_DISCONNECT, STATE,
     SWIPE_DISCONNECT, TALKING_CLIENTS, TARGET_FRAMES_CEIL, TARGET_FRAMES_FLOOR, recording,
     ENTRY_SOUND_PLAYING,
     mic_pipeline::MIC_PIPELINE,
@@ -22,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use univox_core::connect::{ConnectOptions, InitialChannel};
 use univox_core::event::Event as UxEvent;
+use univox_core::event::EventStream;
 use univox_core::id::{ChannelId, MemberId};
 use univox_core::model::{
     ChannelOptions, ClientMoveReason, DisconnectReason, MemberLeftReason, MessageTarget,
@@ -329,37 +331,47 @@ fn refresh_from_book(book: &univox_core::Book) -> (Vec<TsChannel>, Vec<TsClient>
         }
     }
 
-    // Group caches are maintained by the servergrouplist/channelgrouplist
-    // execs (see refresh_group_lists), not by the book.
-    let cached_groups = STATE.lock().server_groups.clone();
-
-    {
+    // One STATE pass: write the server property snapshot (for the
+    // server-settings dialog prefill; a successful serveredit lands here on
+    // the next book event batch) and clone out the caches the per-channel /
+    // per-client mapping below needs. The roster reconciler runs this on a
+    // fixed cadence, so the old shape — one lock for the groups, one for
+    // the perms, one per client — would contend with Dart's poll on big
+    // rosters.
+    let (cached_groups, own_perms, client_volumes, client_positions) = {
         let mut state = STATE.lock();
-        // Server property snapshot for the server-settings dialog prefill;
-        // a successful serveredit lands here on the next book event batch.
-        state.server_name = server.name.clone();
-        state.server_max_clients = if server.member_limit > 0 {
-            Some(server.member_limit as u16)
-        } else {
-            None
-        };
-        // univox maps virtualserver_welcomemessage into Server.host_message
-        // (with the host message as fallback); the raw keys are preserved in
-        // extra — prefer them.
-        state.server_welcome_message = server
-            .extra
-            .get("virtualserver_welcomemessage")
-            .or_else(|| server.extra.get("virtualserver_hostmessage"))
-            .cloned()
-            .or_else(|| server.host_message.clone())
-            .unwrap_or_default();
-        state.server_has_password = server
-            .extra
-            .get("virtualserver_flag_password")
-            .map(|v| v == "1");
-    }
-
-    let own_perms = STATE.lock().own_perms.clone();
+        // A cleared mirror (univox wipes the book around a temporary
+        // disconnect) yields a default Server with an empty name — keep the
+        // last known server snapshot until the re-prime refills it.
+        if !server.name.is_empty() {
+            state.server_name = server.name.clone();
+            state.server_max_clients = if server.member_limit > 0 {
+                Some(server.member_limit as u16)
+            } else {
+                None
+            };
+            // univox maps virtualserver_welcomemessage into
+            // Server.host_message (with the host message as fallback); the
+            // raw keys are preserved in extra — prefer them.
+            state.server_welcome_message = server
+                .extra
+                .get("virtualserver_welcomemessage")
+                .or_else(|| server.extra.get("virtualserver_hostmessage"))
+                .cloned()
+                .or_else(|| server.host_message.clone())
+                .unwrap_or_default();
+            state.server_has_password = server
+                .extra
+                .get("virtualserver_flag_password")
+                .map(|v| v == "1");
+        }
+        (
+            state.server_groups.clone(),
+            state.own_perms.clone(),
+            state.client_volumes.clone(),
+            state.client_positions.clone(),
+        )
+    };
     let client_hints = hints_from_perms(&own_perms, &CLIENT_HINT_TABLE);
     let channel_hints = hints_from_perms(&own_perms, &CHANNEL_HINT_TABLE);
 
@@ -435,13 +447,13 @@ fn refresh_from_book(book: &univox_core::Book) -> (Vec<TsChannel>, Vec<TsClient>
                 Some("1") => 1u8,
                 _ => 0u8,
             };
-            // Volume + 2D position — one STATE lock for both (both keyed by UID).
+            // Volume + 2D position — from the caches cloned in the single
+            // STATE pass above (both keyed by UID).
             let (volume, pos) = {
-                let state = STATE.lock();
                 // Primary source: persisted dB value keyed by the user UID
                 let persisted = uid
                     .as_ref()
-                    .and_then(|uid| state.client_volumes.get(uid.as_str()).copied());
+                    .and_then(|uid| client_volumes.get(uid.as_str()).copied());
                 let volume = persisted.unwrap_or_else(|| {
                     // Fallback: convert linear gain from jitter buffer → dB
                     crate::CLIENT_BUFFERS
@@ -454,7 +466,7 @@ fn refresh_from_book(book: &univox_core::Book) -> (Vec<TsChannel>, Vec<TsClient>
                 });
                 let pos = uid
                     .as_ref()
-                    .and_then(|uid| state.client_positions.get(uid.as_str()).copied());
+                    .and_then(|uid| client_positions.get(uid.as_str()).copied());
                 (volume, pos)
             };
             TsClient {
@@ -731,6 +743,12 @@ async fn do_connect(
         .await
         .map_err(|e| format!("{e}"))?;
 
+    // Subscribe to the event bus BEFORE the initial snapshot: the enterview
+    // wave and any late channellist push emit bus events, and everything
+    // emitted before the event loop's subscription used to be dropped by
+    // the broadcast bus with no replay.
+    let events = session.events();
+
     let own_id = self_clid(&session) as u32;
 
     // Subscribe to every channel so roster updates stream in, then fill the
@@ -779,6 +797,11 @@ async fn do_connect(
     *COMMAND_TX.lock() = Some(cmd_tx);
 
     {
+        // Under the roster gate: a late refresh_roster of the previous
+        // connection computes its vectors outside the STATE lock, so it
+        // could otherwise interleave between the generation bump above and
+        // this assignment and resurrect the old roster.
+        let _roster_gate = crate::ROSTER_SYNC.lock();
         let mut state = STATE.lock();
         state.connecting = false;
         state.connected = true;
@@ -817,25 +840,26 @@ async fn do_connect(
 
     // Arm channel-event SFX after the connect-time burst (the subscribe-all
     // enterview wave) has flown by; everything before that must stay silent.
-    let settle_session = session.clone();
+    // Roster catch-up is the reconciler's job (see spawn_roster_reconciler)
+    // — this used to be a one-shot 2 s refresh, too early for a late push
+    // and forever too late to recover from an empty snapshot.
+    let settle_generation = generation;
     RUNTIME.spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        if STATE.lock().connected {
+        let current_gen = crate::CONNECTION_GENERATION.load(Ordering::SeqCst);
+        if current_gen == settle_generation && STATE.lock().connected {
             SFX_ARMED.store(true, Ordering::Relaxed);
             push_diag("sfx armed after connect settle");
-            // Late roster catch-up: the clientlist dump can be denied
-            // (plain-user permission) and the enterview wave can land
-            // before Dart's event subscription — without this re-push a
-            // quiet server never re-publishes the roster, leaving the own
-            // channel unknown in the UI until the first move.
-            let book = settle_session.book();
-            refresh_roster(&book);
         }
     });
 
+    // Watch the roster settle: fast reconciliation while the connect burst
+    // lands, then a slow drift-repair tick (see spawn_roster_reconciler).
+    spawn_roster_reconciler(session.clone(), generation);
+
     let loop_session = session.clone();
     RUNTIME.spawn(async move {
-        let handle = RUNTIME.spawn(event_loop(loop_session, cmd_rx, generation));
+        let handle = RUNTIME.spawn(event_loop(loop_session, events, cmd_rx, generation));
         let result = handle.catch_unwind().await;
         match result {
             Ok(_) => push_diag("event_loop: exited normally"),
@@ -861,9 +885,113 @@ async fn do_connect(
                 }
             }
         }
-        crate::EVENT_LOOP_ALIVE.store(false, Ordering::SeqCst);
+        // Only the current generation may clear the flag: a stale loop
+        // exiting after a newer one started would otherwise make
+        // ts_disconnect take the synchronous fallback path against the
+        // NEW session (its stash entry was already replaced).
+        if crate::CONNECTION_GENERATION.load(Ordering::SeqCst) == generation {
+            crate::EVENT_LOOP_ALIVE.store(false, Ordering::SeqCst);
+        }
     });
     Ok(())
+}
+
+// ─── Roster reconciliation ───────────────────────────────────────────
+
+/// One roster reconciliation tick: refresh STATE from the book mirror —
+/// deliberately event-free, because neither the login dumps nor voice
+/// traffic produce roster events, so a connect burst that landed late would
+/// otherwise leave the tree empty until the next move — and probe the
+/// server for dumps the mirror is still missing. Returns false when this
+/// connection's window is over.
+async fn reconcile_tick(
+    session: &Arc<Ts3Session>,
+    generation: u64,
+    probe_channels: &mut bool,
+    probe_clients: &mut bool,
+) -> bool {
+    if crate::CONNECTION_GENERATION.load(Ordering::SeqCst) != generation || !STATE.lock().connected
+    {
+        return false;
+    }
+    let book = session.book();
+    refresh_roster(&book, generation);
+
+    // Completeness: every TS3 server has at least one top-level channel,
+    // and our own client is part of the roster as soon as it is primed.
+    let (have_channels, have_self) = {
+        let state = STATE.lock();
+        (
+            state.channels.iter().any(|c| c.parent_id == 0),
+            state
+                .clients
+                .iter()
+                .any(|c| c.id == state.own_client_id && state.own_client_id != 0),
+        )
+    };
+    if have_channels && have_self {
+        *probe_channels = true;
+        *probe_clients = true;
+        return true;
+    }
+    // Probes go through the command queue (serial execs — a direct exec
+    // here would race the event loop's own commands) and fire once per
+    // window; the response rows reach the book through the pump and the
+    // next tick publishes them.
+    if !*probe_channels && !have_channels {
+        *probe_channels = true;
+        if try_send_cmd(Command::SyncRoster {
+            probe_channels: true,
+            probe_clients: false,
+        }) {
+            push_diag("roster: channels missing — probing channellist");
+        }
+    }
+    if !*probe_clients && !have_self {
+        *probe_clients = true;
+        if try_send_cmd(Command::SyncRoster {
+            probe_channels: false,
+            probe_clients: true,
+        }) {
+            push_diag("roster: own client missing — probing clientlist");
+        }
+    }
+    true
+}
+
+/// Event-independent roster reconciler: 500 ms ticks for the first 10 s
+/// after every connect/reconnect (the login burst can land in the book
+/// late), then one tick per 10 s as drift repair for lost events. Each
+/// superseded window (new connect/reconnect bumps ROSTER_RECONCILE_SEQ)
+/// retires itself on its next wake-up.
+fn spawn_roster_reconciler(session: Arc<Ts3Session>, generation: u64) {
+    let seq = crate::ROSTER_RECONCILE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    RUNTIME.spawn(async move {
+        let mut probe_channels = false;
+        let mut probe_clients = false;
+        // Fast phase: watch the connect/reconnect burst settle.
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if crate::ROSTER_RECONCILE_SEQ.load(Ordering::SeqCst) != seq
+                || !reconcile_tick(&session, generation, &mut probe_channels, &mut probe_clients)
+                    .await
+            {
+                return;
+            }
+        }
+        // Slow phase: drift repair — a lost roster event never self-heals
+        // on a quiet server. Cheap by construction: one mirror read, and
+        // refresh_roster only pushes to Dart on a real change.
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if crate::ROSTER_RECONCILE_SEQ.load(Ordering::SeqCst) != seq
+                || !reconcile_tick(&session, generation, &mut probe_channels, &mut probe_clients)
+                    .await
+            {
+                return;
+            }
+        }
+    });
 }
 
 // ─── Audio receive helpers ──────────────────────────────────────────
@@ -2271,14 +2399,56 @@ fn push_perm_op(token: &str, ok: bool, error: Option<String>) {
     });
 }
 
-/// Rebuilds STATE's roster from the book mirror and tells Dart. One event =
-/// one refresh; Dart's 200 ms poll coalesces the churn.
-fn refresh_roster(book: &univox_core::Book) {
+/// Installs `snapshot` into `current` unless it would destroy live data.
+/// Returns true when `current` changed. An empty snapshot never replaces a
+/// non-empty list: the mirror is briefly emptied while univox rebuilds it
+/// around a temporary disconnect (Book::clear), and on a quiet server that
+/// gap would otherwise persist until the next move event.
+fn apply_snapshot<T: PartialEq>(current: &mut Vec<T>, snapshot: Vec<T>) -> bool {
+    if snapshot.is_empty() && !current.is_empty() {
+        return false;
+    }
+    if *current == snapshot {
+        return false;
+    }
+    *current = snapshot;
+    true
+}
+
+/// Channel flavor of [apply_snapshot]: a snapshot without root channels is
+/// as useless as an empty one — every TS3 server has at least one top-level
+/// channel, so a rootless dump means the mirror is incomplete, and clients
+/// (rendered nested under channels in the UI) would all disappear.
+fn apply_channel_snapshot(current: &mut Vec<TsChannel>, snapshot: Vec<TsChannel>) -> bool {
+    if !snapshot.is_empty()
+        && !snapshot.iter().any(|c| c.parent_id == 0)
+        && current.iter().any(|c| c.parent_id == 0)
+    {
+        return false;
+    }
+    apply_snapshot(current, snapshot)
+}
+
+/// Rebuilds STATE's roster from the book mirror and tells Dart — only when
+/// something actually changed (the reconciler runs this on a fixed cadence;
+/// unconditional pushes would chatter Dart's poll). Gated on the connection
+/// generation so a stale task can never write a newer connection's state.
+fn refresh_roster(book: &univox_core::Book, generation: u64) {
+    // Serialized with the connect-time assignment (see ROSTER_SYNC): the
+    // generation check must be re-read under the same gate, otherwise a
+    // task that computed its snapshot before the bump could still win the
+    // race and install stale data after it.
+    let _gate = crate::ROSTER_SYNC.lock();
+    if crate::CONNECTION_GENERATION.load(Ordering::SeqCst) != generation {
+        return;
+    }
     let (ch, cl) = refresh_from_book(book);
     let mut state = STATE.lock();
-    state.channels = ch;
-    state.clients = cl;
-    state.pending_events.push_back(TsEvent::ChannelsUpdated {});
+    let ch_changed = apply_channel_snapshot(&mut state.channels, ch);
+    let cl_changed = apply_snapshot(&mut state.clients, cl);
+    if ch_changed || cl_changed {
+        state.pending_events.push_back(TsEvent::ChannelsUpdated {});
+    }
 }
 
 /// Voice packets from univox's raw sink: S2C (+ whisper, decoded like
@@ -2305,6 +2475,12 @@ async fn handle_univox_event(
     generation: u64,
 ) -> bool {
     if !STATE.lock().connected {
+        return false;
+    }
+    // An event queued by a previous connection can surface after the new
+    // connection bumped the generation and claimed STATE — the old session's
+    // book must never touch the new roster.
+    if crate::CONNECTION_GENERATION.load(Ordering::SeqCst) != generation {
         return false;
     }
     let own_client = self_clid(session);
@@ -2397,7 +2573,7 @@ async fn handle_univox_event(
             let entered_own =
                 member.channel_id.as_ref().and_then(|c| c.as_u64()) == own_channel;
             let reason = enter_view_reason(&member);
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
             if mid == own_client || !armed {
                 return false;
             }
@@ -2478,7 +2654,7 @@ async fn handle_univox_event(
                     }
                 }
             }
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
         }
         // Incremental client updates (mute/away/recording/talk-power
         // echoes). The row carries only the changed fields.
@@ -2486,7 +2662,7 @@ async fn handle_univox_event(
             let mid = member.id.as_u64().unwrap_or(0);
             let in_own =
                 member.channel_id.as_ref().and_then(|c| c.as_u64()) == own_channel;
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
             if !armed {
                 return false;
             }
@@ -2560,7 +2736,7 @@ async fn handle_univox_event(
                     None => (None, String::new()),
                 }
             };
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
             if mid == own_client {
                 // Self move: voluntary, forced by an admin, or a channel
                 // kick — live captures show reasonid 4 arriving on this very
@@ -2679,13 +2855,13 @@ async fn handle_univox_event(
             if armed {
                 push_sfx(SFX_CHANNEL_CREATED, "");
             }
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
         }
         UxEvent::ChannelUpdated { .. } => {
             if armed {
                 push_sfx(SFX_CHANNEL_EDITED, "");
             }
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
         }
         UxEvent::ChannelMoved { id, parent, .. } => {
             // Order-only moves are silent (previous behavior).
@@ -2702,16 +2878,23 @@ async fn handle_univox_event(
             if armed && prev_parent != Some(new_parent) {
                 push_sfx(SFX_CHANNEL_MOVED, "");
             }
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
         }
         UxEvent::ChannelDeleted { .. } => {
             if armed {
                 push_sfx(SFX_CHANNEL_DELETED, "");
             }
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
         }
         UxEvent::ServerUpdated { .. } => {
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
+        }
+        // The session just (re)primed its book with the login dumps. The
+        // dumps emit no roster events themselves — this is the deterministic
+        // moment to pull the mirror, covering a channellist push that landed
+        // after our connect-time snapshot and the post-reconnect re-prime.
+        UxEvent::RosterSynced => {
+            refresh_roster(&book, generation);
         }
         UxEvent::TemporarilyDisconnected { reason } => {
             // On reconnect the supervisor re-primes the whole roster as
@@ -2730,7 +2913,11 @@ async fn handle_univox_event(
             // possibly-new client id and re-arm after the burst.
             let own = self_clid(session) as u32;
             STATE.lock().own_client_id = own;
-            refresh_roster(&book);
+            refresh_roster(&book, generation);
+            // Restart the reconciliation window: the mirror was rebuilt and
+            // the enterview burst re-flies — watch it settle again (also
+            // retires any window the dropped connection left behind).
+            spawn_roster_reconciler(session.clone(), generation);
             // The supervisor replays its last `update_self` record, but that
             // record is replaced wholesale on every call — SetMuted followed
             // by SetAway leaves only the away fields in it. Re-apply the full
@@ -2839,19 +3026,26 @@ async fn do_disconnect(session: &Arc<Ts3Session>, generation: u64) {
 
 async fn event_loop(
     session: Arc<Ts3Session>,
+    mut events: EventStream,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
     generation: u64,
 ) {
     eprintln!("event_loop: started gen={}", generation);
     push_diag(&format!("event_loop: started (gen={})", generation));
     crate::EVENT_LOOP_ALIVE.store(true, Ordering::SeqCst);
-    let mut events = session.events();
+    // `events` arrives pre-subscribed — do_connect creates the stream right
+    // after the handshake so nothing the bus emitted during setup is lost.
     let mut voice_rx = session.conn().voice_sink_handle().subscribe();
     let mut recent = RecentClients::new();
     loop {
         // NOTE: no per-iteration cleanup of the "is talking" heartbeats here.
         // The maintenance task sweeps TALKING_CLIENTS on its 5s tick — this
         // loop runs once per voice packet and must stay cheap.
+        // A newer connection owns STATE now — stop draining this old
+        // session's events instead of writing them into the new roster.
+        if crate::CONNECTION_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
         if SWIPE_DISCONNECT.load(Ordering::SeqCst) {
             STATE.lock().disconnect_requested = true;
             SWIPE_DISCONNECT.store(false, Ordering::SeqCst);
@@ -3388,6 +3582,43 @@ async fn handle_command(
         Command::RefreshGroups => {
             refresh_group_lists(session).await;
             push_diag("perm: re-requested server/channel group lists");
+        }
+        Command::SyncRoster { probe_channels, probe_clients } => {
+            // Best-effort re-request of the dumps the mirror is still
+            // missing; the pump applies the response rows to the book and
+            // the next reconciler tick publishes them. Permission denials
+            // (plain guests) are expected — one diag line, no retry.
+            if probe_channels {
+                match session.exec(Ts3Command::new("channellist").opt("topic")).await {
+                    Ok(rows) => {
+                        push_diag(&format!("roster probe: channellist {} rows", rows.len()))
+                    }
+                    Err(e) => push_diag(&format!(
+                        "roster probe: channellist failed: {}",
+                        error_text(&e)
+                    )),
+                }
+            }
+            if probe_clients {
+                match session
+                    .exec(
+                        Ts3Command::new("clientlist")
+                            .opt("uid")
+                            .opt("away")
+                            .opt("voice")
+                            .opt("groups"),
+                    )
+                    .await
+                {
+                    Ok(rows) => {
+                        push_diag(&format!("roster probe: clientlist {} rows", rows.len()))
+                    }
+                    Err(e) => push_diag(&format!(
+                        "roster probe: clientlist failed: {}",
+                        error_text(&e)
+                    )),
+                }
+            }
         }
         Command::UsePrivilegeKey { token, op_token } => {
             // Redeem a privilege key after connecting — the same command the
@@ -5902,6 +6133,75 @@ pub extern "C" fn ts_discard_recording() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Roster snapshot guards ──────────────────────────────────────
+
+    /// Minimal TsChannel for the snapshot-guard tests (no Default derive —
+    /// the Dart-facing JSON contract is hand-written, all fields required).
+    fn channel(id: u32, parent: u32) -> TsChannel {
+        TsChannel {
+            id,
+            name: format!("ch{id}"),
+            parent_id: parent,
+            topic: String::new(),
+            has_password: false,
+            client_count: 0,
+            order: 0,
+            is_default: false,
+            permission_hints: 0,
+            needed_talk_power: 0,
+            max_clients: -1,
+            is_permanent: false,
+            is_semi_permanent: false,
+            description: String::new(),
+            max_family_clients: -1,
+            delete_delay: 0,
+        }
+    }
+
+    #[test]
+    fn apply_snapshot_rejects_empty_over_live_data() {
+        let mut current = vec![1, 2, 3];
+        assert!(
+            !apply_snapshot(&mut current, Vec::new()),
+            "empty snapshot must not destroy a live list"
+        );
+        assert_eq!(current, vec![1, 2, 3]);
+        assert!(
+            !apply_snapshot(&mut current, vec![1, 2, 3]),
+            "identical snapshot is not a change"
+        );
+        assert!(apply_snapshot(&mut current, vec![1, 2]));
+        assert_eq!(current, vec![1, 2]);
+        // Installing empty over an already-empty list is a no-op — nothing
+        // was destroyed, so no change is reported either.
+        let mut empty: Vec<u8> = Vec::new();
+        assert!(!apply_snapshot(&mut empty, Vec::new()));
+    }
+
+    #[test]
+    fn apply_channel_snapshot_requires_root_channels() {
+        let mut current = vec![channel(1, 0)];
+        // A rootless dump must not destroy the tree: clients render nested
+        // under channels, so a partial roster would hide every user.
+        assert!(!apply_channel_snapshot(
+            &mut current,
+            vec![channel(2, 1)]
+        ));
+        assert_eq!(current.len(), 1);
+        assert!(!apply_channel_snapshot(&mut current, Vec::new()));
+        assert_eq!(current.len(), 1);
+        assert!(apply_channel_snapshot(
+            &mut current,
+            vec![channel(1, 0), channel(2, 1)]
+        ));
+        assert_eq!(current.len(), 2);
+        // Once the current tree is empty itself, a rootless snapshot may
+        // still be installed — it is the best data available.
+        let mut empty: Vec<TsChannel> = Vec::new();
+        assert!(apply_channel_snapshot(&mut empty, vec![channel(3, 1)]));
+        assert_eq!(empty.len(), 1);
+    }
 
     // ─── Entry sound frame splitting ─────────────────────────────────
 

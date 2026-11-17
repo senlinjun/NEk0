@@ -12,9 +12,9 @@ crate-type = ["cdylib"]
 # = false` keeps out univox's `voice` feature (its audiopus codec) — Nek0
 # runs its own Opus via opus-rs, and two static libopus builds cannot link
 # into one cdylib (and audiopus_sys wants cmake on Android).
-univox-core = { git = "https://github.com/senlinjun/univox.git", rev = "13ab772e80f8fbc8205fadf3b24827d7c48a4944" }
-univox-ts3 = { git = "https://github.com/senlinjun/univox.git", rev = "13ab772e80f8fbc8205fadf3b24827d7c48a4944", default-features = false }
-univox-ts3-proto = { git = "https://github.com/senlinjun/univox.git", rev = "13ab772e80f8fbc8205fadf3b24827d7c48a4944" }
+univox-core = { git = "https://github.com/senlinjun/univox.git", rev = "3755ba03b1923530ec83301b8aac3b0154461f87" }
+univox-ts3 = { git = "https://github.com/senlinjun/univox.git", rev = "3755ba03b1923530ec83301b8aac3b0154461f87", default-features = false }
+univox-ts3-proto = { git = "https://github.com/senlinjun/univox.git", rev = "3755ba03b1923530ec83301b8aac3b0154461f87" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
